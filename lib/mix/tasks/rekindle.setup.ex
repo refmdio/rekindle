@@ -3,7 +3,7 @@ defmodule Mix.Tasks.Rekindle.Setup do
 
   use Mix.Task
 
-  alias Rekindle.{Config, Failure, Setup}
+  alias Rekindle.{Config, ConfigError, Failure, Setup}
   alias Rekindle.Toolchain.{Release, TargetInstaller}
 
   @impl Mix.Task
@@ -26,14 +26,37 @@ defmodule Mix.Tasks.Rekindle.Setup do
 
   defp map_config_error({:ok, project}), do: {:ok, project}
 
-  defp map_config_error({:error, errors}) do
-    {:error,
-     Failure.new!(
-       target: nil,
-       stage: :configuration,
-       code: List.first(errors).code,
-       message: List.first(errors).message
-     )}
+  defp map_config_error({:error, [%ConfigError{} = error | _errors]}),
+    do: {:error, config_failure(error)}
+
+  defp map_config_error({:error, _errors}),
+    do: {:error, fallback_config_failure()}
+
+  defp config_failure(error) do
+    code =
+      case Failure.stage_for(error.code) do
+        {:ok, :configuration} -> error.code
+        _ -> :config_invalid
+      end
+
+    case Failure.new(
+           target: nil,
+           stage: :configuration,
+           code: code,
+           message: error.message
+         ) do
+      {:ok, failure} -> failure
+      {:error, _reason} -> fallback_config_failure()
+    end
+  end
+
+  defp fallback_config_failure do
+    Failure.new!(
+      target: nil,
+      stage: :configuration,
+      code: :config_invalid,
+      message: "configuration admission failed"
+    )
   end
 
   defp ensure_target(target, config), do: TargetInstaller.ensure(target, config)

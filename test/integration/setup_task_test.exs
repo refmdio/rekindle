@@ -74,6 +74,39 @@ defmodule Rekindle.SetupTaskIntegrationTest do
                "target add --toolchain 1.95.0 wasm32-unknown-unknown\n"
   end
 
+  test "the real setup adapter closes every backend ConfigError family into exit 1", context do
+    cases = [
+      {:integer_out_of_range, %{"value" => 9_007_199_254_740_992}},
+      {:invalid_utf8, %{"value" => <<255>>}},
+      {:invalid_map_key, %{atom_key: true}},
+      {:non_nfc_key, %{"e\u0301" => true}},
+      {:unsupported_value, %{"value" => {:tuple}}},
+      {:backend_specific, %{"custom_error" => true}}
+    ]
+
+    for {family, options} <- cases,
+        argv <- [[], ["--json"]] do
+      Application.put_env(
+        :rekindle,
+        :rekindle_build,
+        external_build_config(__MODULE__.ConfigErrorBackend, options)
+      )
+
+      outcome = Mix.Tasks.Rekindle.Setup.run_outcome(argv)
+      assert outcome.exit_status == 1, inspect({family, argv, outcome})
+      assert outcome.value |> elem(1) |> Map.fetch!(:code) == :config_invalid
+      refute File.exists?(context.rustup_log)
+
+      if argv == ["--json"] do
+        assert outcome.stderr == ""
+        assert Jason.decode!(outcome.stdout)["failure"]["code"] == "config_invalid"
+      else
+        assert outcome.stdout == ""
+        assert outcome.stderr =~ "config_invalid"
+      end
+    end
+  end
+
   test "the public Mix task preserves semantic nonzero statuses through subprocess exit" do
     mix = System.find_executable("mix") || raise "mix executable is required"
 
@@ -132,6 +165,22 @@ defmodule Rekindle.SetupTaskIntegrationTest do
 
   defp dev_config do
     [schema: 1, enabled: true, targets: [:web], endpoint: __MODULE__.Endpoint]
+  end
+
+  defp external_build_config(module, options) do
+    [
+      schema: 1,
+      client: "crates/rekindle-toolchain",
+      targets: [
+        web: [
+          package: "rekindle_ui",
+          binary: "rekindle-web",
+          features: ["web"],
+          projection: [mode: :phoenix_static, root: "priv/static/rekindle"],
+          backend: [module: module, options: options]
+        ]
+      ]
+    ]
   end
 
   defp manifest!(root, helper) do
@@ -210,5 +259,29 @@ defmodule Rekindle.SetupTaskIntegrationTest do
   defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defmodule Endpoint do
+  end
+
+  defmodule ConfigErrorBackend do
+    @behaviour Rekindle.TargetBackend
+
+    @impl true
+    def backend_id, do: "setup-config-error-fixture"
+
+    @impl true
+    def backend_version, do: "1"
+
+    @impl true
+    def validate(_target, %{"custom_error" => true}) do
+      {:error,
+       [Rekindle.ConfigError.new([:backend, :options], :backend_specific, "custom error")]}
+    end
+
+    def validate(_target, options), do: {:ok, options}
+
+    @impl true
+    def plan(_context, _options), do: raise("not invoked")
+
+    @impl true
+    def finalize(_context, _options, _result), do: raise("not invoked")
   end
 end
