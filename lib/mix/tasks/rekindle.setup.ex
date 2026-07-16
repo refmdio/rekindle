@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Rekindle.Setup do
   use Mix.Task
 
   alias Rekindle.{Config, ConfigError, Failure, Setup}
-  alias Rekindle.Toolchain.{Release, TargetInstaller}
+  alias Rekindle.Toolchain.{Helper, Release, TargetInstaller}
 
   @impl Mix.Task
   def run(argv) do
@@ -63,5 +63,10 @@ defmodule Mix.Tasks.Rekindle.Setup do
 
   defp ensure_target(target, config), do: TargetInstaller.ensure(target, config)
 
-  defp ensure_helper(source_build?), do: Release.ensure(source_build?)
+  defp ensure_helper(source_build?) do
+    with {:ok, path} <- Release.ensure(source_build?),
+         :ok <- Helper.verify(path, timeout_ms: 5_000) do
+      {:ok, path}
+    end
+  end
 end

@@ -3,13 +3,18 @@ defmodule Rekindle.SetupTaskIntegrationTest do
 
   import ExUnit.CaptureIO
 
-  alias Rekindle.Toolchain.{Installer, Release}
+  alias Rekindle.Toolchain.{Helper, Installer, Release}
 
-  setup do
+  setup_all do
+    source = Path.expand("crates/rekindle-toolchain")
+    %{helper_bytes: build_helper_bytes!(source)}
+  end
+
+  setup context do
     root = temp_dir!()
     rustup = fake_rustup!(root)
     log = Path.join(root, "rustup.log")
-    helper = "preinstalled helper fixture"
+    helper = context.helper_bytes
     manifest = manifest!(root, helper)
 
     previous = %{
@@ -46,7 +51,7 @@ defmodule Rekindle.SetupTaskIntegrationTest do
       restore_system_env("XDG_CACHE_HOME", previous.cache)
     end)
 
-    {:ok, rustup_log: log}
+    {:ok, rustup_log: log, root: root, rustup: rustup, manifest: manifest, helper: helper}
   end
 
   test "the public setup task succeeds with a qualified rustup and preinstalled helper",
@@ -74,6 +79,53 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     assert File.read!(context.rustup_log) ==
              "toolchain install 1.95.0 --profile minimal\n" <>
                "target add --toolchain 1.95.0 wasm32-unknown-unknown\n"
+  end
+
+  test "checksum-valid incompatible helper fails before verified output", context do
+    incompatible = "#!/bin/sh\nexit 0\n"
+    manifest = manifest!(context.root, incompatible)
+    Application.put_env(:rekindle, :compatibility_manifest, manifest)
+
+    assert {:ok, _path} =
+             Release.ensure(false,
+               manifest_path: manifest,
+               cache_root: Path.join(context.root, "rekindle/helpers"),
+               fetcher: fn _url -> incompatible end
+             )
+
+    outcome = Mix.Tasks.Rekindle.Setup.run_outcome(["--target", "web"])
+    assert outcome.exit_status == 1
+    assert {:error, %{code: :helper_protocol_mismatch}} = outcome.value
+    refute outcome.stdout =~ "helper verified"
+    assert outcome.stderr =~ "helper_protocol_mismatch"
+  end
+
+  test "source-built and offline-cached real helpers both negotiate", context do
+    File.rm_rf!(Path.join(context.root, "rekindle/helpers"))
+    real_rustup = Path.join(System.user_home!(), ".cargo/bin/rustup")
+    System.put_env("REKINDLE_RUSTUP", real_rustup)
+
+    try do
+      outcome =
+        Mix.Tasks.Rekindle.Setup.run_outcome(
+          ["--source-build-helper"],
+          ensure_target: fn :web, _config -> {:ok, :verified} end
+        )
+
+      assert outcome.exit_status == 0, inspect(outcome)
+      assert outcome.stdout =~ "helper verified"
+
+      assert {:ok, helper} =
+               Release.ensure(false,
+                 manifest_path: context.manifest,
+                 cache_root: Path.join(context.root, "rekindle/helpers"),
+                 offline: true
+               )
+
+      assert :ok = Helper.verify(helper, timeout_ms: 5_000)
+    after
+      System.put_env("REKINDLE_RUSTUP", context.rustup)
+    end
   end
 
   test "the real setup adapter closes every backend ConfigError family into exit 1", context do
@@ -253,6 +305,28 @@ defmodule Rekindle.SetupTaskIntegrationTest do
 
     File.chmod!(path, 0o700)
     path
+  end
+
+  defp build_helper_bytes!(source) do
+    rustup = System.find_executable("rustup") || raise "rustup is required"
+
+    assert {_output, 0} =
+             System.cmd(
+               rustup,
+               [
+                 "run",
+                 "1.95.0",
+                 "cargo",
+                 "build",
+                 "--release",
+                 "--locked",
+                 "--manifest-path",
+                 Path.join(source, "Cargo.toml")
+               ],
+               stderr_to_stdout: true
+             )
+
+    File.read!(Path.join(source, "target/release/rekindle_toolchain"))
   end
 
   defp assert_semantic_exit_boundary do

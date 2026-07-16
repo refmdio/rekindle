@@ -1,6 +1,7 @@
 defmodule Rekindle.Toolchain.Helper do
   @moduledoc false
 
+  alias Rekindle.Failure
   alias Rekindle.Toolchain.{Exec, Executable, Frame, Handshake, Installer, Web}
 
   @compatibility %{
@@ -15,6 +16,26 @@ defmodule Rekindle.Toolchain.Helper do
 
   @spec compatibility() :: map()
   def compatibility, do: @compatibility
+
+  @spec verify(Path.t(), keyword()) :: :ok | {:error, Failure.t()}
+  def verify(executable, options \\ []) do
+    case start(executable, "web-v1", Keyword.put(options, :stderr_to_stdout, true)) do
+      {:ok, port, <<>>} ->
+        close(port)
+        :ok
+
+      {:ok, port, _unexpected} ->
+        close(port)
+        verification_failure()
+
+      _error ->
+        verification_failure()
+    end
+  rescue
+    _ -> verification_failure()
+  catch
+    _, _ -> verification_failure()
+  end
 
   @spec run_web(Path.t(), map(), Web.t(), keyword()) ::
           {:ok, map(), [map()]} | {:error, atom()}
@@ -49,7 +70,7 @@ defmodule Rekindle.Toolchain.Helper do
   defp start(executable, mode, options) do
     with {:ok, executable} <- Executable.qualify(executable),
          {:ok, port, handle} <-
-           Executable.open(executable, [mode], Keyword.put(options, :stderr_to_stdout, false)) do
+           Executable.open(executable, [mode], Keyword.put_new(options, :stderr_to_stdout, false)) do
       host = Installer.host() |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
       hello = Handshake.hello(mode, @compatibility, host)
 
@@ -294,6 +315,16 @@ defmodule Rekindle.Toolchain.Helper do
 
   defp deadline(options),
     do: monotonic_ms() + Keyword.get(options, :timeout_ms, 30_000)
+
+  defp verification_failure do
+    {:error,
+     Failure.new!(
+       target: nil,
+       stage: :compatibility,
+       code: :helper_protocol_mismatch,
+       message: "installed helper failed compatibility negotiation"
+     )}
+  end
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
