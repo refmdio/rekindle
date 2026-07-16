@@ -51,8 +51,9 @@ defmodule Rekindle.Toolchain.Web do
   function validateContext(context) {
     if (!exactObject(context, ["v", "generation_id", "artifact_id", "handoff"]) ||
         context.v !== 1 ||
-        !(context.generation_id === null || GENERATION_ID.test(context.generation_id)) ||
-        !ARTIFACT_ID.test(context.artifact_id) ||
+        !(context.generation_id === null ||
+          (typeof context.generation_id === "string" && GENERATION_ID.test(context.generation_id))) ||
+        typeof context.artifact_id !== "string" || !ARTIFACT_ID.test(context.artifact_id) ||
         !(context.handoff === null ||
           (exactObject(context.handoff, ["take", "register"]) &&
            typeof context.handoff.take === "function" &&

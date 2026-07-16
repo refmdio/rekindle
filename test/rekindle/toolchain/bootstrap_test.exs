@@ -62,7 +62,9 @@ defmodule Rekindle.Toolchain.BootstrapTest do
           "context_missing",
           "context_extra",
           "generation_invalid",
+          "generation_coercible",
           "artifact_invalid",
+          "artifact_coercible",
           "handoff_invalid",
           "no_body",
           "no_marker",
@@ -207,7 +209,13 @@ defmodule Rekindle.Toolchain.BootstrapTest do
     if (scenario === "context_missing") delete context.handoff;
     if (scenario === "context_extra") context.extra = true;
     if (scenario === "generation_invalid") context.generation_id = "ABC";
+    if (scenario === "generation_coercible") {
+      context.generation_id = {toString() { return process.env.GENERATION_ID; }};
+    }
     if (scenario === "artifact_invalid") context.artifact_id = "bad";
+    if (scenario === "artifact_coercible") {
+      context.artifact_id = {toString() { return process.env.ARTIFACT_ID; }};
+    }
     if (scenario === "handoff_invalid") context.handoff = {};
 
     const {start} = await import("./entry.js");
