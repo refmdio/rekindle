@@ -75,6 +75,33 @@ defmodule Rekindle.TargetBackendTest do
     def finalize(_context, _options, _result), do: :ok
   end
 
+  defmodule ErrorShapeBackend do
+    def backend_id, do: "invalid.error-shape"
+    def backend_version, do: "1"
+
+    def validate(_target, %{"case" => "improper_outer"}) do
+      {:error, [error([:backend]) | :improper_tail]}
+    end
+
+    def validate(_target, %{"case" => "oversized_outer"}) do
+      {:error, List.duplicate(error([:backend]), 129)}
+    end
+
+    def validate(_target, %{"case" => "improper_path"}) do
+      {:error, [error([:backend | :improper_tail])]}
+    end
+
+    def validate(_target, %{"case" => "oversized_path"}) do
+      {:error, [error(List.duplicate(:backend, 129))]}
+    end
+
+    def plan(_context, _options), do: :ok
+    def finalize(_context, _options, _result), do: :ok
+
+    defp error(path),
+      do: Rekindle.ConfigError.new(path, :config_invalid, "invalid backend configuration")
+  end
+
   test "admits an existing conforming module and normalized options" do
     assert {:ok, admission} = TargetBackend.admit(ValidBackend, :web, %{"answer" => 42})
     assert admission.module == ValidBackend
@@ -114,6 +141,19 @@ defmodule Rekindle.TargetBackendTest do
 
     assert {:error, [%ConfigError{path: [:backend, :options]}]} =
              TargetBackend.admit(InvalidValidateErrorsBackend, :web, %{})
+  end
+
+  test "rejects improper and oversized backend error collections before traversal" do
+    for shape <- ~w[improper_outer oversized_outer improper_path oversized_path] do
+      assert {:error,
+              [
+                %ConfigError{
+                  path: [:backend, :options],
+                  code: :config_invalid,
+                  message: "validate/2 returned invalid errors"
+                }
+              ]} = TargetBackend.admit(ErrorShapeBackend, :web, %{"case" => shape})
+    end
   end
 
   test "publishes the exact behaviour callback surface" do

@@ -132,6 +132,23 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     refute File.exists?(context.rustup_log)
   end
 
+  test "the public setup adapter closes malformed backend error lists before effects", context do
+    for shape <- ~w[improper_outer oversized_outer improper_path oversized_path] do
+      Application.put_env(
+        :rekindle,
+        :rekindle_build,
+        external_build_config(__MODULE__.ConfigErrorBackend, %{"error_shape" => shape})
+      )
+
+      outcome = Mix.Tasks.Rekindle.Setup.run_outcome([])
+      assert outcome.exit_status == 1
+      assert outcome.stdout == ""
+      assert outcome.stderr =~ "config_invalid"
+      refute outcome.stderr =~ "** ("
+      refute File.exists?(context.rustup_log)
+    end
+  end
+
   test "the public Mix task preserves semantic nonzero statuses through subprocess exit" do
     mix = System.find_executable("mix") || raise "mix executable is required"
 
@@ -301,6 +318,22 @@ defmodule Rekindle.SetupTaskIntegrationTest do
        [Rekindle.ConfigError.new([:backend, :options], :backend_specific, "custom error")]}
     end
 
+    def validate(_target, %{"error_shape" => "improper_outer"}) do
+      {:error, [error([:backend]) | :improper_tail]}
+    end
+
+    def validate(_target, %{"error_shape" => "oversized_outer"}) do
+      {:error, List.duplicate(error([:backend]), 129)}
+    end
+
+    def validate(_target, %{"error_shape" => "improper_path"}) do
+      {:error, [error([:backend | :improper_tail])]}
+    end
+
+    def validate(_target, %{"error_shape" => "oversized_path"}) do
+      {:error, [error(List.duplicate(:backend, 129))]}
+    end
+
     def validate(_target, options), do: {:ok, options}
 
     @impl true
@@ -308,5 +341,8 @@ defmodule Rekindle.SetupTaskIntegrationTest do
 
     @impl true
     def finalize(_context, _options, _result), do: raise("not invoked")
+
+    defp error(path),
+      do: Rekindle.ConfigError.new(path, :config_invalid, "invalid backend configuration")
   end
 end

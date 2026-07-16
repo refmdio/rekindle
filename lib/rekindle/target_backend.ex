@@ -19,6 +19,8 @@ defmodule Rekindle.TargetBackend do
   @max_plan_entries 1_024
   @max_plan_bytes 1_048_576
   @max_plan_path_bytes 4_096
+  @max_config_errors 128
+  @max_config_error_path 128
   @required_callbacks [backend_id: 0, backend_version: 0, validate: 2, plan: 2, finalize: 3]
 
   @callback backend_id() :: String.t()
@@ -209,9 +211,10 @@ defmodule Rekindle.TargetBackend do
   defp error(path, message), do: ConfigError.new(path, :config_invalid, message)
 
   defp validate_error_arm([%ConfigError{} | _] = errors) do
-    if Enum.all?(errors, &valid_config_error?/1),
-      do: {:error, errors},
-      else: {:error, error([:backend, :options], "validate/2 returned invalid errors")}
+    if proper_list_within?(errors, @max_config_errors) and
+         Enum.all?(errors, &valid_config_error?/1),
+       do: {:error, errors},
+       else: {:error, error([:backend, :options], "validate/2 returned invalid errors")}
   end
 
   defp validate_error_arm(_errors),
@@ -219,6 +222,7 @@ defmodule Rekindle.TargetBackend do
 
   defp valid_config_error?(%ConfigError{} = value) do
     value.contract_version == 1 and is_list(value.path) and
+      proper_list_within?(value.path, @max_config_error_path) and
       Enum.all?(value.path, &valid_path_segment?/1) and is_atom(value.code) and
       is_binary(value.message) and value.message != "" and String.valid?(value.message) and
       byte_size(value.message) <= 8_192
