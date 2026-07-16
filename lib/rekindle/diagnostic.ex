@@ -52,10 +52,15 @@ defmodule Rekindle.Diagnostic do
 
   @spec to_map(t()) :: map()
   def to_map(%__MODULE__{} = diagnostic) do
+    diagnostic = sanitize_for_sink(diagnostic)
+
     diagnostic
     |> Map.from_struct()
     |> Map.new(fn {key, value} -> {Atom.to_string(key), encode_atom(value)} end)
   end
+
+  @spec sanitize(t()) :: {:ok, t()} | {:error, Rekindle.ConfigError.t()}
+  def sanitize(%__MODULE__{} = diagnostic), do: diagnostic |> Map.from_struct() |> new()
 
   defp reject_unknown_keys(attributes) do
     case Map.keys(attributes) -- @allowed_keys do
@@ -134,6 +139,27 @@ defmodule Rekindle.Diagnostic do
 
   defp encode_atom(value) when is_atom(value) and not is_nil(value), do: Atom.to_string(value)
   defp encode_atom(value), do: value
+
+  defp sanitize_for_sink(diagnostic) do
+    case sanitize(diagnostic) do
+      {:ok, sanitized} ->
+        sanitized
+
+      {:error, _} ->
+        new!(
+          target: nil,
+          stage: :internal,
+          severity: :error,
+          code: :contract_violation,
+          message: "unsafe diagnostic payload"
+        )
+    end
+  end
+
+  defp new!(attributes) do
+    {:ok, diagnostic} = new(attributes)
+    diagnostic
+  end
 
   defp error(code, message) do
     {:error, Rekindle.ConfigError.new([:diagnostic], code, message)}

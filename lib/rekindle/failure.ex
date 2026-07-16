@@ -83,14 +83,13 @@ defmodule Rekindle.Failure do
          {:ok, expected_stage} <- fetch_stage(code),
          {:ok, attributes} <- sanitize_attributes(attributes),
          :ok <- validate_fields(attributes, expected_stage),
-         :ok <- validate_diagnostics(Map.get(attributes, :diagnostics, [])) do
+         {:ok, diagnostics} <- sanitize_diagnostics(Map.get(attributes, :diagnostics, [])) do
       {:ok,
        struct!(
          __MODULE__,
-         Map.merge(
-           %{contract_version: 1, diagnostics: [], retryable?: retryable?(code)},
-           attributes
-         )
+         %{contract_version: 1, diagnostics: [], retryable?: retryable?(code)}
+         |> Map.merge(attributes)
+         |> Map.put(:diagnostics, diagnostics)
        )}
     end
   rescue
@@ -107,6 +106,8 @@ defmodule Rekindle.Failure do
 
   @spec to_map(t()) :: map()
   def to_map(%__MODULE__{} = failure) do
+    failure = sanitize_for_sink(failure)
+
     %{
       "contract_version" => failure.contract_version,
       "target" => encode_atom(failure.target),
@@ -123,6 +124,7 @@ defmodule Rekindle.Failure do
 
   @spec render(t()) :: String.t()
   def render(%__MODULE__{} = failure) do
+    failure = sanitize_for_sink(failure)
     target = if failure.target, do: "[#{failure.target}] ", else: ""
     "#{target}#{failure.code}: #{failure.message}"
   end
@@ -157,15 +159,24 @@ defmodule Rekindle.Failure do
     end
   end
 
-  defp validate_diagnostics(diagnostics) when is_list(diagnostics) do
-    if Enum.all?(diagnostics, &match?(%Diagnostic{}, &1)) do
-      :ok
-    else
-      error(:config_invalid, "failure diagnostics must use Rekindle.Diagnostic")
+  defp sanitize_diagnostics(diagnostics) when is_list(diagnostics) do
+    Enum.reduce_while(diagnostics, {:ok, []}, fn
+      %Diagnostic{} = diagnostic, {:ok, sanitized} ->
+        case Diagnostic.sanitize(diagnostic) do
+          {:ok, value} -> {:cont, {:ok, [value | sanitized]}}
+          {:error, _} -> {:halt, error(:config_invalid, "failure diagnostic is unsafe")}
+        end
+
+      _diagnostic, _acc ->
+        {:halt, error(:config_invalid, "failure diagnostics must use Rekindle.Diagnostic")}
+    end)
+    |> case do
+      {:ok, sanitized} -> {:ok, Enum.reverse(sanitized)}
+      {:error, _} = failure -> failure
     end
   end
 
-  defp validate_diagnostics(_diagnostics) do
+  defp sanitize_diagnostics(_diagnostics) do
     error(:config_invalid, "failure diagnostics must be a list")
   end
 
@@ -182,6 +193,21 @@ defmodule Rekindle.Failure do
 
   defp encode_atom(value) when is_atom(value) and not is_nil(value), do: Atom.to_string(value)
   defp encode_atom(value), do: value
+
+  defp sanitize_for_sink(failure) do
+    case sanitize(failure) do
+      {:ok, sanitized} ->
+        sanitized
+
+      {:error, _} ->
+        new!(
+          target: nil,
+          stage: :internal,
+          code: :contract_violation,
+          message: "unsafe failure payload"
+        )
+    end
+  end
 
   defp error(code, message), do: {:error, ConfigError.new([:failure], code, message)}
 end

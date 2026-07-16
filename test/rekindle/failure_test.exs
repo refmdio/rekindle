@@ -179,4 +179,45 @@ defmodule Rekindle.FailureTest do
                rendered: "** (RuntimeError) leaked"
              )
   end
+
+  test "direct sinks re-sanitize mutated diagnostics and preserve UTF-8 bounds" do
+    previous = Application.get_env(:rekindle, :redact_values)
+    Application.put_env(:rekindle, :redact_values, ["sink-secret"])
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:rekindle, :redact_values, previous),
+        else: Application.delete_env(:rekindle, :redact_values)
+    end)
+
+    {:ok, diagnostic} =
+      Diagnostic.new(
+        target: :web,
+        stage: :execution,
+        severity: :error,
+        code: :cargo_failed,
+        message: "safe"
+      )
+
+    mutated = %{diagnostic | message: "sink-secret in /home/user/private.rs"}
+
+    {:ok, failure} =
+      Failure.new(
+        target: :web,
+        stage: :execution,
+        code: :cargo_failed,
+        message: String.duplicate("界", 3_000),
+        diagnostics: [mutated]
+      )
+
+    encoded = Jason.encode!(Failure.to_map(failure))
+    assert String.valid?(failure.message)
+    assert byte_size(failure.message) <= 8_192
+    refute encoded =~ "sink-secret"
+    refute encoded =~ "/home/user"
+
+    directly_mutated = %{failure | diagnostics: [%{diagnostic | message: <<255>>}]}
+    refute Failure.render(directly_mutated) =~ <<255>>
+    refute Jason.encode!(Failure.to_map(directly_mutated)) =~ <<255>>
+  end
 end

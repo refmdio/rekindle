@@ -50,9 +50,24 @@ defmodule Rekindle.Redactor do
       |> String.replace(@windows_path, "<redacted-path>")
       |> String.replace(@unix_path, "<redacted-path>")
 
-    if byte_size(sanitized) <= @max_public,
-      do: {:ok, sanitized},
-      else: {:ok, binary_part(sanitized, 0, @max_public - 16) <> "…<truncated>"}
+    if byte_size(sanitized) <= @max_public do
+      {:ok, sanitized}
+    else
+      suffix = "…<truncated>"
+      {:ok, utf8_prefix(sanitized, @max_public - byte_size(suffix)) <> suffix}
+    end
+  end
+
+  defp utf8_prefix(value, bytes) do
+    value
+    |> binary_part(0, bytes)
+    |> trim_invalid_suffix()
+  end
+
+  defp trim_invalid_suffix(value) do
+    if String.valid?(value),
+      do: value,
+      else: value |> binary_part(0, byte_size(value) - 1) |> trim_invalid_suffix()
   end
 
   defp error(message), do: {:error, ConfigError.new([:public_text], :config_invalid, message)}
