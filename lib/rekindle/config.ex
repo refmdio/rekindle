@@ -643,15 +643,7 @@ defmodule Rekindle.Config do
         :ok
 
       is_list(policy) ->
-        normalized_policy =
-          Enum.flat_map(policy, fn origin ->
-            case normalize_origin(origin) do
-              {:ok, value} -> [value]
-              :error -> []
-            end
-          end)
-
-        if Enum.any?(origins, &(&1 in normalized_policy)),
+        if Enum.any?(origins, fn origin -> Enum.any?(policy, &policy_allows?(&1, origin)) end),
           do: :ok,
           else:
             error(
@@ -668,6 +660,31 @@ defmodule Rekindle.Config do
         )
     end
   end
+
+  defp policy_allows?(pattern, origin) when is_binary(pattern) do
+    origin_uri = URI.parse(origin)
+    scheme_optional? = String.starts_with?(pattern, "//")
+    policy_uri = URI.parse(if(scheme_optional?, do: "http:" <> pattern, else: pattern))
+    policy_host = String.downcase(policy_uri.host || "")
+    origin_host = String.downcase(origin_uri.host || "")
+
+    host_matches? =
+      if String.starts_with?(policy_host, "*.") do
+        suffix = String.trim_leading(policy_host, "*")
+        String.ends_with?(origin_host, suffix) and origin_host != String.trim_leading(suffix, ".")
+      else
+        origin_host == policy_host
+      end
+
+    scheme_matches? =
+      scheme_optional? or String.downcase(policy_uri.scheme || "") == origin_uri.scheme
+
+    explicit_port? = Regex.match?(~r/:\d+\z/, pattern)
+    port_matches? = not explicit_port? or policy_uri.port == origin_uri.port
+    host_matches? and scheme_matches? and port_matches?
+  end
+
+  defp policy_allows?(_pattern, _origin), do: false
 
   defp validate_web_rust_target(
          %{backend: :canonical, rust_target: "wasm32-unknown-unknown"},
@@ -751,10 +768,15 @@ defmodule Rekindle.Config do
     project_root = Path.expand(project_root)
 
     unsafe_root? =
-      case File.lstat(project_root) do
-        {:ok, %{type: :directory}} -> false
-        _ -> true
-      end
+      project_root
+      |> absolute_components()
+      |> Enum.any?(fn path ->
+        case File.lstat(path) do
+          {:ok, %{type: :symlink}} -> true
+          {:ok, _stat} -> false
+          {:error, _} -> true
+        end
+      end)
 
     unsafe_child? =
       Enum.any?(paths, fn relative ->
@@ -772,6 +794,23 @@ defmodule Rekindle.Config do
     if unsafe_root? or unsafe_child?,
       do: error([:rekindle_build], :path_invalid, "configured root traverses a symlink"),
       else: :ok
+  end
+
+  defp absolute_components(path) do
+    path
+    |> Path.split()
+    |> Enum.reduce({[], nil}, fn
+      "/", {paths, _current} ->
+        {["/" | paths], "/"}
+
+      segment, {paths, current} ->
+        next =
+          if current in [nil, "/"], do: Path.join("/", segment), else: Path.join(current, segment)
+
+        {[next | paths], next}
+    end)
+    |> elem(0)
+    |> Enum.reverse()
   end
 
   defp overlap?(left, right),

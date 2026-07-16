@@ -261,6 +261,19 @@ defmodule Rekindle.ConfigTest do
       :path_invalid
     )
 
+    ancestor_link =
+      Path.join(System.tmp_dir!(), "rekindle-ancestor-#{System.unique_integer([:positive])}")
+
+    nested_root = Path.join(ancestor_link, "project")
+    File.mkdir_p!(Path.join(real_root, "project"))
+    File.ln_s!(real_root, ancestor_link)
+    on_exit(fn -> File.rm(ancestor_link) end)
+
+    assert_error(
+      Config.normalize(:demo_app, web_build(), web_dev(), project_root: nested_root),
+      :path_invalid
+    )
+
     collision =
       web_build()
       |> Keyword.put(:targets, web_build()[:targets] ++ desktop_build()[:targets])
@@ -307,6 +320,19 @@ defmodule Rekindle.ConfigTest do
       ),
       :config_invalid
     )
+
+    Application.put_env(:demo_app, Endpoint, check_origin: ["//*.example.com"])
+
+    assert {:ok, wildcard_project} =
+             Config.normalize(:demo_app, web_build(),
+               schema: 1,
+               enabled: true,
+               targets: [:web],
+               endpoint: Endpoint,
+               accepted_origins: ["https://app.example.com"]
+             )
+
+    assert wildcard_project.dev.accepted_origins == ["https://app.example.com"]
   end
 
   defp web_build do
