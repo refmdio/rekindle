@@ -109,9 +109,10 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     end
 
     Application.delete_env(:rekindle, :rekindle_build)
-    Application.put_env(:rekindle, :redact_values, :malformed)
 
-    for argv <- [[], ["--json"]] do
+    for malformed <- [:malformed, ["a" | :bad]],
+        argv <- [[], ["--json"]] do
+      Application.put_env(:rekindle, :redact_values, malformed)
       outcome = Mix.Tasks.Rekindle.Setup.run_outcome(argv)
       assert outcome.exit_status == 1
       assert outcome.value |> elem(1) |> Map.fetch!(:code) == :config_missing

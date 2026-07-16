@@ -59,10 +59,14 @@ defmodule Rekindle.Redactor do
 
   defp configured_values do
     case Application.get_env(:rekindle, :redact_values, []) do
-      values when is_list(values) -> values
+      values when is_list(values) -> if proper_list?(values), do: values, else: []
       _malformed -> []
     end
   end
+
+  defp proper_list?([]), do: true
+  defp proper_list?([_value | rest]), do: proper_list?(rest)
+  defp proper_list?(_improper_tail), do: false
 
   defp utf8_prefix(value, bytes) do
     value
