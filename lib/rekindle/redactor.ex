@@ -42,8 +42,7 @@ defmodule Rekindle.Redactor do
 
   defp redact(value) do
     sanitized =
-      :rekindle
-      |> Application.get_env(:redact_values, [])
+      configured_values()
       |> Enum.filter(&(is_binary(&1) and &1 != ""))
       |> Enum.sort_by(&byte_size/1, :desc)
       |> Enum.reduce(value, &String.replace(&2, &1, "<redacted>"))
@@ -55,6 +54,13 @@ defmodule Rekindle.Redactor do
     else
       suffix = "…<truncated>"
       {:ok, utf8_prefix(sanitized, @max_public - byte_size(suffix)) <> suffix}
+    end
+  end
+
+  defp configured_values do
+    case Application.get_env(:rekindle, :redact_values, []) do
+      values when is_list(values) -> values
+      _malformed -> []
     end
   end
 

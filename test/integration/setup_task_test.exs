@@ -16,6 +16,7 @@ defmodule Rekindle.SetupTaskIntegrationTest do
       build: Application.get_env(:rekindle, :rekindle_build),
       dev: Application.get_env(:rekindle, :rekindle_dev),
       manifest: Application.get_env(:rekindle, :compatibility_manifest),
+      redact_values: Application.get_env(:rekindle, :redact_values),
       rustup: System.get_env("REKINDLE_RUSTUP"),
       rustup_log: System.get_env("REKINDLE_RUSTUP_LOG"),
       cache: System.get_env("XDG_CACHE_HOME")
@@ -39,6 +40,7 @@ defmodule Rekindle.SetupTaskIntegrationTest do
       restore_app_env(:rekindle_build, previous.build)
       restore_app_env(:rekindle_dev, previous.dev)
       restore_app_env(:compatibility_manifest, previous.manifest)
+      restore_app_env(:redact_values, previous.redact_values)
       restore_system_env("REKINDLE_RUSTUP", previous.rustup)
       restore_system_env("REKINDLE_RUSTUP_LOG", previous.rustup_log)
       restore_system_env("XDG_CACHE_HOME", previous.cache)
@@ -103,6 +105,21 @@ defmodule Rekindle.SetupTaskIntegrationTest do
       else
         assert outcome.stdout == ""
         assert outcome.stderr =~ "config_invalid"
+      end
+    end
+
+    Application.delete_env(:rekindle, :rekindle_build)
+    Application.put_env(:rekindle, :redact_values, :malformed)
+
+    for argv <- [[], ["--json"]] do
+      outcome = Mix.Tasks.Rekindle.Setup.run_outcome(argv)
+      assert outcome.exit_status == 1
+      assert outcome.value |> elem(1) |> Map.fetch!(:code) == :config_missing
+
+      if argv == ["--json"] do
+        assert Jason.decode!(outcome.stdout)["failure"]["code"] == "config_missing"
+      else
+        assert outcome.stderr =~ "config_missing"
       end
     end
   end

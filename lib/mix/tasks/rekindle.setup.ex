@@ -51,12 +51,14 @@ defmodule Mix.Tasks.Rekindle.Setup do
   end
 
   defp fallback_config_failure do
-    Failure.new!(
+    %Failure{
       target: nil,
       stage: :configuration,
       code: :config_invalid,
-      message: "configuration admission failed"
-    )
+      message: "configuration admission failed",
+      diagnostics: [],
+      retryable?: false
+    }
   end
 
   defp ensure_target(target, config), do: TargetInstaller.ensure(target, config)
