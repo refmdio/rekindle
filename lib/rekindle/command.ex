@@ -165,20 +165,19 @@ defmodule Rekindle.Command do
 
   defp drop_option_value([], _type), do: []
 
-  defp drop_option_value([value | tail] = values, _type) do
-    if separated_option_value?(value), do: tail, else: values
+  defp drop_option_value([value | tail] = values, type) do
+    if separated_option_value?(value, type), do: tail, else: values
   end
 
-  defp separated_option_value?("-"), do: true
+  defp separated_option_value?("-", type) when type in [:float, :integer, :keep, :string],
+    do: true
 
-  defp separated_option_value?("-" <> _rest = value) do
-    case Float.parse(value) do
-      {_number, ""} -> true
-      _ -> false
-    end
-  end
+  defp separated_option_value?("-" <> <<digit, _rest::binary>>, type)
+       when digit in ?0..?9 and type in [:float, :integer, :keep, :string],
+       do: true
 
-  defp separated_option_value?(_value), do: true
+  defp separated_option_value?("-" <> _rest, _type), do: false
+  defp separated_option_value?(_value, _type), do: true
 
   defp execute(command, invocation, handler) do
     case handler.(invocation) do

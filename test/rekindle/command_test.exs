@@ -125,6 +125,26 @@ defmodule Rekindle.CommandTest do
     end
   end
 
+  test "preserves separated string values beginning with a hyphen and digit" do
+    parent = self()
+    grammar = [switches: [value: :string], aliases: [v: :value], positionals: 0]
+
+    for {argv, expected} <- [
+          {["--value", "-0x1"], "-0x1"},
+          {["-v", "-1foo"], "-1foo"},
+          {["--value", "-1.2foo"], "-1.2foo"}
+        ] do
+      outcome =
+        Command.run("rekindle.example", argv, grammar, fn invocation ->
+          send(parent, {:value, invocation.options.value})
+          {:ok, %{}}
+        end)
+
+      assert outcome.exit_status == 0, inspect(argv)
+      assert_receive {:value, ^expected}
+    end
+  end
+
   test "human success uses stdout and expected failure uses stderr" do
     success =
       Command.run("rekindle.example", ["web"], @grammar, fn _ ->
