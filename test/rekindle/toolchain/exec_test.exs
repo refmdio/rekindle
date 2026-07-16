@@ -21,6 +21,7 @@ defmodule Rekindle.Toolchain.ExecTest do
              )
 
     assert state.request_id == @request
+    assert state.output_bytes_per_stream == 16_777_216
     assert header["executable"] == %{"kind" => "path", "value" => "/usr/bin/printf"}
     assert header["argv"] == ["%s", "hello world"]
     assert header["env_mode"] == "replace"
@@ -86,6 +87,30 @@ defmodule Rekindle.Toolchain.ExecTest do
                  cwd: "/tmp",
                  terminate_grace_ms: terminate,
                  kill_grace_ms: kill
+               )
+    end
+  end
+
+  test "keeps output capture policy in core state without changing the spawn frame" do
+    for limit <- [1_048_576, 16_777_216, 268_435_456] do
+      assert {:ok, header, state} =
+               Exec.spawn_request(
+                 request_id: @request,
+                 executable: "/usr/bin/true",
+                 cwd: "/tmp",
+                 output_bytes_per_stream: limit
+               )
+
+      assert state.output_bytes_per_stream == limit
+      refute Map.has_key?(header, "output_bytes_per_stream")
+    end
+
+    for limit <- [1_048_575, 268_435_457, 1_048_576.0, nil] do
+      assert {:error, :invalid_spawn} =
+               Exec.spawn_request(
+                 executable: "/usr/bin/true",
+                 cwd: "/tmp",
+                 output_bytes_per_stream: limit
                )
     end
   end

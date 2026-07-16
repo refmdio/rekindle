@@ -119,13 +119,15 @@ defmodule Rekindle.Toolchain.Helper do
        ) do
     case next_frame(port, buffer, deadline) do
       {:ok, header, payload, remaining} ->
+        captured = captured_payload(state, header, payload)
+
         case Exec.accept(state, header, payload) do
           {:ok, state} ->
             hook_called? =
               run_started_hook(started_hook, hook_called?, port, header, state)
 
-            stdout = if header["type"] == "stdout", do: stdout <> payload, else: stdout
-            stderr = if header["type"] == "stderr", do: stderr <> payload, else: stderr
+            stdout = if header["type"] == "stdout", do: stdout <> captured, else: stdout
+            stderr = if header["type"] == "stderr", do: stderr <> captured, else: stderr
 
             receive_exec(
               port,
@@ -140,7 +142,9 @@ defmodule Rekindle.Toolchain.Helper do
               hook_called?
             )
 
-          {:terminal, terminal, _state} ->
+          {:terminal, terminal, state} ->
+            terminal = captured_terminal(terminal, state, stdout, stderr)
+
             finish(port, remaining, monotonic_ms() + cleanup_timeout, fn ->
               {:ok, terminal, stdout, stderr}
             end)
@@ -184,6 +188,32 @@ defmodule Rekindle.Toolchain.Helper do
   end
 
   defp run_started_hook(_hook, called?, _port, _header, _state), do: called?
+
+  defp captured_payload(state, %{"type" => "stdout"}, payload),
+    do: retain(payload, state.stdout_bytes, state.output_bytes_per_stream)
+
+  defp captured_payload(state, %{"type" => "stderr"}, payload),
+    do: retain(payload, state.stderr_bytes, state.output_bytes_per_stream)
+
+  defp captured_payload(_state, _header, _payload), do: <<>>
+
+  defp retain(payload, received, limit) do
+    kept = min(byte_size(payload), max(limit - received, 0))
+    if kept == 0, do: <<>>, else: binary_part(payload, 0, kept)
+  end
+
+  defp captured_terminal(terminal, state, stdout, stderr) do
+    stdout_bytes = byte_size(stdout)
+    stderr_bytes = byte_size(stderr)
+
+    %{
+      terminal
+      | stdout_bytes: stdout_bytes,
+        stderr_bytes: stderr_bytes,
+        discarded_stdout: terminal.discarded_stdout + max(state.stdout_bytes - stdout_bytes, 0),
+        discarded_stderr: terminal.discarded_stderr + max(state.stderr_bytes - stderr_bytes, 0)
+    }
+  end
 
   defp revalidate_web_result(_operation, %{"type" => "operation_error"}), do: :ok
 

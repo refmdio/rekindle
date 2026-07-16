@@ -284,7 +284,8 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
                argv: ["-c", "1100000", "/dev/zero"],
                cwd: System.tmp_dir!(),
                terminate_grace_ms: 100,
-               kill_grace_ms: 100
+               kill_grace_ms: 100,
+               output_bytes_per_stream: 1_048_576
              )
 
     assert {:ok, terminal, stdout, ""} =
@@ -294,6 +295,53 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     assert terminal.stdout_bytes == 1_048_576
     assert terminal.discarded_stdout == 51_424
     assert terminal.cleanup == :confirmed
+  end
+
+  test "exec-v1 applies independent configured stream limits at equality and overflow", %{
+    helper: helper
+  } do
+    root = temp_root("exec-output-limits")
+    executable = Path.join(root, "emit")
+    File.mkdir_p!(root)
+
+    File.write!(
+      executable,
+      "#!/bin/sh\n/usr/bin/head -c \"$1\" /dev/zero\n/usr/bin/head -c \"$1\" /dev/zero >&2\n"
+    )
+
+    File.chmod!(executable, 0o700)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    for {limit, extra} <- [
+          {1_048_576, 0},
+          {1_048_576, 1},
+          {16_777_216, 0},
+          {16_777_216, 1}
+        ] do
+      emitted = limit + extra
+
+      assert {:ok, spawn, state} =
+               Exec.spawn_request(
+                 request_id: @request,
+                 executable: executable,
+                 argv: [Integer.to_string(emitted)],
+                 cwd: root,
+                 terminate_grace_ms: 100,
+                 kill_grace_ms: 100,
+                 output_bytes_per_stream: limit
+               )
+
+      assert {:ok, terminal, stdout, stderr} =
+               Helper.run_exec(helper, spawn, state, timeout_ms: 15_000)
+
+      assert byte_size(stdout) == limit
+      assert byte_size(stderr) == limit
+      assert terminal.stdout_bytes == limit
+      assert terminal.stderr_bytes == limit
+      assert terminal.discarded_stdout == extra
+      assert terminal.discarded_stderr == extra
+      assert terminal.cleanup == :confirmed
+    end
   end
 
   test "the real helper admits the exact hello schema and exposes every mismatch class", %{

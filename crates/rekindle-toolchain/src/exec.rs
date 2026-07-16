@@ -36,7 +36,7 @@ struct ExitReport<'a> {
     discarded_stderr: u64,
 }
 
-const MAX_STREAM_BYTES: u64 = 1_048_576;
+const MAX_STREAM_BYTES: u64 = 268_435_456;
 const MAX_GRACE_MS: u64 = 30_000;
 const MIN_KILL_GRACE_MS: u64 = 100;
 
@@ -447,7 +447,7 @@ fn milliseconds_in(value: &Value, minimum: u64, maximum: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_spawn;
+    use super::{MAX_STREAM_BYTES, validate_spawn};
     use serde_json::{Value, json};
 
     #[test]
@@ -468,6 +468,11 @@ mod tests {
         ] {
             assert!(validate_spawn(&spawn(terminate, kill)).is_err());
         }
+    }
+
+    #[test]
+    fn drains_up_to_the_configured_hard_capture_maximum() {
+        assert_eq!(MAX_STREAM_BYTES, 268_435_456);
     }
 
     fn spawn(terminate: Value, kill: Value) -> Value {

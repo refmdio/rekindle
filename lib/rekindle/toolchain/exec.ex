@@ -8,6 +8,7 @@ defmodule Rekindle.Toolchain.Exec do
 
   defstruct request_id: nil,
             phase: :awaiting_started,
+            output_bytes_per_stream: 16_777_216,
             pid: nil,
             process_group: nil,
             stdout_sequence: 0,
@@ -31,6 +32,7 @@ defmodule Rekindle.Toolchain.Exec do
     env_unset = Keyword.get(options, :env_unset, [])
     terminate_grace = Keyword.get(options, :terminate_grace_ms, 3_000)
     kill_grace = Keyword.get(options, :kill_grace_ms, 2_000)
+    output_bytes = Keyword.get(options, :output_bytes_per_stream, 16_777_216)
 
     with :ok <- request_id(request_id),
          :ok <- absolute(executable),
@@ -41,7 +43,8 @@ defmodule Rekindle.Toolchain.Exec do
          {:ok, env_unset} <- env_unset(env_unset),
          true <- MapSet.disjoint?(MapSet.new(env_set, &elem(&1, 0)), MapSet.new(env_unset)),
          true <- integer_between?(terminate_grace, 0, 30_000),
-         true <- integer_between?(kill_grace, 100, 30_000) do
+         true <- integer_between?(kill_grace, 100, 30_000),
+         true <- integer_between?(output_bytes, 1_048_576, 268_435_456) do
       header = %{
         "v" => 1,
         "type" => "spawn",
@@ -57,7 +60,7 @@ defmodule Rekindle.Toolchain.Exec do
         "kill_grace_ms" => kill_grace
       }
 
-      {:ok, header, %__MODULE__{request_id: request_id}}
+      {:ok, header, %__MODULE__{request_id: request_id, output_bytes_per_stream: output_bytes}}
     else
       _ -> {:error, :invalid_spawn}
     end
