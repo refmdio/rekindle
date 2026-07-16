@@ -244,6 +244,23 @@ defmodule Rekindle.ConfigTest do
       :path_invalid
     )
 
+    real_root =
+      Path.join(System.tmp_dir!(), "rekindle-real-#{System.unique_integer([:positive])}")
+
+    linked_root = real_root <> "-link"
+    File.mkdir_p!(real_root)
+    File.ln_s!(real_root, linked_root)
+
+    on_exit(fn ->
+      File.rm_rf!(real_root)
+      File.rm(linked_root)
+    end)
+
+    assert_error(
+      Config.normalize(:demo_app, web_build(), web_dev(), project_root: linked_root),
+      :path_invalid
+    )
+
     collision =
       web_build()
       |> Keyword.put(:targets, web_build()[:targets] ++ desktop_build()[:targets])
@@ -274,7 +291,7 @@ defmodule Rekindle.ConfigTest do
       enabled: true,
       targets: [:web],
       endpoint: Endpoint,
-      accepted_origins: ["https://allowed.example"]
+      accepted_origins: ["HTTPS://ALLOWED.EXAMPLE:443"]
     ]
 
     assert {:ok, project} = Config.normalize(:demo_app, web_build(), dev)

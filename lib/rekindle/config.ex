@@ -577,8 +577,7 @@ defmodule Rekindle.Config do
   defp origins(value, targets, endpoint, otp_app, path) when is_list(value) do
     if :web in targets do
       with :ok <- nonempty(value, path ++ [:accepted_origins]),
-           true <- Enum.all?(value, &valid_origin?/1),
-           {:ok, normalized} <- unique_sorted(value, & &1, path ++ [:accepted_origins]),
+           {:ok, normalized} <- normalize_origins(value, path),
            :ok <- intersects_endpoint_policy(normalized, otp_app, endpoint, path) do
         {:ok, normalized}
       else
@@ -597,14 +596,44 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp valid_origin?(value) when is_binary(value) do
-    uri = URI.parse(value)
+  defp normalize_origins(values, path) do
+    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, acc} ->
+      case normalize_origin(value) do
+        {:ok, origin} ->
+          {:cont, {:ok, [origin | acc]}}
 
-    uri.scheme in ["http", "https"] and is_binary(uri.host) and uri.host != "" and
-      uri.path in [nil, ""] and is_nil(uri.query) and is_nil(uri.fragment)
+        :error ->
+          {:halt,
+           error(path ++ [:accepted_origins], :config_invalid, "accepted origins are invalid")}
+      end
+    end)
+    |> then(fn
+      {:ok, origins} -> unique_sorted(Enum.reverse(origins), & &1, path ++ [:accepted_origins])
+      error -> error
+    end)
   end
 
-  defp valid_origin?(_), do: false
+  defp normalize_origin(value) when is_binary(value) do
+    uri = URI.parse(value)
+
+    if String.downcase(uri.scheme || "") in ["http", "https"] and is_binary(uri.host) and
+         uri.host != "" and uri.path in [nil, ""] and is_nil(uri.query) and
+         is_nil(uri.fragment) do
+      scheme = String.downcase(uri.scheme)
+      host = String.downcase(uri.host)
+
+      default_port? =
+        (scheme == "https" and uri.port in [nil, 443]) or
+          (scheme == "http" and uri.port in [nil, 80])
+
+      port = if default_port?, do: "", else: ":#{uri.port}"
+      {:ok, "#{scheme}://#{host}#{port}"}
+    else
+      :error
+    end
+  end
+
+  defp normalize_origin(_), do: :error
 
   defp intersects_endpoint_policy(origins, otp_app, endpoint, path) do
     policy = Application.get_env(otp_app, endpoint, []) |> Keyword.get(:check_origin)
@@ -613,8 +642,23 @@ defmodule Rekindle.Config do
       policy == false ->
         :ok
 
-      is_list(policy) and Enum.any?(origins, &(&1 in policy)) ->
-        :ok
+      is_list(policy) ->
+        normalized_policy =
+          Enum.flat_map(policy, fn origin ->
+            case normalize_origin(origin) do
+              {:ok, value} -> [value]
+              :error -> []
+            end
+          end)
+
+        if Enum.any?(origins, &(&1 in normalized_policy)),
+          do: :ok,
+          else:
+            error(
+              path ++ [:accepted_origins],
+              :config_invalid,
+              "accepted origins do not intersect endpoint policy"
+            )
 
       true ->
         error(
@@ -706,7 +750,13 @@ defmodule Rekindle.Config do
   defp reject_symlink_components(project_root, paths) do
     project_root = Path.expand(project_root)
 
-    unsafe? =
+    unsafe_root? =
+      case File.lstat(project_root) do
+        {:ok, %{type: :directory}} -> false
+        _ -> true
+      end
+
+    unsafe_child? =
       Enum.any?(paths, fn relative ->
         relative
         |> String.split("/")
@@ -719,7 +769,7 @@ defmodule Rekindle.Config do
         end)
       end)
 
-    if unsafe?,
+    if unsafe_root? or unsafe_child?,
       do: error([:rekindle_build], :path_invalid, "configured root traverses a symlink"),
       else: :ok
   end
