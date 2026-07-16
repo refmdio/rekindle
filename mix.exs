@@ -24,7 +24,9 @@ defmodule Rekindle.MixProject do
 
   defp deps do
     [
-      {:jason, "~> 1.4"}
+      {:jason, "~> 1.4"},
+      {:phoenix, "~> 1.8"},
+      {:phoenix_live_view, "~> 1.2"}
     ]
   end
 
