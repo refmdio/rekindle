@@ -113,6 +113,101 @@ defmodule Rekindle.ClientGeneratorTest do
                ],
                stderr_to_stdout: true
              )
+
+    {native_web_output, native_web_status} =
+      System.cmd(
+        "rustup",
+        [
+          "run",
+          "1.95.0",
+          "cargo",
+          "check",
+          "--locked",
+          "--no-default-features",
+          "--features",
+          "web",
+          "--bin",
+          "sample_app-web"
+        ],
+        cd: root,
+        env: [
+          {"RUSTC", rustc!("1.95.0")},
+          {"CARGO_TARGET_DIR", desktop_target}
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert native_web_status != 0
+    assert native_web_output =~ "feature `web` is supported only for target_arch = wasm32"
+    assert native_web_output =~ "features `web` and `desktop` are mutually exclusive"
+
+    {wasm_desktop_output, wasm_desktop_status} =
+      System.cmd(
+        "rustup",
+        [
+          "run",
+          "nightly-2026-04-01",
+          "cargo",
+          "check",
+          "--locked",
+          "--target",
+          "wasm32-unknown-unknown",
+          "--no-default-features",
+          "--features",
+          "desktop",
+          "--bin",
+          "sample_app"
+        ],
+        cd: root,
+        env: [
+          {"RUSTC", rustc!("nightly-2026-04-01")},
+          {"CARGO_TARGET_DIR", web_target}
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert wasm_desktop_status != 0
+    assert wasm_desktop_output =~ "feature `desktop` is supported only for non-Wasm targets"
+    assert wasm_desktop_output =~ "features `web` and `desktop` are mutually exclusive"
+
+    File.write!(
+      Path.join(root, "src/bin/desktop.rs"),
+      """
+      fn build() {}
+
+      fn main() {
+          rekindle_client::desktop::run(build, sample_app_ui::client_options()).unwrap();
+      }
+      """
+    )
+
+    {callback_output, callback_status} =
+      System.cmd(
+        "rustup",
+        [
+          "run",
+          "1.95.0",
+          "cargo",
+          "check",
+          "--locked",
+          "--no-default-features",
+          "--features",
+          "desktop",
+          "--bin",
+          "sample_app"
+        ],
+        cd: root,
+        env: [
+          {"RUSTC", rustc!("1.95.0")},
+          {"CARGO_TARGET_DIR", desktop_target}
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert callback_status != 0
+    assert callback_output =~ "mismatched types"
+    assert callback_output =~ "expected fn pointer"
+    assert callback_output =~ "found fn item"
   end
 
   test "supports an overridden client root without touching Phoenix assets" do
