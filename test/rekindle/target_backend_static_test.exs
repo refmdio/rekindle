@@ -3,7 +3,29 @@ defmodule Rekindle.TargetBackendStaticTest do
 
   @moduletag timeout: 120_000
 
-  alias Rekindle.TargetBackend
+  alias Rekindle.{ExecutionResult, ExternalArtifact, Failure, TargetBackend}
+
+  test "publishes exact closed public value types" do
+    assert Failure
+           |> type_entry(:code)
+           |> literal_atoms()
+           |> Enum.sort() == Enum.sort(Failure.codes())
+
+    assert compact_type(ExternalArtifact, :t) ==
+             "t()::%Rekindle.ExternalArtifact{contract_version:1,manifest:String.t(),supplemental_diagnostics:[Rekindle.Diagnostic.t()]}"
+
+    assert compact_type(ExecutionResult, :outcome) ==
+             "outcome():::exited|:signaled|:spawn_failed"
+
+    assert compact_type(ExecutionResult, :cleanup) ==
+             "cleanup():::confirmed|:uncertain"
+
+    assert compact_type(ExecutionResult, :discarded_bytes) ==
+             "discarded_bytes()::%{stdout:non_neg_integer(),stderr:non_neg_integer()}"
+
+    assert compact_type(ExecutionResult, :t) ==
+             "t()::%Rekindle.ExecutionResult{build_key:String.t(),cleanup:cleanup(),contract_version:1,discarded_bytes:discarded_bytes(),duration_ms:non_neg_integer(),exit_code:integer()|nil,outcome:outcome(),signal:non_neg_integer()|nil,stderr_tail:binary(),stdout_tail:binary()}"
+  end
 
   test "publishes the exact five callback typespecs" do
     assert callback_surface(TargetBackend) == %{
@@ -65,6 +87,33 @@ defmodule Rekindle.TargetBackendStaticTest do
       assert {output, 2} = dialyze(plt, beam)
       assert output =~ callback
       assert output =~ "callback of the 'Elixir.Rekindle.TargetBackend' behaviour"
+    end
+  end
+
+  test "Dialyzer admits exact public values and rejects closed-type drift" do
+    root = temporary_root()
+    on_exit(fn -> File.rm_rf!(root) end)
+    File.mkdir_p!(root)
+    plt = ensure_core_plt!()
+
+    valid = compile_fixture!(root, ValidPublicValues, valid_public_values_source())
+    {output, status} = dialyze(plt, valid, ["-Wmissing_return"])
+    assert status == 0, output
+
+    invalid =
+      compile_fixture!(root, InvalidPublicValues, invalid_public_values_source())
+
+    {output, status} = dialyze(plt, invalid, ["-Wmissing_return"])
+    assert status == 2, "invalid public values were accepted:\n#{output}"
+
+    for function <- [
+          "failure_code/0",
+          "supplemental_diagnostic/0",
+          "execution_outcome/0",
+          "execution_cleanup/0",
+          "execution_discard/0"
+        ] do
+      assert output =~ function
     end
   end
 
@@ -169,6 +218,94 @@ defmodule Rekindle.TargetBackendStaticTest do
     """
   end
 
+  defp valid_public_values_source do
+    """
+    defmodule #{inspect(ValidPublicValues)} do
+      @spec failure_code() :: Rekindle.Failure.code()
+      def failure_code, do: :config_invalid
+
+      @spec artifact() :: Rekindle.ExternalArtifact.t()
+      def artifact do
+        #{external_artifact("[diagnostic()]")}
+      end
+
+      @spec execution_result() :: Rekindle.ExecutionResult.t()
+      def execution_result do
+        #{execution_result()}
+      end
+
+      @spec diagnostic() :: Rekindle.Diagnostic.t()
+      defp diagnostic do
+        %Rekindle.Diagnostic{
+          target: :web,
+          stage: :web_toolchain,
+          severity: :warning,
+          code: :fixture,
+          message: "fixture"
+        }
+      end
+    end
+    """
+  end
+
+  defp invalid_public_values_source do
+    """
+    defmodule #{inspect(InvalidPublicValues)} do
+      @spec failure_code() :: Rekindle.Failure.code()
+      def failure_code, do: "not a failure code"
+
+      @spec supplemental_diagnostic() :: Rekindle.ExternalArtifact.t()
+      def supplemental_diagnostic do
+        #{external_artifact("[\"not a diagnostic\"]")}
+      end
+
+      @spec execution_outcome() :: Rekindle.ExecutionResult.t()
+      def execution_outcome do
+        #{execution_result(outcome: ":cancelled")}
+      end
+
+      @spec execution_cleanup() :: Rekindle.ExecutionResult.t()
+      def execution_cleanup do
+        #{execution_result(cleanup: "%{status: :confirmed}")}
+      end
+
+      @spec execution_discard() :: Rekindle.ExecutionResult.t()
+      def execution_discard do
+        #{execution_result(discarded_bytes: "0")}
+      end
+    end
+    """
+  end
+
+  defp external_artifact(diagnostics) do
+    """
+    %Rekindle.ExternalArtifact{
+      manifest: "manifest.json",
+      supplemental_diagnostics: #{diagnostics}
+    }
+    """
+  end
+
+  defp execution_result(overrides \\ []) do
+    outcome = Keyword.get(overrides, :outcome, ":exited")
+    cleanup = Keyword.get(overrides, :cleanup, ":confirmed")
+    discarded_bytes = Keyword.get(overrides, :discarded_bytes, "%{stdout: 0, stderr: 0}")
+
+    """
+    %Rekindle.ExecutionResult{
+      build_key: "build-key",
+      outcome: #{outcome},
+      exit_code: 0,
+      signal: nil,
+      duration_ms: 1,
+      stdout_tail: <<>>,
+      stderr_tail: <<>>,
+      discarded_bytes: #{discarded_bytes},
+      cleanup: #{cleanup}
+    }
+    """
+  end
+
   defp compile_fixture!(root, module, source) do
     {output, status, beam} = compile_source(root, module, source)
     assert status == 0, output
@@ -193,7 +330,7 @@ defmodule Rekindle.TargetBackendStaticTest do
     {output, status, Path.join(beam_root, "Elixir.#{inspect(module)}.beam")}
   end
 
-  defp dialyze(plt, fixture_beam) do
+  defp dialyze(plt, fixture_beam, extra_arguments \\ []) do
     arguments =
       [
         "-Wno_unknown",
@@ -201,7 +338,7 @@ defmodule Rekindle.TargetBackendStaticTest do
         "--plt",
         plt,
         "--no_check_plt"
-      ] ++ contract_beams() ++ [fixture_beam]
+      ] ++ extra_arguments ++ contract_beams() ++ [fixture_beam]
 
     System.cmd(dialyzer!(), arguments,
       env: [{"ERL_LIBS", elixir_lib_root()}],
@@ -221,7 +358,8 @@ defmodule Rekindle.TargetBackendStaticTest do
       Rekindle.ExecutionResult,
       Rekindle.ExternalArtifact,
       Rekindle.Diagnostic,
-      Rekindle.QualifiedPath
+      Rekindle.QualifiedPath,
+      Rekindle.Redactor
     ]
     |> Enum.map(fn module -> module |> :code.which() |> to_string() end)
   end
@@ -283,6 +421,34 @@ defmodule Rekindle.TargetBackendStaticTest do
       {{name, arity}, name |> Code.Typespec.spec_to_quoted(spec) |> Macro.to_string()}
     end)
   end
+
+  defp compact_type(module, name) do
+    module
+    |> type_entry(name)
+    |> Code.Typespec.type_to_quoted()
+    |> Macro.to_string()
+    |> String.replace(~r/\s+/, "")
+  end
+
+  defp type_entry(module, name) when is_atom(module) do
+    assert {:ok, types} = Code.Typespec.fetch_types(module)
+
+    assert {_visibility, {^name, _type, []} = entry} =
+             Enum.find(types, fn
+               {_visibility, {^name, _type, []}} -> true
+               _other -> false
+             end)
+
+    entry
+  end
+
+  defp literal_atoms({_name, type, []}), do: literal_atoms(type)
+  defp literal_atoms({:atom, _line, value}), do: [value]
+
+  defp literal_atoms({:type, _line, :union, members}),
+    do: Enum.flat_map(members, &literal_atoms/1)
+
+  defp literal_atoms(other), do: flunk("expected a literal atom union, got: #{inspect(other)}")
 
   defp elixir_lib_root,
     do: :elixir |> :code.lib_dir() |> to_string() |> Path.dirname()

@@ -16,16 +16,23 @@ defmodule Rekindle.ExecutionResult do
   @enforce_keys @fields
   defstruct [contract_version: 1] ++ @fields
 
+  @type outcome :: :exited | :signaled | :spawn_failed
+  @type cleanup :: :confirmed | :uncertain
+  @type discarded_bytes :: %{
+          required(:stdout) => non_neg_integer(),
+          required(:stderr) => non_neg_integer()
+        }
+
   @type t :: %__MODULE__{
           contract_version: 1,
           build_key: String.t(),
-          outcome: atom(),
+          outcome: outcome(),
           exit_code: integer() | nil,
           signal: non_neg_integer() | nil,
           duration_ms: non_neg_integer(),
           stdout_tail: binary(),
           stderr_tail: binary(),
-          discarded_bytes: non_neg_integer() | map(),
-          cleanup: atom() | map()
+          discarded_bytes: discarded_bytes(),
+          cleanup: cleanup()
         }
 end

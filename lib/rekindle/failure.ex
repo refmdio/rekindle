@@ -44,7 +44,61 @@ defmodule Rekindle.Failure do
           | :activation
           | :production
           | :internal
-  @type code :: atom()
+  @type code ::
+          :config_missing
+          | :config_invalid
+          | :target_undeclared
+          | :path_invalid
+          | :path_overlap
+          | :install_conflict
+          | :tool_missing
+          | :tool_version_mismatch
+          | :helper_missing
+          | :helper_checksum_mismatch
+          | :helper_protocol_mismatch
+          | :unsupported_host
+          | :unqualified_tuple
+          | :cargo_metadata_failed
+          | :package_not_found
+          | :target_not_found
+          | :target_ambiguous
+          | :feature_invalid
+          | :lockfile_required
+          | :spawn_failed
+          | :io_failed
+          | :cargo_failed
+          | :cargo_protocol
+          | :build_timeout
+          | :cancelled
+          | :cleanup_unconfirmed
+          | :output_limit
+          | :bindgen_failed
+          | :wasm_schema_mismatch
+          | :web_graph_invalid
+          | :unsupported_import
+          | :asset_collision
+          | :artifact_missing
+          | :artifact_ambiguous
+          | :artifact_changed
+          | :manifest_invalid
+          | :seal_failed
+          | :cache_corrupt
+          | :generation_limit
+          | :browser_protocol
+          | :browser_disconnected
+          | :browser_runtime_failed
+          | :native_not_ready
+          | :native_exited
+          | :handoff_failed
+          | :projection_busy
+          | :projection_invalid
+          | :digest_failed
+          | :digest_output_invalid
+          | :foreign_projection_change
+          | :release_not_ready
+          | :contract_violation
+          | :unexpected_state
+          | :internal
   @type t :: %__MODULE__{
           contract_version: 1,
           target: Rekindle.target() | nil,

@@ -1,7 +1,7 @@
 defmodule Rekindle.TargetBackendTest do
   use ExUnit.Case, async: true
 
-  alias Rekindle.{ConfigError, TargetBackend}
+  alias Rekindle.{ConfigError, Diagnostic, TargetBackend}
   alias Rekindle.{ExternalArtifact, ExternalPlan, Failure}
 
   defmodule ValidBackend do
@@ -336,6 +336,26 @@ defmodule Rekindle.TargetBackendTest do
     }
 
     assert {:ok, ^artifact} = TargetBackend.validate_finalize_result({:ok, artifact})
+
+    assert {:ok, diagnostic} =
+             Diagnostic.new(
+               target: :web,
+               stage: :web_toolchain,
+               severity: :warning,
+               code: :backend_warning,
+               message: "backend warning"
+             )
+
+    artifact_with_diagnostic = %{artifact | supplemental_diagnostics: [diagnostic]}
+
+    assert {:ok, ^artifact_with_diagnostic} =
+             TargetBackend.validate_finalize_result({:ok, artifact_with_diagnostic})
+
+    assert {:error, %ConfigError{path: [:backend, :finalize]}} =
+             TargetBackend.validate_finalize_result({
+               :ok,
+               %{artifact | supplemental_diagnostics: ["not a diagnostic"]}
+             })
 
     assert {:error, ^failure} = TargetBackend.validate_finalize_result({:error, failure})
 
