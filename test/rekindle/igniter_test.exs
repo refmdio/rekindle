@@ -189,6 +189,31 @@ defmodule Rekindle.IgniterTest do
       )
 
     assert Enum.any?(tampered.issues, &String.contains?(to_string(&1), "structurally adoptable"))
+
+    mismatched_client =
+      Rekindle.ClientGenerator.render(
+        application_id: "sample_app",
+        package: "foreign_ui",
+        web_binary: "foreign-web",
+        targets: [:web]
+      )
+
+    mismatched =
+      Enum.reduce(mismatched_client, project(), fn {path, contents}, igniter ->
+        Igniter.create_new_file(igniter, Path.join("client", path), contents)
+      end)
+      |> apply_igniter!()
+      |> RekindleIgniter.install(
+        client_path: "client",
+        targets: [:web],
+        endpoint: SampleAppWeb.Endpoint,
+        no_client: true
+      )
+
+    assert Enum.any?(
+             mismatched.issues,
+             &String.contains?(to_string(&1), "structurally adoptable")
+           )
   end
 
   test "selects the only project endpoint and matches an explicit module string" do

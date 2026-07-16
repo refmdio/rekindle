@@ -605,19 +605,21 @@ if Code.ensure_loaded?(Igniter) do
     defp adoptable_marker?(igniter, client_path, path, application_id, targets) do
       contents = read_file(igniter, path)
       target_names = Enum.map(targets, &Atom.to_string/1)
+      package = application_id <> "_ui"
+      web_binary = application_id <> "-web"
+      desktop_binary = application_id
 
       with {:ok,
             %{
               "schema" => 1,
               "application_id" => ^application_id,
-              "package" => package,
-              "web_binary" => web_binary,
-              "desktop_binary" => desktop_binary,
+              "package" => ^package,
+              "web_binary" => ^web_binary,
+              "desktop_binary" => ^desktop_binary,
               "targets" => ^target_names,
               "owned_files" => owned_files
             }}
-           when is_binary(package) and is_binary(web_binary) and is_binary(desktop_binary) and
-                  is_list(owned_files) <- Jason.decode(contents),
+           when is_list(owned_files) <- Jason.decode(contents),
            expected <-
              ClientGenerator.render(
                application_id: application_id,
