@@ -867,21 +867,38 @@ defmodule Rekindle.Config do
   end
 
   defp canonical_host(host, :plain) do
-    cond do
-      not valid_ascii_host_text?(host) ->
-        :error
-
-      Regex.match?(~r/\A[0-9.]+\z/, host) ->
-        with {:ok, address} <- :inet.parse_address(String.to_charlist(host)),
-             true <- tuple_size(address) == 4 do
-          {:ok, address |> :inet.ntoa() |> to_string()}
-        else
-          _ -> :error
-        end
-
-      true ->
-        canonical_dns_host(host)
+    if valid_ascii_host_text?(host) do
+      case canonical_ipv4_host(host) do
+        {:ok, host} -> {:ok, host}
+        :error -> if legacy_ipv4_authority?(host), do: :error, else: canonical_dns_host(host)
+      end
+    else
+      :error
     end
+  end
+
+  defp canonical_ipv4_host(host) do
+    octets = String.split(host, ".")
+
+    if length(octets) == 4 and Enum.all?(octets, &canonical_ipv4_octet?/1),
+      do: {:ok, host},
+      else: :error
+  end
+
+  defp canonical_ipv4_octet?("0"), do: true
+
+  defp canonical_ipv4_octet?(octet) do
+    byte_size(octet) in 1..3 and Regex.match?(~r/\A[1-9][0-9]*\z/, octet) and
+      String.to_integer(octet) <= 255
+  end
+
+  defp legacy_ipv4_authority?(host) do
+    host
+    |> String.downcase()
+    |> String.split(".")
+    |> Enum.all?(fn part ->
+      Regex.match?(~r/\A[0-9]+\z/, part) or Regex.match?(~r/\A0x[0-9a-f]+\z/, part)
+    end)
   end
 
   defp canonical_dns_host(host) do

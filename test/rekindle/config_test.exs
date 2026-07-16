@@ -626,6 +626,14 @@ defmodule Rekindle.ConfigTest do
       "https://example.com:99999",
       "https://example.com:-1",
       "https://999.999.999.999",
+      "https://127.1",
+      "https://127.0.1",
+      "https://001.002.003.004",
+      "https://2130706433",
+      "https://1.2.3",
+      "https://0x7f.0.0.1",
+      "https://0x7f000001",
+      "https://0177.0.0.1",
       "https://-example.com",
       "https://example-.com"
     ]
@@ -640,6 +648,25 @@ defmodule Rekindle.ConfigTest do
         :config_invalid
       )
     end)
+
+    Application.put_env(:demo_app, Endpoint, check_origin: ["//127.0.0.1"])
+
+    for legacy <- [
+          "https://127.1",
+          "https://001.002.003.004",
+          "https://2130706433",
+          "https://0x7f.0.0.1",
+          "https://0177.0.0.1"
+        ] do
+      assert_error(
+        Config.normalize(
+          :demo_app,
+          web_build(),
+          Keyword.put(dev, :accepted_origins, [legacy])
+        ),
+        :config_invalid
+      )
+    end
   end
 
   test "endpoint origin policies use the same exact authority grammar" do
@@ -662,6 +689,19 @@ defmodule Rekindle.ConfigTest do
     Application.put_env(:demo_app, Endpoint, check_origin: ["https://[::1]"])
     assert {:ok, project} = Config.normalize(:demo_app, web_build(), dev)
     assert project.dev.accepted_origins == ["https://[::1]"]
+
+    ipv4_dev = Keyword.put(dev, :accepted_origins, ["https://127.0.0.1"])
+
+    for legacy_policy <- [
+          "https://127.1",
+          "https://001.002.003.004",
+          "https://2130706433",
+          "https://0x7f.0.0.1",
+          "https://0177.0.0.1"
+        ] do
+      Application.put_env(:demo_app, Endpoint, check_origin: [legacy_policy])
+      assert_error(Config.normalize(:demo_app, web_build(), ipv4_dev), :config_invalid)
+    end
 
     for invalid_policy <- [
           "https://user@[::1]",
