@@ -234,6 +234,17 @@ defmodule Rekindle.ConfigTest do
       :path_invalid
     )
 
+    for reserved_equivalent <- [".GIT", "ＤＩＳＴ", "ＰＲＩＶ/ＳＴＡＴＩＣ"] do
+      assert_error(
+        Config.normalize(
+          :demo_app,
+          Keyword.put(web_build(), :client, reserved_equivalent),
+          web_dev()
+        ),
+        :path_invalid
+      )
+    end
+
     root = Path.join(System.tmp_dir!(), "rekindle-config-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
     File.ln_s!(Path.expand("client"), Path.join(root, "client"))

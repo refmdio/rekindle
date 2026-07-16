@@ -747,15 +747,19 @@ defmodule Rekindle.Config do
   end
 
   defp reject_reserved_sources(sources) do
-    reserved = [".git", ".rekindle", "_build", "deps", "dist", "priv/static"]
+    reserved =
+      Enum.map([".git", ".rekindle", "_build", "deps", "dist", "priv/static"], &path_fold/1)
 
-    if Enum.any?(sources, fn source -> Enum.any?(reserved, &descendant_or_equal?(source, &1)) end),
+    if Enum.any?(sources, fn source ->
+         folded = path_fold(source)
+         Enum.any?(reserved, &descendant_or_equal?(folded, &1))
+       end),
        do: error([:rekindle_build], :path_invalid, "source root is reserved or generated"),
        else: :ok
   end
 
   defp reject_normalization_collisions(paths) do
-    folded = Enum.map(paths, &(String.normalize(&1, :nfkc) |> String.downcase()))
+    folded = Enum.map(paths, &path_fold/1)
 
     if length(folded) == MapSet.size(MapSet.new(folded)),
       do: :ok,
@@ -766,6 +770,8 @@ defmodule Rekindle.Config do
           "configured roots collide after normalization or case folding"
         )
   end
+
+  defp path_fold(path), do: path |> String.normalize(:nfkc) |> String.downcase()
 
   defp reject_symlink_components(project_root, paths) do
     project_root = Path.expand(project_root)
