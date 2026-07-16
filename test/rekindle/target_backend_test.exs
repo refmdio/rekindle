@@ -373,6 +373,92 @@ defmodule Rekindle.TargetBackendTest do
              TargetBackend.validate_finalize_result({:ok, %{artifact | contract_version: 2}})
   end
 
+  test "sanitizes supplemental diagnostics and preserves their order" do
+    first = diagnostic(:first_warning, "first")
+    second = diagnostic(:second_warning, "second")
+
+    artifact = %ExternalArtifact{
+      manifest: "rekindle-web-manifest-v1.json",
+      supplemental_diagnostics: [
+        %{first | message: "first at /home/user/private.rs", rendered: "raw /tmp/output"},
+        second
+      ]
+    }
+
+    assert {:ok, sanitized} = TargetBackend.validate_finalize_result({:ok, artifact})
+
+    assert Enum.map(sanitized.supplemental_diagnostics, & &1.code) ==
+             [:first_warning, :second_warning]
+
+    [sanitized_first, ^second] = sanitized.supplemental_diagnostics
+    assert sanitized_first.message == "first at <redacted-path>"
+    assert sanitized_first.rendered == "raw <redacted-path>"
+    refute sanitized_first == first
+  end
+
+  test "rejects every invalid supplemental diagnostic field and location shape" do
+    valid = diagnostic(:backend_warning, "valid")
+
+    invalid_diagnostics = [
+      %{valid | contract_version: 2},
+      %{valid | target: :mobile},
+      %{valid | stage: :unknown},
+      %{valid | severity: :debug},
+      %{valid | code: nil},
+      %{valid | code: true},
+      %{valid | code: "backend_warning"},
+      %{valid | message: nil},
+      %{valid | message: <<255>>},
+      %{valid | message: "stacktrace:\n secret"},
+      %{valid | message: String.duplicate("x", 65_537)},
+      %{valid | rendered: <<255>>},
+      %{valid | rendered: "** (RuntimeError) leaked"},
+      %{valid | file: "/absolute/path"},
+      %{valid | file: "../escape"},
+      %{valid | file: <<255>>},
+      %{valid | line: 1},
+      %{valid | line: 0, file: "src/app.rs"},
+      %{valid | line: 1.5, file: "src/app.rs"},
+      %{valid | column: 1},
+      %{valid | column: 0, line: 1, file: "src/app.rs"},
+      %{valid | column: 1, file: "src/app.rs"}
+    ]
+
+    for invalid <- invalid_diagnostics do
+      assert_finalize_diagnostic_error([invalid])
+    end
+
+    assert {:ok, located} =
+             Diagnostic.new(
+               target: :web,
+               stage: :web_toolchain,
+               severity: :warning,
+               code: :located_warning,
+               message: "located",
+               file: "src/app.rs",
+               line: 1,
+               column: 2
+             )
+
+    assert {:ok, %ExternalArtifact{supplemental_diagnostics: [^located]}} =
+             TargetBackend.validate_finalize_result({:ok, artifact([located])})
+  end
+
+  test "admits only a proper bounded supplemental diagnostic collection" do
+    valid = diagnostic(:backend_warning, "valid")
+
+    for invalid <- [nil, %{}, ["not a diagnostic"], [valid | :improper_tail]] do
+      assert_finalize_diagnostic_error(invalid)
+    end
+
+    boundary = List.duplicate(valid, 1_024)
+
+    assert {:ok, %ExternalArtifact{supplemental_diagnostics: ^boundary}} =
+             TargetBackend.validate_finalize_result({:ok, artifact(boundary)})
+
+    assert_finalize_diagnostic_error(List.duplicate(valid, 1_025))
+  end
+
   test "negative compile fixtures report wrong callback arities and reject unknown struct fields" do
     module = "WrongArityBackend#{System.unique_integer([:positive])}"
 
@@ -405,5 +491,30 @@ defmodule Rekindle.TargetBackendTest do
         Code.compile_string("%#{structure}{unknown_field: true}")
       end
     end
+  end
+
+  defp diagnostic(code, message) do
+    {:ok, diagnostic} =
+      Diagnostic.new(
+        target: :web,
+        stage: :web_toolchain,
+        severity: :warning,
+        code: code,
+        message: message
+      )
+
+    diagnostic
+  end
+
+  defp artifact(diagnostics) do
+    %ExternalArtifact{
+      manifest: "rekindle-web-manifest-v1.json",
+      supplemental_diagnostics: diagnostics
+    }
+  end
+
+  defp assert_finalize_diagnostic_error(diagnostics) do
+    assert {:error, %ConfigError{path: [:backend, :finalize]}} =
+             TargetBackend.validate_finalize_result({:ok, artifact(diagnostics)})
   end
 end

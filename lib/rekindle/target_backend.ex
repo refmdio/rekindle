@@ -10,6 +10,7 @@ defmodule Rekindle.TargetBackend do
     BackendContext,
     CanonicalValue,
     ConfigError,
+    Diagnostic,
     ExecutionResult,
     ExternalArtifact,
     ExternalPlan
@@ -21,6 +22,7 @@ defmodule Rekindle.TargetBackend do
   @max_plan_path_bytes 4_096
   @max_config_errors 128
   @max_config_error_path 128
+  @max_supplemental_diagnostics 1_024
   @required_callbacks [backend_id: 0, backend_version: 0, validate: 2, plan: 2, finalize: 3]
 
   @callback backend_id() :: String.t()
@@ -119,12 +121,12 @@ defmodule Rekindle.TargetBackend do
   @spec validate_finalize_result(term()) ::
           {:ok, ExternalArtifact.t()} | {:error, ConfigError.t() | Rekindle.Failure.t()}
   def validate_finalize_result({:ok, %ExternalArtifact{contract_version: 1} = artifact}) do
-    if is_binary(artifact.manifest) and relative_path?(artifact.manifest) and
-         is_list(artifact.supplemental_diagnostics) and
-         Enum.all?(artifact.supplemental_diagnostics, &match?(%Rekindle.Diagnostic{}, &1)) do
-      {:ok, artifact}
+    with true <- is_binary(artifact.manifest) and relative_path?(artifact.manifest),
+         {:ok, diagnostics} <-
+           sanitize_supplemental_diagnostics(artifact.supplemental_diagnostics) do
+      {:ok, %{artifact | supplemental_diagnostics: diagnostics}}
     else
-      {:error, error([:backend, :finalize], "finalize artifact is invalid")}
+      _ -> {:error, error([:backend, :finalize], "finalize artifact is invalid")}
     end
   end
 
@@ -244,6 +246,27 @@ defmodule Rekindle.TargetBackend do
            [:backend, callback],
            "#{callback}/#{callback_arity(callback)} returned invalid failure"
          )}
+    end
+  end
+
+  defp sanitize_supplemental_diagnostics(diagnostics) do
+    if proper_list_within?(diagnostics, @max_supplemental_diagnostics) do
+      Enum.reduce_while(diagnostics, {:ok, []}, fn
+        %Diagnostic{} = diagnostic, {:ok, sanitized} ->
+          case Diagnostic.sanitize(diagnostic) do
+            {:ok, value} -> {:cont, {:ok, [value | sanitized]}}
+            {:error, _reason} -> {:halt, :error}
+          end
+
+        _diagnostic, _acc ->
+          {:halt, :error}
+      end)
+      |> case do
+        {:ok, values} -> {:ok, Enum.reverse(values)}
+        :error -> :error
+      end
+    else
+      :error
     end
   end
 
