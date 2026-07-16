@@ -280,12 +280,24 @@ defmodule Rekindle.Toolchain.CompatibilityManifest do
   defp coverage_complete?(manifest) do
     tuples = manifest["tuples"]
 
-    Enum.all?(manifest["helper"]["assets"], fn asset ->
-      Enum.any?(tuples, fn tuple ->
-        tuple["host"] == Map.take(asset, ~w[os arch]) and
-          tuple["helper"]["asset_sha256"] == asset["sha256"]
+    Enum.all?(~w[elixir otp phoenix igniter], fn key ->
+      Enum.all?(manifest[key]["tested"], fn version ->
+        Enum.any?(tuples, &(&1[key] == version))
       end)
     end) and
+      Enum.all?(manifest["endpoint_adapters"], fn adapter ->
+        Enum.all?(adapter["tested"], fn version ->
+          Enum.any?(tuples, fn tuple ->
+            tuple["endpoint_adapter"] == %{"name" => adapter["name"], "version" => version}
+          end)
+        end)
+      end) and
+      Enum.all?(manifest["helper"]["assets"], fn asset ->
+        Enum.any?(tuples, fn tuple ->
+          tuple["host"] == Map.take(asset, ~w[os arch]) and
+            tuple["helper"]["asset_sha256"] == asset["sha256"]
+        end)
+      end) and
       Enum.all?(manifest["targets"]["desktop"]["hosts"], fn host ->
         Enum.any?(tuples, &(&1["target"] == "desktop" and &1["host"] == host))
       end) and

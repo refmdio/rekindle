@@ -71,6 +71,8 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
       update_in(release["evidence"], &tl/1),
       update_in(release["tuples"], &Enum.reverse/1),
       Map.put(release, "shadow_helper_manifest", %{}),
+      put_in(release, ["elixir", "tested"], ["1.19.0", "1.20.2"]),
+      put_in(release, ["endpoint_adapters", Access.at(0), "tested"], ["1.12.0", "1.13.0"]),
       update_in(release["tuples"], fn [first | rest] ->
         [%{first | "tuple_id" => String.duplicate("0", 64)} | rest]
       end)
