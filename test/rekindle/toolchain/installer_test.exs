@@ -132,6 +132,33 @@ defmodule Rekindle.Toolchain.InstallerTest do
     assert {:error, %{code: :unsupported_host}} = Installer.ensure(asset, options(root))
   end
 
+  test "rejects symlinked cache ancestors and cached executable symlinks" do
+    real_root = temp_root()
+    linked_root = real_root <> "-link"
+    File.mkdir_p!(real_root)
+    File.ln_s!(real_root, linked_root)
+    bytes = "trusted-helper"
+    asset = asset(bytes)
+
+    on_exit(fn ->
+      File.rm(linked_root)
+      File.rm_rf!(real_root)
+    end)
+
+    assert {:error, %{code: :io_failed}} =
+             Installer.ensure(asset, options(linked_root, fetcher: fn _ -> bytes end))
+
+    assert {:ok, path} = Installer.ensure(asset, options(real_root, fetcher: fn _ -> bytes end))
+    admitted = path <> ".admitted"
+    File.rename!(path, admitted)
+    File.ln_s!(admitted, path)
+
+    assert {:error, %{code: :io_failed}} =
+             Installer.ensure(asset, options(real_root, offline: true))
+
+    assert File.lstat!(path).type == :symlink
+  end
+
   defp asset(bytes) do
     host = Installer.host()
 

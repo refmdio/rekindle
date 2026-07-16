@@ -48,6 +48,54 @@ defmodule Rekindle.Toolchain.TargetInstallerTest do
     assert {:error, %{code: :tool_missing}} = TargetInstaller.ensure(:desktop, config)
   end
 
+  test "rejects symlinked rustup paths and replacement before spawn" do
+    root = temp_dir!()
+    rustup = fake_rustup!(root)
+    linked = Path.join(root, "rustup-link")
+    File.ln_s!(rustup, linked)
+    System.put_env("REKINDLE_RUSTUP", linked)
+
+    config = %{
+      backend: :canonical,
+      toolchain: %{kind: :rustup, name: "1.95.0"},
+      rust_target: nil
+    }
+
+    assert {:error, %{code: :tool_missing}} = TargetInstaller.ensure(:desktop, config)
+
+    System.put_env("REKINDLE_RUSTUP", rustup)
+    replacement = Path.join(root, "rustup-replacement")
+    File.cp!(rustup, replacement)
+    File.chmod!(replacement, 0o700)
+
+    hook = fn ->
+      File.rename!(replacement, rustup)
+      :ok
+    end
+
+    assert {:error, %{code: :tool_missing}} =
+             TargetInstaller.ensure(:desktop, config, before_spawn: hook)
+  end
+
+  test "qualifies both configured path toolchain executables" do
+    root = temp_dir!()
+    cargo = fake_tool!(root, "cargo")
+    rustc = fake_tool!(root, "rustc")
+
+    config = %{
+      backend: :canonical,
+      toolchain: %{kind: :path, cargo: cargo, rustc: rustc, identity: "local"},
+      rust_target: nil
+    }
+
+    assert {:ok, %{status: :verified}} = TargetInstaller.ensure(:desktop, config)
+
+    admitted = cargo <> ".admitted"
+    File.rename!(cargo, admitted)
+    File.ln_s!(admitted, cargo)
+    assert {:error, %{code: :tool_missing}} = TargetInstaller.ensure(:desktop, config)
+  end
+
   test "external backends require no canonical Rust installation" do
     assert {:ok, %{status: :not_required}} =
              TargetInstaller.ensure(:web, %{backend: {:external, :admitted}})
@@ -61,6 +109,13 @@ defmodule Rekindle.Toolchain.TargetInstallerTest do
     printf '%s\\n' "$*" >> "$REKINDLE_RUSTUP_LOG"
     """)
 
+    File.chmod!(path, 0o700)
+    path
+  end
+
+  defp fake_tool!(root, name) do
+    path = Path.join(root, name)
+    File.write!(path, "#!/bin/sh\nprintf '%s\\n' #{name}\n")
     File.chmod!(path, 0o700)
     path
   end

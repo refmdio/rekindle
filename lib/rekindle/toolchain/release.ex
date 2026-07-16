@@ -1,7 +1,7 @@
 defmodule Rekindle.Toolchain.Release do
   @moduledoc false
 
-  alias Rekindle.Toolchain.{CompatibilityManifest, Helper, Installer, Rustup}
+  alias Rekindle.Toolchain.{CompatibilityManifest, Executable, Helper, Installer, Rustup}
 
   @rust_toolchain "1.95.0"
 
@@ -68,7 +68,7 @@ defmodule Rekindle.Toolchain.Release do
     manifest = Path.join(root, "Cargo.toml")
     rustup = Rustup.resolve!()
 
-    case System.cmd(
+    case Executable.run(
            rustup,
            [
              "run",
@@ -79,14 +79,16 @@ defmodule Rekindle.Toolchain.Release do
              "--locked",
              "--manifest-path",
              manifest
-           ],
-           stderr_to_stdout: true
+           ]
          ) do
-      {_output, 0} ->
+      {:ok, {_output, 0}} ->
         File.read!(Path.join(root, "target/release/rekindle_toolchain"))
 
-      {output, status} ->
+      {:ok, {output, status}} ->
         raise "rekindle_toolchain source build failed (#{status}): #{output}"
+
+      {:error, reason} ->
+        raise "rekindle_toolchain source build failed: #{reason}"
     end
   end
 

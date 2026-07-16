@@ -2,18 +2,36 @@ defmodule Rekindle.Toolchain.TargetInstaller do
   @moduledoc false
 
   alias Rekindle.Failure
-  alias Rekindle.Toolchain.Rustup
+  alias Rekindle.Toolchain.{Executable, Rustup}
 
-  @spec ensure(atom(), map()) :: {:ok, map()} | {:error, Failure.t()}
-  def ensure(target, %{backend: {:external, _}}) do
+  @spec ensure(atom(), map(), keyword()) :: {:ok, map()} | {:error, Failure.t()}
+  def ensure(target, config, options \\ [])
+
+  def ensure(target, %{backend: {:external, _}}, _options) do
     {:ok, %{target: target, status: :not_required}}
   end
 
-  def ensure(target, %{backend: :canonical, toolchain: %{kind: :rustup} = toolchain} = config) do
+  def ensure(
+        target,
+        %{backend: :canonical, toolchain: %{kind: :rustup} = toolchain} = config,
+        options
+      ) do
     with {:ok, rustup} <- Rustup.resolve(),
          :ok <-
-           run(rustup, ["toolchain", "install", toolchain.name, "--profile", "minimal"], target),
-         :ok <- ensure_rust_target(rustup, toolchain.name, config.rust_target, target) do
+           run(
+             rustup,
+             ["toolchain", "install", toolchain.name, "--profile", "minimal"],
+             target,
+             options
+           ),
+         :ok <-
+           ensure_rust_target(
+             rustup,
+             toolchain.name,
+             config.rust_target,
+             target,
+             options
+           ) do
       {:ok,
        %{
          target: target,
@@ -24,12 +42,16 @@ defmodule Rekindle.Toolchain.TargetInstaller do
     end
   end
 
-  def ensure(target, %{backend: :canonical, toolchain: %{kind: :path} = toolchain} = config) do
-    with :ok <- qualified_executable(toolchain.cargo, target, "cargo"),
-         :ok <- qualified_executable(toolchain.rustc, target, "rustc"),
-         :ok <- run(toolchain.cargo, ["-V"], target),
-         :ok <- run(toolchain.rustc, ["-Vv"], target),
-         :ok <- ensure_path_target(toolchain.rustc, config.rust_target, target) do
+  def ensure(
+        target,
+        %{backend: :canonical, toolchain: %{kind: :path} = toolchain} = config,
+        options
+      ) do
+    with {:ok, cargo} <- qualified_executable(toolchain.cargo, target, "cargo"),
+         {:ok, rustc} <- qualified_executable(toolchain.rustc, target, "rustc"),
+         :ok <- run(cargo, ["-V"], target, options),
+         :ok <- run(rustc, ["-Vv"], target, options),
+         :ok <- ensure_path_target(rustc, config.rust_target, target, options) do
       {:ok,
        %{
          target: target,
@@ -40,26 +62,28 @@ defmodule Rekindle.Toolchain.TargetInstaller do
     end
   end
 
-  defp ensure_rust_target(_rustup, _toolchain, nil, _target), do: :ok
+  defp ensure_rust_target(_rustup, _toolchain, nil, _target, _options), do: :ok
 
-  defp ensure_rust_target(rustup, toolchain, rust_target, target) do
-    run(rustup, ["target", "add", "--toolchain", toolchain, rust_target], target)
+  defp ensure_rust_target(rustup, toolchain, rust_target, target, options) do
+    run(rustup, ["target", "add", "--toolchain", toolchain, rust_target], target, options)
   end
 
-  defp ensure_path_target(_rustc, nil, _target), do: :ok
+  defp ensure_path_target(_rustc, nil, _target, _options), do: :ok
 
-  defp ensure_path_target(rustc, rust_target, target) do
-    case System.cmd(rustc, ["--print", "target-libdir", "--target", rust_target],
-           stderr_to_stdout: true
+  defp ensure_path_target(rustc, rust_target, target, options) do
+    case Executable.run(
+           rustc,
+           ["--print", "target-libdir", "--target", rust_target],
+           options
          ) do
-      {path, 0} ->
+      {:ok, {path, 0}} ->
         if File.dir?(String.trim(path)) do
           :ok
         else
           failure(target, :tool_missing, "declared Rust target is unavailable")
         end
 
-      {_output, _status} ->
+      _other ->
         failure(target, :tool_missing, "declared Rust target is unavailable")
     end
   rescue
@@ -67,22 +91,21 @@ defmodule Rekindle.Toolchain.TargetInstaller do
   end
 
   defp qualified_executable(path, target, name) do
-    with true <- is_binary(path) and Path.type(path) == :absolute,
-         {:ok, stat} <- File.stat(path),
-         true <- stat.type == :regular,
-         true <- Bitwise.band(stat.mode, 0o111) != 0 do
-      :ok
-    else
-      _ -> failure(target, :tool_missing, "qualified #{name} executable is unavailable")
+    case Executable.qualify(path) do
+      {:ok, executable} ->
+        {:ok, executable}
+
+      {:error, _reason} ->
+        failure(target, :tool_missing, "qualified #{name} executable is unavailable")
     end
   end
 
-  defp run(executable, argv, target) do
-    case System.cmd(executable, argv, stderr_to_stdout: true) do
-      {_output, 0} ->
+  defp run(executable, argv, target, options) do
+    case Executable.run(executable, argv, options) do
+      {:ok, {_output, 0}} ->
         :ok
 
-      {_output, _status} ->
+      _other ->
         failure(target, :tool_missing, "qualified Rust toolchain setup failed")
     end
   rescue

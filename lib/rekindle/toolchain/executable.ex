@@ -1,0 +1,360 @@
+defmodule Rekindle.Toolchain.Executable do
+  @moduledoc false
+
+  @enforce_keys [:path, :identity, :sha256, :size, :mode]
+  defstruct @enforce_keys
+
+  @max_bytes 1_073_741_824
+  @identity_fields [:inode, :uid, :gid, :major_device, :minor_device, :size, :type, :mode]
+
+  @type t :: %__MODULE__{
+          path: Path.t(),
+          identity: map(),
+          sha256: String.t(),
+          size: non_neg_integer(),
+          mode: non_neg_integer()
+        }
+
+  @spec qualify(Path.t(), keyword()) :: {:ok, t()} | {:error, atom()}
+  def qualify(path, options \\ []) do
+    maximum = Keyword.get(options, :max_bytes, @max_bytes)
+    executable? = Keyword.get(options, :executable, true)
+    required_mode = Keyword.get(options, :required_mode)
+
+    with :ok <- absolute_canonical(path),
+         {:ok, before_stat} <- no_follow_stat(path),
+         :ok <- regular_file(before_stat, maximum),
+         :ok <- coherent_owner(path, before_stat),
+         :ok <- secure_mode(before_stat, executable?, required_mode),
+         {:ok, digest, opened_stat} <- digest_handle(path, before_stat, maximum),
+         :ok <- expected(digest, opened_stat, options) do
+      {:ok,
+       %__MODULE__{
+         path: path,
+         identity: identity(opened_stat),
+         sha256: digest,
+         size: opened_stat.size,
+         mode: Bitwise.band(opened_stat.mode, 0o777)
+       }}
+    else
+      _ -> {:error, :executable_unqualified}
+    end
+  rescue
+    _ -> {:error, :executable_unqualified}
+  catch
+    _, _ -> {:error, :executable_unqualified}
+  end
+
+  @doc false
+  @spec stat(Path.t()) :: {:ok, File.Stat.t()} | {:error, atom()}
+  def stat(path) do
+    with :ok <- absolute_canonical(path), do: no_follow_stat(path)
+  end
+
+  @spec revalidate(t()) :: :ok | {:error, atom()}
+  def revalidate(%__MODULE__{} = admitted) do
+    with {:ok, current} <-
+           qualify(admitted.path,
+             expected_sha256: admitted.sha256,
+             expected_size: admitted.size,
+             required_mode: admitted.mode
+           ),
+         true <- same_authority?(admitted, current) do
+      :ok
+    else
+      _ -> {:error, :executable_changed}
+    end
+  end
+
+  @spec open(t(), [String.t()], keyword()) :: {:ok, port()} | {:error, atom()}
+  def open(%__MODULE__{} = admitted, argv, options \\ []) do
+    with :ok <- argv(argv),
+         :ok <- invoke_hook(options, :before_spawn, admitted),
+         :ok <- revalidate(admitted),
+         {:ok, port} <- open_port(admitted.path, argv, options) do
+      case invoke_hook(options, :after_spawn, admitted) do
+        :ok ->
+          case revalidate_after_spawn(admitted, port) do
+            :ok -> {:ok, port}
+            {:error, _} = error -> error
+          end
+
+        _error ->
+          close(port)
+          {:error, :executable_changed}
+      end
+    else
+      _ -> {:error, :executable_changed}
+    end
+  rescue
+    _ -> {:error, :executable_changed}
+  catch
+    _, _ -> {:error, :executable_changed}
+  end
+
+  @spec run(t(), [String.t()], keyword()) ::
+          {:ok, {binary(), non_neg_integer()}} | {:error, atom()}
+  def run(%__MODULE__{} = admitted, argv, options \\ []) do
+    with {:ok, port} <- open(admitted, argv, options) do
+      collect(
+        port,
+        <<>>,
+        0,
+        Keyword.get(options, :max_output_bytes, 4_194_304),
+        monotonic_ms() + Keyword.get(options, :timeout_ms, 900_000)
+      )
+    end
+  end
+
+  @spec ensure_private_directory(Path.t()) :: :ok | {:error, atom()}
+  def ensure_private_directory(path) do
+    with :ok <- absolute_canonical(path),
+         [_ | _] = components <- Path.split(path),
+         {:ok, stat} <- ensure_directory_components("", components),
+         true <- stat.type == :directory,
+         :ok <- File.chmod(path, 0o700),
+         {:ok, final_stat} <- no_follow_stat(path),
+         true <- same_identity_except_mode?(stat, final_stat),
+         true <- Bitwise.band(final_stat.mode, 0o777) == 0o700 do
+      :ok
+    else
+      _ -> {:error, :directory_unqualified}
+    end
+  rescue
+    _ -> {:error, :directory_unqualified}
+  end
+
+  defp open_port(path, argv, options) do
+    port_options = [
+      :binary,
+      :exit_status,
+      :use_stdio,
+      args: Enum.map(argv, &String.to_charlist/1)
+    ]
+
+    port_options =
+      if Keyword.get(options, :stderr_to_stdout, true),
+        do: [:stderr_to_stdout | port_options],
+        else: port_options
+
+    port =
+      Port.open(
+        {:spawn_executable, String.to_charlist(path)},
+        port_options
+      )
+
+    {:ok, port}
+  end
+
+  defp revalidate_after_spawn(admitted, port) do
+    case revalidate(admitted) do
+      :ok ->
+        :ok
+
+      {:error, _} = error ->
+        close(port)
+        error
+    end
+  end
+
+  defp collect(port, output, discarded, maximum, deadline) do
+    receive do
+      {^port, {:data, bytes}} ->
+        remaining = max(maximum - byte_size(output), 0)
+        kept = min(byte_size(bytes), remaining)
+        output = if kept == 0, do: output, else: output <> binary_part(bytes, 0, kept)
+        collect(port, output, discarded + byte_size(bytes) - kept, maximum, deadline)
+
+      {^port, {:exit_status, status}} ->
+        {:ok, {output, status}}
+
+      {^port, :closed} ->
+        collect(port, output, discarded, maximum, deadline)
+    after
+      max(deadline - monotonic_ms(), 0) ->
+        close(port)
+        {:error, :executable_timeout}
+    end
+  end
+
+  defp digest_handle(path, before_stat, maximum) do
+    case :file.open(path, [:read, :binary, :raw]) do
+      {:ok, handle} ->
+        try do
+          with {:ok, opened_record} <- :file.read_file_info(handle),
+               opened_stat = File.Stat.from_record(opened_record),
+               true <- same_identity?(before_stat, opened_stat),
+               {:ok, context, size} <- hash_handle(handle, :crypto.hash_init(:sha256), 0, maximum),
+               true <- size == opened_stat.size,
+               {:ok, final_record} <- :file.read_file_info(handle),
+               final_stat = File.Stat.from_record(final_record),
+               true <- same_identity?(opened_stat, final_stat),
+               {:ok, after_stat} <- no_follow_stat(path),
+               true <- same_identity?(opened_stat, after_stat) do
+            {:ok, :crypto.hash_final(context) |> Base.encode16(case: :lower), opened_stat}
+          else
+            _ -> {:error, :executable_changed}
+          end
+        after
+          :file.close(handle)
+        end
+
+      _ ->
+        {:error, :executable_unqualified}
+    end
+  end
+
+  defp hash_handle(handle, context, size, maximum) do
+    case :file.read(handle, 64 * 1_024) do
+      {:ok, bytes} when byte_size(bytes) > 0 and size + byte_size(bytes) <= maximum ->
+        hash_handle(handle, :crypto.hash_update(context, bytes), size + byte_size(bytes), maximum)
+
+      :eof ->
+        {:ok, context, size}
+
+      _ ->
+        {:error, :executable_unqualified}
+    end
+  end
+
+  defp expected(digest, stat, options) do
+    expected_digest = Keyword.get(options, :expected_sha256)
+    expected_size = Keyword.get(options, :expected_size)
+
+    if (is_nil(expected_digest) or expected_digest == digest) and
+         (is_nil(expected_size) or expected_size == stat.size),
+       do: :ok,
+       else: {:error, :executable_changed}
+  end
+
+  defp regular_file(stat, maximum) do
+    if stat.type == :regular and stat.size in 1..maximum,
+      do: :ok,
+      else: {:error, :executable_unqualified}
+  end
+
+  defp coherent_owner(path, stat) do
+    with {:ok, parent} <- no_follow_stat(Path.dirname(path)),
+         true <- parent.type == :directory,
+         true <- stat.uid == parent.uid do
+      :ok
+    else
+      _ -> {:error, :executable_unqualified}
+    end
+  end
+
+  defp secure_mode(stat, executable?, required_mode) do
+    mode = Bitwise.band(stat.mode, 0o777)
+
+    cond do
+      is_integer(required_mode) and mode != required_mode -> {:error, :executable_unqualified}
+      executable? and Bitwise.band(mode, 0o111) == 0 -> {:error, :executable_unqualified}
+      Bitwise.band(mode, 0o022) != 0 -> {:error, :executable_unqualified}
+      true -> :ok
+    end
+  end
+
+  defp absolute_canonical(path) when is_binary(path) do
+    if Path.type(path) == :absolute and Path.expand(path) == path,
+      do: :ok,
+      else: {:error, :invalid_path}
+  end
+
+  defp absolute_canonical(_path), do: {:error, :invalid_path}
+
+  defp no_follow_stat(path) do
+    with [_ | _] = components <- Path.split(path) do
+      no_follow_components("", components)
+    end
+  end
+
+  defp no_follow_components(current, [component | rest]) do
+    path = if current == "", do: component, else: Path.join(current, component)
+
+    with {:ok, stat} <- File.lstat(path),
+         true <- stat.type != :symlink,
+         true <- rest == [] or stat.type == :directory do
+      if rest == [], do: {:ok, stat}, else: no_follow_components(path, rest)
+    else
+      {:error, reason} -> {:error, reason}
+      false -> {:error, :invalid_path}
+    end
+  end
+
+  defp ensure_directory_components(current, [component | rest]) do
+    path = if current == "", do: component, else: Path.join(current, component)
+
+    stat =
+      case File.lstat(path) do
+        {:ok, stat} ->
+          {:ok, stat}
+
+        {:error, :enoent} ->
+          case File.mkdir(path) do
+            :ok ->
+              with :ok <- File.chmod(path, 0o700),
+                   {:ok, stat} <- File.lstat(path) do
+                {:ok, stat}
+              end
+
+            {:error, :eexist} ->
+              File.lstat(path)
+
+            _ ->
+              {:error, :invalid_path}
+          end
+
+        _ ->
+          {:error, :invalid_path}
+      end
+
+    with {:ok, stat} <- stat,
+         true <- stat.type == :directory do
+      if rest == [], do: {:ok, stat}, else: ensure_directory_components(path, rest)
+    else
+      _ -> {:error, :invalid_path}
+    end
+  end
+
+  defp identity(stat), do: Map.take(stat, @identity_fields)
+  defp same_identity?(left, right), do: identity(left) == identity(right)
+
+  defp same_identity_except_mode?(left, right) do
+    fields = @identity_fields -- [:mode, :size]
+    Map.take(left, fields) == Map.take(right, fields)
+  end
+
+  defp same_authority?(left, right) do
+    left.path == right.path and left.identity == right.identity and left.sha256 == right.sha256 and
+      left.size == right.size and left.mode == right.mode
+  end
+
+  defp argv(values) when is_list(values) do
+    if Enum.all?(
+         values,
+         &(is_binary(&1) and String.valid?(&1) and not String.contains?(&1, <<0>>))
+       ),
+       do: :ok,
+       else: {:error, :invalid_argv}
+  end
+
+  defp argv(_values), do: {:error, :invalid_argv}
+
+  defp invoke_hook(options, key, admitted) do
+    case Keyword.get(options, key) do
+      nil -> :ok
+      hook when is_function(hook, 0) -> hook.()
+      hook when is_function(hook, 1) -> hook.(admitted)
+      _ -> {:error, :invalid_hook}
+    end
+  end
+
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
+
+  defp close(port) do
+    if Port.info(port), do: Port.close(port)
+    :ok
+  rescue
+    _ -> :ok
+  end
+end

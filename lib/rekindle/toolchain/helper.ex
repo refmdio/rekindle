@@ -1,7 +1,7 @@
 defmodule Rekindle.Toolchain.Helper do
   @moduledoc false
 
-  alias Rekindle.Toolchain.{Exec, Frame, Handshake, Installer, Web}
+  alias Rekindle.Toolchain.{Exec, Executable, Frame, Handshake, Installer, Web}
 
   @compatibility %{
     "helper_version" => "0.1.0",
@@ -47,13 +47,9 @@ defmodule Rekindle.Toolchain.Helper do
   end
 
   defp start(executable, mode, options) do
-    if Path.type(executable) == :absolute and File.regular?(executable) do
-      port =
-        Port.open(
-          {:spawn_executable, String.to_charlist(executable)},
-          [:binary, :exit_status, :use_stdio, args: [mode]]
-        )
-
+    with {:ok, executable} <- Executable.qualify(executable),
+         {:ok, port} <-
+           Executable.open(executable, [mode], Keyword.put(options, :stderr_to_stdout, false)) do
       host = Installer.host() |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
       hello = Handshake.hello(mode, @compatibility, host)
 
@@ -67,7 +63,7 @@ defmodule Rekindle.Toolchain.Helper do
           {:error, :helper_protocol}
       end
     else
-      {:error, :helper_missing}
+      _ -> {:error, :helper_missing}
     end
   end
 

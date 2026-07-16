@@ -20,6 +20,37 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     %{helper: helper}
   end
 
+  test "helper launch rejects an inode replacement after qualification", %{helper: helper} do
+    assert {:ok, spawn, state} =
+             Exec.spawn_request(
+               request_id: @request,
+               executable: "/usr/bin/true",
+               cwd: System.tmp_dir!(),
+               terminate_grace_ms: 100,
+               kill_grace_ms: 100
+             )
+
+    replacement = helper <> ".replacement"
+    admitted = helper <> ".admitted"
+    File.cp!(helper, replacement)
+    File.chmod!(replacement, 0o700)
+
+    hook = fn ->
+      File.rename!(helper, admitted)
+      File.rename!(replacement, helper)
+      :ok
+    end
+
+    try do
+      assert {:error, :helper_missing} =
+               Helper.run_exec(helper, spawn, state, before_spawn: hook)
+    after
+      File.rm(helper)
+      File.rename(admitted, helper)
+      File.rm(replacement)
+    end
+  end
+
   test "exec-v1 negotiates, preserves binary streams, and reports a confirmed exit", %{
     helper: helper
   } do

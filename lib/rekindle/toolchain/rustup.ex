@@ -2,8 +2,9 @@ defmodule Rekindle.Toolchain.Rustup do
   @moduledoc false
 
   alias Rekindle.Failure
+  alias Rekindle.Toolchain.Executable
 
-  @spec resolve() :: {:ok, Path.t()} | {:error, Failure.t()}
+  @spec resolve() :: {:ok, Executable.t()} | {:error, Failure.t()}
   def resolve do
     candidates =
       case System.get_env("REKINDLE_RUSTUP") do
@@ -11,7 +12,7 @@ defmodule Rekindle.Toolchain.Rustup do
         override -> [override]
       end
 
-    case Enum.find_value(candidates, &qualified_path/1) do
+    case Enum.find_value(candidates, &qualified_executable/1) do
       nil ->
         {:error,
          Failure.new!(
@@ -21,31 +22,31 @@ defmodule Rekindle.Toolchain.Rustup do
            message: "qualified rustup executable is unavailable"
          )}
 
-      path ->
-        {:ok, path}
+      executable ->
+        {:ok, executable}
     end
   end
 
-  @spec resolve!() :: Path.t()
+  @spec resolve!() :: Executable.t()
   def resolve! do
     case resolve() do
-      {:ok, path} -> path
+      {:ok, executable} -> executable
       {:error, failure} -> raise failure.message
     end
   end
 
-  defp qualified_path(path) when is_binary(path) do
+  defp qualified_executable(path) when is_binary(path) do
     expanded = Path.expand(path)
 
-    with true <- Path.type(path) == :absolute,
-         {:ok, stat} <- File.stat(expanded),
-         true <- stat.type == :regular,
-         true <- Bitwise.band(stat.mode, 0o111) != 0 do
-      expanded
+    if Path.type(path) == :absolute do
+      case Executable.qualify(expanded) do
+        {:ok, executable} -> executable
+        {:error, _reason} -> nil
+      end
     else
-      _ -> nil
+      nil
     end
   end
 
-  defp qualified_path(_path), do: nil
+  defp qualified_executable(_path), do: nil
 end

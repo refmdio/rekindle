@@ -2,6 +2,7 @@ defmodule Rekindle.Toolchain.Installer do
   @moduledoc false
 
   alias Rekindle.Failure
+  alias Rekindle.Toolchain.Executable
 
   @executable "rekindle_toolchain"
 
@@ -25,6 +26,16 @@ defmodule Rekindle.Toolchain.Installer do
   end
 
   defp acquire({:ok, path}, _destination, _asset, _source?, _offline?, _options), do: {:ok, path}
+
+  defp acquire(
+         {:error, _code, _message} = error,
+         _destination,
+         _asset,
+         _source?,
+         _offline?,
+         _options
+       ),
+       do: error
 
   defp acquire(:missing, destination, asset, source_build?, offline?, options) do
     cond do
@@ -71,17 +82,22 @@ defmodule Rekindle.Toolchain.Installer do
 
   defp with_temporary(destination, function) do
     parent = Path.dirname(destination)
-    File.mkdir_p!(parent)
-    File.chmod!(parent, 0o700)
     temporary = destination <> ".tmp-" <> Integer.to_string(System.unique_integer([:positive]))
 
-    try do
-      File.open!(temporary, [:write, :binary, :exclusive], fn io ->
-        File.chmod!(temporary, 0o600)
-        function.(temporary, io)
-      end)
-    after
-      if File.exists?(temporary), do: File.rm(temporary)
+    with :ok <- Executable.ensure_private_directory(parent) do
+      try do
+        File.open!(temporary, [:write, :binary, :exclusive], fn io ->
+          File.chmod!(temporary, 0o600)
+          function.(temporary, io)
+        end)
+      after
+        case File.lstat(temporary) do
+          {:ok, _stat} -> File.rm(temporary)
+          _ -> :ok
+        end
+      end
+    else
+      _ -> {:error, :io_failed, "helper cache directory is not a private no-follow path"}
     end
   end
 
@@ -93,39 +109,44 @@ defmodule Rekindle.Toolchain.Installer do
     end)
 
     case File.ln(temporary, destination) do
-      :ok -> {:ok, destination}
+      :ok -> validate_cached(destination, asset)
       {:error, :eexist} -> validate_cached(destination, asset)
       {:error, reason} -> {:error, :io_failed, "helper installation failed: #{reason}"}
     end
   end
 
   defp validate_cached(path, asset) do
-    with {:ok, stat} <- File.lstat(path) do
-      if stat.type == :regular and Bitwise.band(stat.mode, 0o777) == 0o700 do
-        with {:ok, bytes} <- File.read(path),
-             :ok <- validate_bytes(bytes, asset) do
-          {:ok, path}
-        else
-          _ -> {:corrupt, path}
+    case Executable.stat(path) do
+      {:ok, _stat} ->
+        case Executable.qualify(path,
+               expected_sha256: asset["sha256"],
+               expected_size: asset["size"],
+               required_mode: 0o700
+             ) do
+          {:ok, _executable} -> {:ok, path}
+          {:error, _reason} -> {:corrupt, path}
         end
-      else
-        {:corrupt, path}
-      end
-    else
-      {:error, :enoent} -> :missing
-      {:error, reason} -> {:error, :io_failed, "helper cache read failed: #{reason}"}
+
+      {:error, :enoent} ->
+        :missing
+
+      {:error, reason} ->
+        {:error, :io_failed, "helper cache path qualification failed: #{reason}"}
     end
   end
 
   defp validate_file(path, asset) do
-    with {:ok, stat} <- File.stat(path),
-         true <- stat.size == asset["size"],
-         {:ok, bytes} <- File.read(path) do
-      validate_bytes(bytes, asset)
-    else
-      _ ->
-        {:error, :helper_checksum_mismatch,
-         "helper byte size does not match compatibility manifest"}
+    case Executable.qualify(path,
+           executable: false,
+           required_mode: 0o600,
+           expected_size: asset["size"],
+           expected_sha256: asset["sha256"]
+         ) do
+      {:ok, _file} ->
+        :ok
+
+      {:error, _reason} ->
+        {:error, :helper_checksum_mismatch, "helper temporary file failed qualification"}
     end
   end
 
