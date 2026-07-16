@@ -92,7 +92,20 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
     host = Installer.host()
     source = Path.expand("crates/rekindle-toolchain")
     bytes = build_helper_bytes!(source)
-    on_exit(fn -> File.rm_rf!(root) end)
+    File.mkdir_p!(root)
+    rustup = fake_rustup!(root)
+    rustup_log = Path.join(root, "rustup.log")
+    previous_rustup = System.get_env("REKINDLE_RUSTUP")
+    previous_log = System.get_env("REKINDLE_RUSTUP_LOG")
+
+    on_exit(fn ->
+      File.rm_rf!(root)
+      restore_env("REKINDLE_RUSTUP", previous_rustup)
+      restore_env("REKINDLE_RUSTUP_LOG", previous_log)
+    end)
+
+    System.put_env("REKINDLE_RUSTUP", rustup)
+    System.put_env("REKINDLE_RUSTUP_LOG", rustup_log)
     File.mkdir_p!(Path.join(shadow, "crates/rekindle-toolchain"))
 
     asset = %{
@@ -116,6 +129,9 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
 
     assert {:ok, path} = result
 
+    assert File.read!(rustup_log) ==
+             "run 1.95.0 cargo build --release --locked --offline --manifest-path #{source}/Cargo.toml\n"
+
     assert File.read!(path) == bytes
 
     assert String.contains?(
@@ -131,8 +147,16 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
     assert {:error, %{code: :helper_checksum_mismatch}} =
              Release.ensure(true,
                manifest_path: mismatch_manifest,
-               cache_root: Path.join(root, "mismatch")
+               cache_root: Path.join(root, "mismatch"),
+               offline: true
              )
+
+    assert rustup_log
+           |> File.read!()
+           |> String.split("\n", trim: true)
+           |> Enum.all?(fn line ->
+             String.contains?(line, " --offline ")
+           end)
 
     for override <- [
           [source_root: Path.join(shadow, "crates/rekindle-toolchain")],
@@ -178,6 +202,17 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
 
     File.read!(Path.join(source, "target/release/rekindle_toolchain"))
   end
+
+  defp fake_rustup!(root) do
+    path = Path.join(root, "rustup")
+
+    File.write!(path, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$REKINDLE_RUSTUP_LOG\"\n")
+    File.chmod!(path, 0o700)
+    path
+  end
+
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
 
   defp temp_root do
     Path.join(System.tmp_dir!(), "rekindle-compat-#{System.unique_integer([:positive])}")

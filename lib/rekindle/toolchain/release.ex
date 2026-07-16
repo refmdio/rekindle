@@ -27,6 +27,8 @@ defmodule Rekindle.Toolchain.Release do
   end
 
   defp install_source_build(options) do
+    offline? = Keyword.get(options, :offline, false)
+
     with :ok <- reject_source_override(options),
          {:ok, release} <- CompatibilityManifest.load(options),
          {:ok, asset} <- CompatibilityManifest.host_asset(release) do
@@ -34,8 +36,8 @@ defmodule Rekindle.Toolchain.Release do
         cache_root: Keyword.get_lazy(options, :cache_root, &cache_root/0),
         rekindle_version: release.rekindle_version,
         source_build: true,
-        offline: Keyword.get(options, :offline, false),
-        source_builder: fn ^asset -> source_bytes!() end
+        offline: offline?,
+        source_builder: fn ^asset -> source_bytes!(offline?) end
       )
     end
   rescue
@@ -63,28 +65,20 @@ defmodule Rekindle.Toolchain.Release do
     end
   end
 
-  defp source_bytes! do
+  defp source_bytes!(offline?) do
     root = packaged_source_root!()
-    build_source!(root)
+    build_source!(root, offline?)
   end
 
-  defp build_source!(root) do
+  defp build_source!(root, offline?) do
     manifest = Path.join(root, "Cargo.toml")
     rustup = Rustup.resolve!()
 
-    case Executable.run(
-           rustup,
-           [
-             "run",
-             @rust_toolchain,
-             "cargo",
-             "build",
-             "--release",
-             "--locked",
-             "--manifest-path",
-             manifest
-           ]
-         ) do
+    arguments =
+      ["run", @rust_toolchain, "cargo", "build", "--release", "--locked"] ++
+        if(offline?, do: ["--offline"], else: []) ++ ["--manifest-path", manifest]
+
+    case Executable.run(rustup, arguments) do
       {:ok, {_output, 0}} ->
         File.read!(Path.join(root, "target/release/rekindle_toolchain"))
 
