@@ -26,7 +26,8 @@ defmodule Rekindle.MixProject do
     [
       {:jason, "~> 1.4"},
       {:phoenix, "~> 1.8"},
-      {:phoenix_live_view, "~> 1.2"}
+      {:phoenix_live_view, "~> 1.2"},
+      {:igniter, "~> 0.8.2", optional: true}
     ]
   end
 
