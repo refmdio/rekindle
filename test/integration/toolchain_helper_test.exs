@@ -442,7 +442,11 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
         get import() { return importProperty; }
         set import(value) { this.value = value; }
       }
-      export default async function init() { return [lazy, wasm, matcher, template, interpolated, nested, templateMatcher, objectKey, property, importKey, importProperty, asyncImportObj, Loader]; }
+      class PrivateLoader {
+        #import(value) { return value; }
+        run() { return this.#import(1); }
+      }
+      export default async function init() { return [lazy, wasm, matcher, template, interpolated, nested, templateMatcher, objectKey, property, importKey, importProperty, asyncImportObj, Loader, PrivateLoader]; }
       //# sourceMappingURL=app.js.map
       """,
       "app.js.map" => ~s({"version":3}),

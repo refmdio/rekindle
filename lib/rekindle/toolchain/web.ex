@@ -547,7 +547,7 @@ defmodule Rekindle.Toolchain.Web do
          previous,
          references
        )
-       when previous != "." do
+       when previous not in [".", "#"] do
     if method_definition_tail?(rest) do
       javascript_token_references(["(" | rest], {:id, "import"}, references)
     else
@@ -560,7 +560,7 @@ defmodule Rekindle.Toolchain.Web do
          previous,
          references
        )
-       when previous != ".",
+       when previous not in [".", "#"],
        do: static_import_reference(tokens, references)
 
   defp javascript_token_references(
@@ -568,7 +568,7 @@ defmodule Rekindle.Toolchain.Web do
          previous,
          references
        )
-       when previous != ".",
+       when previous not in [".", "#"],
        do: static_import_reference(tokens, references)
 
   defp javascript_token_references(
@@ -576,11 +576,11 @@ defmodule Rekindle.Toolchain.Web do
          previous,
          references
        )
-       when previous != "." and form in ["*", "{"],
+       when previous not in [".", "#"] and form in ["*", "{"],
        do: static_import_reference(tokens, references)
 
   defp javascript_token_references([{:id, "export"}, form | rest], previous, references)
-       when previous != "." and form in ["{", "*"] do
+       when previous not in [".", "#"] and form in ["{", "*"] do
     with {:ok, specifier} <- static_module_specifier([form | rest], :export) do
       references =
         if is_nil(specifier), do: references, else: [{specifier, "esm_import", true} | references]
