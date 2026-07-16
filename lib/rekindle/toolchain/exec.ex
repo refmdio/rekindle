@@ -208,10 +208,10 @@ defmodule Rekindle.Toolchain.Exec do
 
       true ->
         result = %{
-          outcome: String.to_existing_atom(outcome),
+          outcome: decode_outcome(outcome),
           code: header["code"],
           signal: header["signal"],
-          cleanup: String.to_existing_atom(header["cleanup"]),
+          cleanup: decode_cleanup(header["cleanup"]),
           stdout_bytes: header["stdout_bytes"],
           stderr_bytes: header["stderr_bytes"],
           discarded_stdout: header["discarded_stdout"],
@@ -221,6 +221,13 @@ defmodule Rekindle.Toolchain.Exec do
         {:terminal, result, %{state | phase: :terminal, terminal: result}}
     end
   end
+
+  defp decode_outcome("exited"), do: :exited
+  defp decode_outcome("signaled"), do: :signaled
+  defp decode_outcome("spawn_failed"), do: :spawn_failed
+
+  defp decode_cleanup("confirmed"), do: :confirmed
+  defp decode_cleanup("uncertain"), do: :uncertain
 
   @spec encode(map()) :: {:ok, binary()} | {:error, atom()}
   def encode(header), do: Frame.encode(header)

@@ -188,6 +188,130 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     refute process_exists?(descendant)
   end
 
+  test "a fresh BEAM decodes a real signaled timeout without relying on existing atoms", %{
+    helper: helper
+  } do
+    code = ~S'''
+    alias Rekindle.Toolchain.{Exec, Helper}
+
+    request = "0123456789abcdef0123456789abcdef"
+
+    new_state = fn ->
+      {:ok, _, state} =
+        Exec.spawn_request(
+          request_id: request,
+          executable: "/usr/bin/true",
+          cwd: "/"
+        )
+
+      state
+    end
+
+    terminal_header = fn outcome, cleanup, code, signal ->
+      %{
+        "v" => 1,
+        "type" => "exit",
+        "request_id" => request,
+        "payload_len" => 0,
+        "outcome" => outcome,
+        "code" => code,
+        "signal" => signal,
+        "cleanup" => cleanup,
+        "stdout_bytes" => 0,
+        "stderr_bytes" => 0,
+        "discarded_stdout" => 0,
+        "discarded_stderr" => 0
+      }
+    end
+
+    complete = fn outcome, cleanup, code, signal ->
+      {:ok, state} =
+        Exec.accept(new_state.(), %{
+          "v" => 1,
+          "type" => "started",
+          "request_id" => request,
+          "payload_len" => 0,
+          "pid" => 1,
+          "process_group" => 1
+        }, "")
+
+      state =
+        Enum.reduce(["stdout", "stderr"], state, fn stream, current ->
+          {:ok, next} =
+            Exec.accept(current, %{
+              "v" => 1,
+              "type" => stream,
+              "request_id" => request,
+              "payload_len" => 0,
+              "sequence" => 0,
+              "eof" => true
+            }, "")
+
+          next
+        end)
+
+      {:terminal, terminal, _} =
+        Exec.accept(state, terminal_header.(outcome, cleanup, code, signal), "")
+
+      Atom.to_string(terminal.outcome) <> ":" <> Atom.to_string(terminal.cleanup)
+    end
+
+    exited = complete.("exited", "confirmed", 0, nil)
+    signaled = complete.("signaled", "uncertain", nil, 9)
+
+    {:terminal, spawn_failed, _} =
+      Exec.accept(
+        new_state.(),
+        terminal_header.("spawn_failed", "confirmed", nil, nil),
+        ""
+      )
+
+    decoded =
+      Enum.join(
+        [
+          exited,
+          signaled,
+          Atom.to_string(spawn_failed.outcome) <> ":" <>
+            Atom.to_string(spawn_failed.cleanup)
+        ],
+        ","
+      )
+
+    baseline = Port.list() |> MapSet.new()
+
+    {:ok, spawn, state} =
+      Exec.spawn_request(
+        executable: System.find_executable("sleep") |> Path.expand(),
+        argv: ["30"],
+        cwd: System.tmp_dir!(),
+        terminate_grace_ms: 0,
+        kill_grace_ms: 500
+      )
+
+    {:ok, terminal, "", ""} =
+      Helper.run_exec(System.fetch_env!("REKINDLE_TEST_HELPER"), spawn, state,
+        timeout_ms: 50,
+        cleanup_timeout_ms: 1_000
+      )
+
+    delta = Port.list() |> MapSet.new() |> MapSet.difference(baseline) |> MapSet.size()
+
+    IO.write(
+      decoded <> "|" <> Atom.to_string(terminal.outcome) <> ":" <>
+        Atom.to_string(terminal.cleanup) <> ":" <> Integer.to_string(delta)
+    )
+    '''
+
+    assert {"exited:confirmed,signaled:uncertain,spawn_failed:confirmed|signaled:confirmed:0", 0} =
+             System.cmd(
+               System.find_executable("mix") || raise("mix is required"),
+               ["run", "--no-start", "--no-compile", "-e", code],
+               cd: Path.expand("."),
+               env: [{"MIX_ENV", "test"}, {"REKINDLE_TEST_HELPER", helper}],
+               stderr_to_stdout: true
+             )
+  end
+
   test "zero terminate grace escalates immediately and reaps the process group", %{
     helper: helper
   } do
