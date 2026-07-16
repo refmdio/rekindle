@@ -193,6 +193,7 @@ defmodule Rekindle.Toolchain.Web do
          :ok <- manifest_shape(manifest),
          :ok <- manifest_digest(manifest, terminal),
          :ok <- artifact_identity(manifest, terminal),
+         :ok <- artifact_tree(root, manifest),
          :ok <- manifest_members(root, manifest),
          :ok <- manifest_edges(root, manifest) do
       :ok
@@ -249,6 +250,93 @@ defmodule Rekindle.Toolchain.Web do
       else: {:error, :artifact_identity}
   end
 
+  defp artifact_tree(root, manifest) do
+    expected =
+      Enum.reduce(manifest["members"], artifact_root_nodes(), fn member, nodes ->
+        path = member["path"]
+
+        nodes = Map.put(nodes, "members/" <> path, :regular)
+
+        path
+        |> String.split("/")
+        |> Enum.drop(-1)
+        |> Enum.scan("", fn segment, prefix ->
+          if prefix == "", do: segment, else: prefix <> "/" <> segment
+        end)
+        |> Enum.reduce(nodes, fn directory, nodes ->
+          Map.put(nodes, "members/" <> directory, :directory)
+        end)
+      end)
+
+    with {:ok, root_stat} <- File.lstat(root["path"]),
+         true <- root_stat.type == :directory,
+         true <- root["device"] == device_identity(root_stat),
+         {:ok, actual} <- artifact_nodes(root["path"]),
+         true <- actual == expected,
+         :ok <- artifact_marker(root, root_stat) do
+      :ok
+    else
+      _ -> {:error, :artifact_tree}
+    end
+  end
+
+  defp artifact_root_nodes do
+    %{
+      @marker => :regular,
+      @manifest => :regular,
+      "members" => :directory
+    }
+  end
+
+  defp artifact_nodes(root), do: artifact_nodes(root, "", %{})
+
+  defp artifact_nodes(path, prefix, nodes) do
+    with {:ok, entries} <- File.ls(path) do
+      Enum.reduce_while(entries, {:ok, nodes}, fn entry, {:ok, nodes} ->
+        relative = if prefix == "", do: entry, else: prefix <> "/" <> entry
+        child = Path.join(path, entry)
+
+        case File.lstat(child) do
+          {:ok, %{type: :regular}} ->
+            {:cont, {:ok, Map.put(nodes, relative, :regular)}}
+
+          {:ok, %{type: :directory}} ->
+            case artifact_nodes(child, relative, Map.put(nodes, relative, :directory)) do
+              {:ok, nodes} -> {:cont, {:ok, nodes}}
+              {:error, _reason} = error -> {:halt, error}
+            end
+
+          _ ->
+            {:halt, {:error, :non_regular_node}}
+        end
+      end)
+    end
+  end
+
+  defp artifact_marker(root, root_stat) do
+    path = Path.join(root["path"], @marker)
+
+    with {:ok, stat} <- File.lstat(path),
+         true <- stat.type == :regular,
+         true <- stat.uid == root_stat.uid,
+         true <- stat.major_device == root_stat.major_device,
+         true <- stat.minor_device == root_stat.minor_device,
+         true <- Bitwise.band(stat.mode, 0o777) == 0o600,
+         {:ok, bytes} <- File.read(path),
+         {:ok, marker} <- Jason.decode(bytes),
+         true <- CanonicalValue.encode!(marker) == bytes,
+         true <- exact?(marker, ~w[root_id v]),
+         true <- marker["v"] == 1,
+         :ok <- request_id(marker["root_id"]) do
+      :ok
+    else
+      _ -> {:error, :invalid_marker}
+    end
+  end
+
+  defp device_identity(stat),
+    do: stat.major_device * 4_294_967_296 + stat.minor_device
+
   defp manifest_members(root, manifest) do
     members = manifest["members"]
     paths = Enum.map(members, & &1["path"])
@@ -261,15 +349,7 @@ defmodule Rekindle.Toolchain.Web do
         {:error, :member_changed}
 
       true ->
-        actual =
-          root["path"]
-          |> Path.join("members/**/*")
-          |> Path.wildcard(match_dot: true)
-          |> Enum.reject(&File.dir?/1)
-          |> Enum.map(&Path.relative_to(&1, Path.join(root["path"], "members")))
-          |> Enum.sort()
-
-        if actual == paths, do: :ok, else: {:error, :member_closure}
+        :ok
     end
   end
 

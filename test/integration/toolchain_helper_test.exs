@@ -764,6 +764,94 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
     assert verified["artifact_id"] == package["artifact_id"]
 
+    member_file =
+      package_output
+      |> Path.join("members/**/*")
+      |> Path.wildcard()
+      |> Enum.find(&File.regular?/1)
+
+    mutations = [
+      {"root extra file",
+       fn ->
+         path = Path.join(package_output, "undeclared.txt")
+         File.write!(path, "extra")
+         fn -> File.rm!(path) end
+       end},
+      {"changed attempt marker",
+       fn ->
+         path = Path.join(package_output, Web.marker())
+         original = File.read!(path)
+         File.write!(path, ~s({"root_id":"tampered","v":1}))
+
+         fn ->
+           File.write!(path, original)
+           File.chmod!(path, 0o600)
+         end
+       end},
+      {"nested extra file",
+       fn ->
+         path = Path.join(package_output, "members/undeclared.js")
+         File.write!(path, "extra")
+         fn -> File.rm!(path) end
+       end},
+      {"unexpected directory",
+       fn ->
+         path = Path.join(package_output, "unexpected-directory")
+         File.mkdir!(path)
+         fn -> File.rmdir!(path) end
+       end},
+      {"symlink to file",
+       fn ->
+         path = Path.join(package_output, "linked-file")
+         File.ln_s!(member_file, path)
+         fn -> File.rm!(path) end
+       end},
+      {"symlink to directory",
+       fn ->
+         path = Path.join(package_output, "linked-directory")
+         File.ln_s!(Path.join(package_output, "members"), path)
+         fn -> File.rm!(path) end
+       end},
+      {"FIFO",
+       fn ->
+         path = Path.join(package_output, "unexpected-fifo")
+         {_, 0} = System.cmd("mkfifo", [path], stderr_to_stdout: true)
+         fn -> File.rm!(path) end
+       end},
+      {"Unix socket",
+       fn ->
+         path = Path.join(package_output, "unexpected-socket")
+
+         {:ok, socket} =
+           :gen_tcp.listen(0, [:binary, active: false, ifaddr: {:local, path}])
+
+         fn ->
+           :ok = :gen_tcp.close(socket)
+           File.rm!(path)
+         end
+       end}
+    ]
+
+    for {label, mutate} <- mutations do
+      cleanup = mutate.()
+
+      try do
+        assert {:error, :manifest_changed} = Web.revalidate_manifest(artifact_root, verified),
+               label
+
+        assert {:ok, %{"type" => "operation_error", "code" => "input_changed"}, []} =
+                 Helper.run_web(helper, request, state),
+               label
+      after
+        cleanup.()
+      end
+
+      assert Web.revalidate_manifest(artifact_root, verified) == :ok, "#{label} cleanup"
+    end
+
+    assert {:ok, %{"type" => "operation_ok", "op" => "verify_web"}, []} =
+             Helper.run_web(helper, request, state)
+
     member =
       package_output
       |> Path.join("members/**/*")

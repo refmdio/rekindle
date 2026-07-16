@@ -1281,9 +1281,27 @@ fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usi
         {
             return Err(OpError::new("invalid_request", "invalid manifest member"));
         }
-        let member_path = root.path.join("members").join(path);
-        if !no_symlink_below(&root.path.join("members"), path) {
-            return Err(OpError::new("asset_escape", "member path escaped"));
+        identity_members.push(json!({
+            "path": member["path"], "role": member["role"],
+            "sha256": member["sha256"], "size": member["size"]
+        }));
+        member_paths.insert(path.to_owned());
+        member_roles.insert(path.to_owned(), member["role"].as_str().unwrap().to_owned());
+        previous = Some(path);
+    }
+
+    validate_web_artifact_tree(root, &member_paths)?;
+    validate_artifact_marker(root)?;
+
+    for member in members {
+        let path = member["path"].as_str().unwrap();
+        let members_root = root.path.join("members");
+        let member_path = members_root.join(path);
+        if !no_symlink_below(&members_root, path)
+            || !fs::symlink_metadata(&member_path)
+                .is_ok_and(|metadata| metadata.file_type().is_file())
+        {
+            return Err(OpError::new("input_changed", "member type changed"));
         }
         let bytes = fs::read(member_path)
             .map_err(|_| OpError::new("input_changed", "member is missing"))?;
@@ -1294,26 +1312,6 @@ fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usi
         total_bytes = total_bytes
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| OpError::new("output_limit", "member bytes overflow"))?;
-        identity_members.push(json!({
-            "path": member["path"], "role": member["role"],
-            "sha256": member["sha256"], "size": member["size"]
-        }));
-        member_paths.insert(path.to_owned());
-        member_roles.insert(path.to_owned(), member["role"].as_str().unwrap().to_owned());
-        previous = Some(path);
-    }
-    let actual_members = WalkDir::new(root.path.join("members"))
-        .min_depth(1)
-        .follow_links(false)
-        .into_iter()
-        .map(|entry| entry.map_err(|error| OpError::new("io_failed", error.to_string())))
-        .collect::<OpResult<Vec<_>>>()?
-        .into_iter()
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| normalized_relative(entry.path(), &root.path.join("members")))
-        .collect::<OpResult<BTreeSet<_>>>()?;
-    if actual_members != member_paths {
-        return Err(OpError::new("input_changed", "member closure changed"));
     }
     let entry = manifest["entry"].as_str().unwrap_or_default();
     if !members.iter().any(|member| {
@@ -1403,6 +1401,82 @@ fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usi
         return Err(OpError::new("input_changed", "artifact identity mismatch"));
     }
     Ok((artifact_id, members.len(), total_bytes))
+}
+
+fn validate_web_artifact_tree(root: &Root, member_paths: &BTreeSet<String>) -> OpResult<()> {
+    let mut expected_files = BTreeSet::from([MARKER.to_owned(), MANIFEST.to_owned()]);
+    let mut expected_directories = BTreeSet::from(["members".to_owned()]);
+
+    for path in member_paths {
+        expected_files.insert(format!("members/{path}"));
+
+        let mut parent = Path::new(path).parent();
+        while let Some(directory) = parent {
+            if directory.as_os_str().is_empty() {
+                break;
+            }
+            let directory = directory
+                .to_str()
+                .ok_or_else(|| OpError::new("input_changed", "artifact path is not UTF-8"))?;
+            expected_directories.insert(format!("members/{directory}"));
+            parent = Path::new(directory).parent();
+        }
+    }
+
+    for entry in WalkDir::new(&root.path).min_depth(1).follow_links(false) {
+        let entry = entry.map_err(|error| OpError::new("io_failed", error.to_string()))?;
+        let relative = normalized_relative(entry.path(), &root.path)?;
+        let file_type = entry.file_type();
+
+        if expected_files.remove(&relative) {
+            if !file_type.is_file() {
+                return Err(OpError::new("input_changed", "artifact file type changed"));
+            }
+        } else if expected_directories.remove(&relative) {
+            if !file_type.is_dir() {
+                return Err(OpError::new(
+                    "input_changed",
+                    "artifact directory type changed",
+                ));
+            }
+        } else {
+            return Err(OpError::new(
+                "input_changed",
+                "artifact node closure changed",
+            ));
+        }
+    }
+
+    if expected_files.is_empty() && expected_directories.is_empty() {
+        Ok(())
+    } else {
+        Err(OpError::new("input_changed", "artifact node is missing"))
+    }
+}
+
+fn validate_artifact_marker(root: &Root) -> OpResult<()> {
+    let path = root.path.join(MARKER);
+    let root_metadata = fs::symlink_metadata(&root.path).map_err(io_error)?;
+    let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
+    let bytes = fs::read(&path).map_err(io_error)?;
+    let marker: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| OpError::new("input_changed", "invalid attempt marker"))?;
+    let canonical =
+        serde_jcs::to_vec(&marker).map_err(|error| OpError::new("internal", error.to_string()))?;
+
+    if metadata.file_type().is_file()
+        && metadata.uid() == root_metadata.uid()
+        && metadata.dev() == root_metadata.dev()
+        && metadata.permissions().mode() & 0o777 == 0o600
+        && frame::exact_keys(&marker, &["root_id", "v"])
+        && marker["v"] == 1
+        && frame::is_request_id(marker.get("root_id"))
+        && canonical == bytes
+    {
+        Ok(())
+    } else {
+        Err(OpError::new("input_changed", "invalid attempt marker"))
+    }
 }
 
 fn enforce_limits(path: &Path, limits: &Limits, started: Instant) -> OpResult<()> {
