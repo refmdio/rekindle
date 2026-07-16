@@ -201,6 +201,57 @@ defmodule Rekindle.CommandTest do
     assert failed.stderr == ""
   end
 
+  test "JSON result projection detects normalized key collisions recursively" do
+    for result <- [
+          %{:same => 1, "same" => 2},
+          %{"nested" => [%{:same => 1, "same" => 2}]}
+        ] do
+      {outcome, log} =
+        with_log(fn ->
+          Command.run("rekindle.example", ["web", "--json"], @grammar, fn _ ->
+            {:ok, result}
+          end)
+        end)
+
+      assert_correlated_internal(outcome, log, "result map keys collide")
+      envelope = Jason.decode!(outcome.stdout)
+      assert envelope["result"] == nil
+      assert envelope["status"] == "error"
+      assert envelope["failure"]["code"] == "contract_violation"
+      refute outcome.stdout =~ ~s("same":1)
+      refute outcome.stdout =~ ~s("same":2)
+    end
+  end
+
+  test "JSON result projection preserves collision-free mixed maps and rejects unsupported shapes" do
+    valid =
+      Command.run("rekindle.example", ["web", "--json"], @grammar, fn _ ->
+        {:ok, %{:atom => :ready, "string" => %{2 => [true, nil]}}}
+      end)
+
+    assert valid.exit_status == 0
+
+    assert Jason.decode!(valid.stdout)["result"] == %{
+             "atom" => "ready",
+             "string" => %{"2" => [true, nil]}
+           }
+
+    for {result, context} <- [
+          {%URI{scheme: "https", host: "example.test"}, "structs are not supported"},
+          {%{{:tuple, :key} => 1}, "key type is not supported"}
+        ] do
+      {outcome, log} =
+        with_log(fn ->
+          Command.run("rekindle.example", ["web", "--json"], @grammar, fn _ ->
+            {:ok, result}
+          end)
+        end)
+
+      assert_correlated_internal(outcome, log, context)
+      assert Jason.decode!(outcome.stdout)["result"] == nil
+    end
+  end
+
   test "contains invalid handler values and exceptions as exit 3 without stacks" do
     {invalid, _log} =
       with_log(fn -> Command.run("rekindle.example", ["web"], @grammar, fn _ -> :invalid end) end)

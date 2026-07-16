@@ -468,11 +468,23 @@ defmodule Rekindle.Command do
     }
   end
 
-  defp canonical_result(value) when is_map(value), do: stringify(value)
+  defp canonical_result(value) when is_map(value) or is_list(value), do: stringify(value)
   defp canonical_result(value), do: value
 
-  defp stringify(map) when is_map(map),
-    do: Map.new(map, fn {key, value} -> {to_string(key), stringify(value)} end)
+  defp stringify(map) when is_map(map) and not is_struct(map) do
+    Enum.reduce(map, %{}, fn {key, value}, result ->
+      key = stringify_key!(key)
+
+      if Map.has_key?(result, key) do
+        raise ArgumentError, "result map keys collide after JSON normalization"
+      end
+
+      Map.put(result, key, stringify(value))
+    end)
+  end
+
+  defp stringify(value) when is_struct(value),
+    do: raise(ArgumentError, "result structs are not supported")
 
   defp stringify(list) when is_list(list), do: Enum.map(list, &stringify/1)
 
@@ -480,6 +492,13 @@ defmodule Rekindle.Command do
     do: Atom.to_string(value)
 
   defp stringify(value), do: value
+
+  defp stringify_key!(value) when is_binary(value), do: value
+  defp stringify_key!(value) when is_atom(value), do: Atom.to_string(value)
+  defp stringify_key!(value) when is_integer(value), do: Integer.to_string(value)
+
+  defp stringify_key!(_value),
+    do: raise(ArgumentError, "result map key type is not supported")
 
   defp human_result(value) when is_binary(value), do: value
   defp human_result(value), do: value |> canonical_result() |> CanonicalValue.encode!()
