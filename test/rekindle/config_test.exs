@@ -1,5 +1,5 @@
 defmodule Rekindle.ConfigTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Rekindle.Config
   alias Rekindle.Config.{DesktopTarget, WebTarget}
@@ -226,6 +226,70 @@ defmodule Rekindle.ConfigTest do
              )
 
     assert Enum.map(project.build.targets.web.environment.set, &elem(&1, 0)) == ["AA", "ZZ"]
+  end
+
+  test "rejects reserved, symlinked, and normalization-colliding roots" do
+    assert_error(
+      Config.normalize(:demo_app, Keyword.put(web_build(), :client, ".git"), web_dev()),
+      :path_invalid
+    )
+
+    root = Path.join(System.tmp_dir!(), "rekindle-config-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    File.ln_s!(Path.expand("client"), Path.join(root, "client"))
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert_error(
+      Config.normalize(:demo_app, web_build(), web_dev(), project_root: root),
+      :path_invalid
+    )
+
+    collision =
+      web_build()
+      |> Keyword.put(:targets, web_build()[:targets] ++ desktop_build()[:targets])
+      |> Keyword.update!(:targets, fn targets ->
+        Keyword.update!(targets, :desktop, fn desktop ->
+          Keyword.put(desktop, :projection,
+            mode: :directory,
+            root: "PRIV/STATIC/REKINDLE"
+          )
+        end)
+      end)
+
+    assert_error(Config.normalize(:demo_app, collision, web_dev()), :path_overlap)
+  end
+
+  test "explicit accepted origins must intersect the endpoint policy" do
+    previous = Application.get_env(:demo_app, Endpoint)
+    Application.put_env(:demo_app, Endpoint, check_origin: ["https://allowed.example"])
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:demo_app, Endpoint, previous),
+        else: Application.delete_env(:demo_app, Endpoint)
+    end)
+
+    dev = [
+      schema: 1,
+      enabled: true,
+      targets: [:web],
+      endpoint: Endpoint,
+      accepted_origins: ["https://allowed.example"]
+    ]
+
+    assert {:ok, project} = Config.normalize(:demo_app, web_build(), dev)
+    assert project.dev.accepted_origins == ["https://allowed.example"]
+
+    assert_error(
+      Config.normalize(:demo_app, web_build(),
+        schema: 1,
+        enabled: true,
+        targets: [:web],
+        endpoint: Endpoint,
+        accepted_origins: ["https://blocked.example"]
+      ),
+      :config_invalid
+    )
   end
 
   defp web_build do

@@ -79,8 +79,8 @@ defmodule Rekindle.Config do
 
     with {:ok, application_id} <- application_id(otp_app),
          {:ok, build} <- normalize_build(build),
-         {:ok, dev} <- normalize_dev(dev, build),
-         :ok <- validate_path_ownership(build) do
+         {:ok, dev} <- normalize_dev(dev, build, otp_app),
+         :ok <- validate_path_ownership(build, project_root) do
       {:ok,
        %Project{
          otp_app: otp_app,
@@ -493,22 +493,23 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp normalize_dev(value, build) do
+  defp normalize_dev(value, build, otp_app) do
     default_targets = if Map.has_key?(build.targets, :web), do: [:web], else: [:desktop]
     path = [:rekindle_dev]
 
     with :ok <- closed_keyword(value, @dev_keys, path) do
       value = Keyword.merge(@default_dev ++ [targets: default_targets], value)
-      normalize_dev_values(value, build, path)
+      normalize_dev_values(value, build, otp_app, path)
     end
   end
 
-  defp normalize_dev_values(value, build, path) do
+  defp normalize_dev_values(value, build, otp_app, path) do
     with :ok <- exact(fetch(value, :schema), 1, path ++ [:schema]),
          {:ok, enabled} <- boolean(fetch(value, :enabled), path ++ [:enabled]),
          {:ok, targets} <- dev_targets(fetch(value, :targets), build, path),
          {:ok, endpoint} <- endpoint(Keyword.get(value, :endpoint), targets, path),
-         {:ok, origins} <- origins(fetch(value, :accepted_origins), targets, path),
+         {:ok, origins} <-
+           origins(fetch(value, :accepted_origins), targets, endpoint, otp_app, path),
          {:ok, debounce} <- nonnegative(fetch(value, :debounce_ms), path ++ [:debounce_ms]),
          {:ok, diagnostic_limit} <-
            positive(fetch(value, :diagnostic_limit), path ++ [:diagnostic_limit]),
@@ -570,14 +571,16 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp origins(:endpoint, targets, _path),
+  defp origins(:endpoint, targets, _endpoint, _otp_app, _path),
     do: {:ok, if(:web in targets, do: :endpoint, else: nil)}
 
-  defp origins(value, targets, path) when is_list(value) do
+  defp origins(value, targets, endpoint, otp_app, path) when is_list(value) do
     if :web in targets do
       with :ok <- nonempty(value, path ++ [:accepted_origins]),
-           true <- Enum.all?(value, &valid_origin?/1) do
-        unique_sorted(value, & &1, path ++ [:accepted_origins])
+           true <- Enum.all?(value, &valid_origin?/1),
+           {:ok, normalized} <- unique_sorted(value, & &1, path ++ [:accepted_origins]),
+           :ok <- intersects_endpoint_policy(normalized, otp_app, endpoint, path) do
+        {:ok, normalized}
       else
         _ -> error(path ++ [:accepted_origins], :config_invalid, "accepted origins are invalid")
       end
@@ -586,7 +589,7 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp origins(_value, targets, path) do
+  defp origins(_value, targets, _endpoint, _otp_app, path) do
     if :web in targets do
       error(path ++ [:accepted_origins], :config_invalid, "accepted origins are invalid")
     else
@@ -602,6 +605,25 @@ defmodule Rekindle.Config do
   end
 
   defp valid_origin?(_), do: false
+
+  defp intersects_endpoint_policy(origins, otp_app, endpoint, path) do
+    policy = Application.get_env(otp_app, endpoint, []) |> Keyword.get(:check_origin)
+
+    cond do
+      policy == false ->
+        :ok
+
+      is_list(policy) and Enum.any?(origins, &(&1 in policy)) ->
+        :ok
+
+      true ->
+        error(
+          path ++ [:accepted_origins],
+          :config_invalid,
+          "accepted origins do not intersect endpoint policy"
+        )
+    end
+  end
 
   defp validate_web_rust_target(
          %{backend: :canonical, rust_target: "wasm32-unknown-unknown"},
@@ -632,7 +654,7 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp validate_path_ownership(build) do
+  defp validate_path_ownership(build, project_root) do
     sources =
       [build.client] ++
         Enum.flat_map(build.targets, fn {_name, target} ->
@@ -649,11 +671,57 @@ defmodule Rekindle.Config do
           Enum.count(outputs, &overlap?(output, &1)) > 1
       end)
 
-    if conflict do
-      error([:rekindle_build], :path_overlap, "source and output roots overlap unsafely")
-    else
+    with true <- is_nil(conflict),
+         :ok <- reject_reserved_sources(sources),
+         :ok <- reject_normalization_collisions(sources ++ outputs),
+         :ok <- reject_symlink_components(project_root, sources ++ outputs) do
       :ok
+    else
+      false -> error([:rekindle_build], :path_overlap, "source and output roots overlap unsafely")
+      {:error, _} = error -> error
     end
+  end
+
+  defp reject_reserved_sources(sources) do
+    reserved = [".git", ".rekindle", "_build", "deps", "dist", "priv/static"]
+
+    if Enum.any?(sources, fn source -> Enum.any?(reserved, &descendant_or_equal?(source, &1)) end),
+       do: error([:rekindle_build], :path_invalid, "source root is reserved or generated"),
+       else: :ok
+  end
+
+  defp reject_normalization_collisions(paths) do
+    folded = Enum.map(paths, &(String.normalize(&1, :nfkc) |> String.downcase()))
+
+    if length(folded) == MapSet.size(MapSet.new(folded)),
+      do: :ok,
+      else:
+        error(
+          [:rekindle_build],
+          :path_overlap,
+          "configured roots collide after normalization or case folding"
+        )
+  end
+
+  defp reject_symlink_components(project_root, paths) do
+    project_root = Path.expand(project_root)
+
+    unsafe? =
+      Enum.any?(paths, fn relative ->
+        relative
+        |> String.split("/")
+        |> Enum.scan(project_root, &Path.join(&2, &1))
+        |> Enum.any?(fn path ->
+          case File.lstat(path) do
+            {:ok, %{type: :symlink}} -> true
+            _ -> false
+          end
+        end)
+      end)
+
+    if unsafe?,
+      do: error([:rekindle_build], :path_invalid, "configured root traverses a symlink"),
+      else: :ok
   end
 
   defp overlap?(left, right),
