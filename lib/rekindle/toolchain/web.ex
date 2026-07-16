@@ -1,12 +1,29 @@
 defmodule Rekindle.Toolchain.Web do
   @moduledoc false
 
+  alias Rekindle.CanonicalValue
+
   @root_keys ~w[id path mode device]
   @file_keys ~w[root_id path sha256 size mode]
   @limit_keys ~w[max_files max_input_bytes max_output_bytes deadline_ms]
   @ops ~w[bindgen_web package_web verify_web]
   @error_codes ~w[invalid_request incompatible_schema input_changed invalid_wasm bindgen_failed unsupported_import asset_escape asset_collision output_limit io_failed internal]
   @marker ".rekindle-attempt"
+  @manifest "rekindle-web-manifest-v1.json"
+  @bootstrap_template """
+  export async function start(context) {
+    if (!context || context.v !== 1) throw new Error("invalid Rekindle context");
+    const styles = __REKINDLE_HOT_STYLES__;
+    await Promise.all(styles.map((href) => new Promise((resolve, reject) => {
+      const link = Object.assign(document.createElement("link"), { rel: "stylesheet", href });
+      link.onload = resolve;
+      link.onerror = reject;
+      document.head.appendChild(link);
+    })));
+    const module = await import("./__REKINDLE_ENTRY__");
+    await module.default();
+  }
+  """
 
   defstruct request_id: nil, op: nil, progress_sequence: 0, terminal?: false
 
@@ -142,6 +159,134 @@ defmodule Rekindle.Toolchain.Web do
   @spec marker() :: String.t()
   def marker, do: @marker
 
+  @spec bootstrap_template() :: map()
+  def bootstrap_template do
+    %{"id" => "v1", "sha256" => sha256(@bootstrap_template)}
+  end
+
+  @spec revalidate_manifest(map(), map()) :: :ok | {:error, atom()}
+  def revalidate_manifest(root, terminal) do
+    with :ok <- validate_root(root),
+         {:ok, descriptor} <- file(root, @manifest),
+         :ok <- terminal_manifest_descriptor(terminal, descriptor),
+         {:ok, bytes} <- File.read(Path.join(root["path"], @manifest)),
+         {:ok, manifest} <- Jason.decode(bytes),
+         true <- CanonicalValue.encode!(manifest) == bytes,
+         :ok <- manifest_shape(manifest),
+         :ok <- manifest_digest(manifest, terminal),
+         :ok <- artifact_identity(manifest, terminal),
+         :ok <- manifest_members(root, manifest),
+         :ok <- manifest_edges(manifest) do
+      :ok
+    else
+      _ -> {:error, :manifest_changed}
+    end
+  rescue
+    _ -> {:error, :manifest_changed}
+  end
+
+  defp terminal_manifest_descriptor(%{"manifest" => expected}, actual) do
+    if expected == actual, do: :ok, else: {:error, :manifest_descriptor}
+  end
+
+  defp terminal_manifest_descriptor(_terminal, _actual), do: :ok
+
+  defp manifest_shape(manifest) do
+    keys =
+      ~w[contract_version rekindle_version application_id target artifact_id build producer host_requirements entry hot_styles members edges manifest_digest]
+
+    if exact?(manifest, keys) and manifest["contract_version"] == 1 and
+         manifest["target"] == "web" and digest?(manifest["artifact_id"]) and
+         digest?(manifest["manifest_digest"]) and is_list(manifest["members"]) and
+         is_list(manifest["edges"]),
+       do: :ok,
+       else: {:error, :manifest_shape}
+  end
+
+  defp manifest_digest(manifest, terminal) do
+    recorded = manifest["manifest_digest"]
+
+    calculated =
+      domain_digest("rekindle-web-manifest-v1\0", Map.delete(manifest, "manifest_digest"))
+
+    if recorded == calculated and terminal["manifest_digest"] == calculated,
+      do: :ok,
+      else: {:error, :manifest_digest}
+  end
+
+  defp artifact_identity(manifest, terminal) do
+    members =
+      Enum.map(manifest["members"], &Map.take(&1, ~w[path role sha256 size]))
+
+    identity = %{
+      "v" => 1,
+      "build_key" => manifest["build"]["build_key"],
+      "members" => members
+    }
+
+    calculated = domain_digest("rekindle-web-artifact-v1\0", identity)
+
+    if manifest["artifact_id"] == calculated and terminal["artifact_id"] == calculated,
+      do: :ok,
+      else: {:error, :artifact_identity}
+  end
+
+  defp manifest_members(root, manifest) do
+    members = manifest["members"]
+    paths = Enum.map(members, & &1["path"])
+
+    cond do
+      paths != Enum.sort(paths) or length(paths) != MapSet.size(MapSet.new(paths)) ->
+        {:error, :member_order}
+
+      not Enum.all?(members, &valid_manifest_member?(root, &1)) ->
+        {:error, :member_changed}
+
+      true ->
+        actual =
+          root["path"]
+          |> Path.join("members/**/*")
+          |> Path.wildcard(match_dot: true)
+          |> Enum.reject(&File.dir?/1)
+          |> Enum.map(&Path.relative_to(&1, Path.join(root["path"], "members")))
+          |> Enum.sort()
+
+        if actual == paths, do: :ok, else: {:error, :member_closure}
+    end
+  end
+
+  defp valid_manifest_member?(root, member) do
+    with true <-
+           exact?(member, ~w[path role sha256 size mime cache source_map]) and
+             member["role"] in ~w[bootstrap javascript wasm css asset source_map] and
+             member["cache"] in ~w[no_cache immutable] and digest?(member["sha256"]),
+         {:ok, descriptor} <- file(root, "members/" <> member["path"]),
+         true <- descriptor["sha256"] == member["sha256"],
+         true <- descriptor["size"] == member["size"] do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp manifest_edges(manifest) do
+    member_paths = MapSet.new(manifest["members"], & &1["path"])
+
+    valid? =
+      Enum.all?(manifest["edges"], fn edge ->
+        exact?(edge, ~w[from to kind]) and MapSet.member?(member_paths, edge["from"]) and
+          MapSet.member?(member_paths, edge["to"]) and
+          edge["kind"] in ~w[esm_import dynamic_import wasm_url source_map css_url asset_url]
+      end)
+
+    if valid?, do: :ok, else: {:error, :invalid_edges}
+  end
+
+  defp domain_digest(domain, value),
+    do:
+      :crypto.hash(:sha256, [domain, CanonicalValue.encode!(value)])
+      |> Base.encode16(case: :lower)
+
   defp progress(state, header) do
     diagnostic = header["diagnostic"]
 
@@ -203,9 +348,11 @@ defmodule Rekindle.Toolchain.Web do
   defp validate_operation("bindgen_web", body) do
     if exact?(
          body,
-         ~w[input_wasm output_root output_stem debug source_maps expected_wasm_bindgen limits]
+         ~w[input_root input_wasm output_root output_stem debug source_maps expected_wasm_bindgen limits]
        ) and
-         file_descriptor?(body["input_wasm"]) and write_root?(body["output_root"]) and
+         read_root?(body["input_root"]) and file_descriptor?(body["input_wasm"]) and
+         body["input_wasm"]["root_id"] == body["input_root"]["id"] and
+         write_root?(body["output_root"]) and
          is_binary(body["output_stem"]) and body["output_stem"] != "" and
          is_boolean(body["debug"]) and
          body["source_maps"] in ~w[none external] and is_binary(body["expected_wasm_bindgen"]) and

@@ -45,10 +45,13 @@ defmodule Rekindle.Toolchain.Frame do
              true <- is_map(header),
              :ok <- validate_base(header),
              payload_length when payload_length <= @max_payload <- header["payload_len"],
-             true <- CanonicalValue.encode!(header) == header_bytes,
-             true <- byte_size(after_header) >= payload_length do
-          <<payload::binary-size(^payload_length), remaining::binary>> = after_header
-          {:ok, header, payload, remaining}
+             true <- CanonicalValue.encode!(header) == header_bytes do
+          if byte_size(after_header) >= payload_length do
+            <<payload::binary-size(^payload_length), remaining::binary>> = after_header
+            {:ok, header, payload, remaining}
+          else
+            {:more, payload_length - byte_size(after_header)}
+          end
         else
           false -> {:error, :noncanonical_header}
           _ -> {:error, :invalid_frame}

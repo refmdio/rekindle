@@ -39,6 +39,7 @@ defmodule Rekindle.Toolchain.Exec do
          true <- env_mode in [:inherit, :replace],
          {:ok, env_set} <- env_set(env_set),
          {:ok, env_unset} <- env_unset(env_unset),
+         true <- MapSet.disjoint?(MapSet.new(env_set, &elem(&1, 0)), MapSet.new(env_unset)),
          true <- positive(terminate_grace) and positive(kill_grace) do
       header = %{
         "v" => 1,

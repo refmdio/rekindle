@@ -37,6 +37,7 @@ defmodule Rekindle.Toolchain.WebTest do
              Web.operation(
                "bindgen_web",
                %{
+                 input_root: input_root,
                  input_wasm: wasm,
                  output_root: output_root,
                  output_stem: "app",
@@ -49,7 +50,7 @@ defmodule Rekindle.Toolchain.WebTest do
              )
 
     assert Map.keys(bindgen) |> Enum.sort() ==
-             ~w[v type request_id payload_len op input_wasm output_root output_stem debug source_maps expected_wasm_bindgen limits]
+             ~w[v type request_id payload_len op input_root input_wasm output_root output_stem debug source_maps expected_wasm_bindgen limits]
              |> Enum.sort()
 
     package_body = %{

@@ -9,6 +9,7 @@ defmodule Rekindle.Toolchain.FrameTest do
     header = %{"type" => "stdout", "request_id" => @request, "sequence" => 0, "eof" => false}
     assert {:ok, encoded} = Frame.encode(header, <<0, 1, 2>>)
     assert {:more, _} = Frame.decode(binary_part(encoded, 0, 3))
+    assert {:more, 2} = Frame.decode(binary_part(encoded, 0, byte_size(encoded) - 2))
     assert {:ok, decoded, <<0, 1, 2>>, "tail"} = Frame.decode(encoded <> "tail")
     assert decoded["payload_len"] == 3
     assert decoded["v"] == 1

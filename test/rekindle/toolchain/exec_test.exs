@@ -35,6 +35,14 @@ defmodule Rekindle.Toolchain.ExecTest do
                cwd: "/tmp",
                env_set: [{"A", "1"}, {"A", "2"}]
              )
+
+    assert {:error, :invalid_spawn} =
+             Exec.spawn_request(
+               executable: "/bin/x",
+               cwd: "/tmp",
+               env_set: [{"A", "1"}],
+               env_unset: ["A"]
+             )
   end
 
   test "admits independently sequenced bounded byte streams and terminal exit" do
