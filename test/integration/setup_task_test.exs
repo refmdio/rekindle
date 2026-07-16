@@ -1,6 +1,8 @@
 defmodule Rekindle.SetupTaskIntegrationTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureIO
+
   alias Rekindle.Toolchain.{Installer, Release}
 
   setup do
@@ -59,7 +61,13 @@ defmodule Rekindle.SetupTaskIntegrationTest do
   end
 
   test "the public Mix task preserves success status", context do
-    assert :ok = Mix.Tasks.Rekindle.Setup.run(["--target", "web"])
+    output =
+      capture_io(fn ->
+        assert :ok = Mix.Tasks.Rekindle.Setup.run(["--target", "web", "--json"])
+      end)
+
+    assert output == Rekindle.CanonicalValue.encode!(Jason.decode!(output)) <> "\n"
+    assert Jason.decode!(output)["status"] == "ok"
 
     assert File.read!(context.rustup_log) ==
              "toolchain install 1.95.0 --profile minimal\n" <>
@@ -88,6 +96,19 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     assert expected_status == 1
     assert expected_output =~ "config_missing"
     refute expected_output =~ "** (Mix)"
+
+    for {argv, status, code} <- [
+          {["rekindle.setup", "--json"], 1, "config_missing"},
+          {["rekindle.setup", "--target", "mobile", "--json"], 2, "config_invalid"}
+        ] do
+      {output, actual_status} =
+        System.cmd(mix, argv, env: [{"MIX_ENV", "test"}], stderr_to_stdout: true)
+
+      assert actual_status == status
+      assert output == Rekindle.CanonicalValue.encode!(Jason.decode!(output)) <> "\n"
+      assert Jason.decode!(output)["failure"]["code"] == code
+      refute output =~ "** (Mix)"
+    end
 
     assert_semantic_exit_boundary()
   end

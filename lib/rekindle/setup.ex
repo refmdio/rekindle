@@ -3,7 +3,10 @@ defmodule Rekindle.Setup do
 
   alias Rekindle.{Command, Failure}
 
-  @grammar [switches: [target: :string, source_build_helper: :boolean], positionals: 0]
+  @grammar [
+    switches: [json: :boolean, target: :string, source_build_helper: :boolean],
+    positionals: 0
+  ]
 
   @spec run([String.t()], keyword()) :: Command.Outcome.t()
   def run(argv, adapters) do

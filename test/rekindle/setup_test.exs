@@ -118,6 +118,58 @@ defmodule Rekindle.SetupTest do
     assert helper_outcome.stderr =~ "helper_checksum_mismatch"
   end
 
+  test "shares canonical JSON success, expected failure, and invocation failure output" do
+    adapters = [
+      load_project: fn -> {:ok, project([:web])} end,
+      ensure_target: fn :web, _config -> {:ok, :present} end,
+      ensure_helper: fn false -> {:ok, :present} end
+    ]
+
+    success = Setup.run(["--json"], adapters)
+    assert success.exit_status == 0
+    assert success.stderr == ""
+
+    assert success.stdout ==
+             Rekindle.CanonicalValue.encode!(Jason.decode!(success.stdout)) <> "\n"
+
+    assert %{"status" => "ok", "result" => %{"source_build_helper" => false}} =
+             Jason.decode!(success.stdout)
+
+    expected_failure =
+      Setup.run(
+        ["--json"],
+        Keyword.replace!(adapters, :ensure_helper, fn false ->
+          {:error,
+           Failure.new!(
+             target: nil,
+             stage: :compatibility,
+             code: :helper_missing,
+             message: "missing helper"
+           )}
+        end)
+      )
+
+    assert expected_failure.exit_status == 1
+    assert expected_failure.stderr == ""
+    assert Jason.decode!(expected_failure.stdout)["failure"]["code"] == "helper_missing"
+
+    parent = self()
+
+    invocation_failure =
+      Setup.run(
+        ["--target", "mobile", "--json"],
+        Keyword.replace!(adapters, :load_project, fn ->
+          send(parent, :loaded)
+          {:ok, project([:web])}
+        end)
+      )
+
+    assert invocation_failure.exit_status == 2
+    assert invocation_failure.stderr == ""
+    assert Jason.decode!(invocation_failure.stdout)["failure"]["code"] == "config_invalid"
+    refute_received :loaded
+  end
+
   test "is idempotent and performs no application source or runtime mutation" do
     counter = :counters.new(2, [])
     before_ports = MapSet.new(Port.list())
