@@ -6,7 +6,8 @@ defmodule Rekindle.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      {Registry, keys: :unique, name: Rekindle.RuntimeRegistry}
+      {Registry, keys: :unique, name: Rekindle.RuntimeRegistry},
+      Rekindle.Toolchain.RootAuthority
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Rekindle.Supervisor)

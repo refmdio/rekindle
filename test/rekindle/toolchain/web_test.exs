@@ -390,6 +390,40 @@ defmodule Rekindle.Toolchain.WebTest do
     end
   end
 
+  test "root authority survives issuer exit and cannot be rebound", roots do
+    base = Path.dirname(roots.input)
+    issued_path = Path.join(base, "issued-root")
+    replacement = Path.join(base, "replacement-root")
+    moved = Path.join(base, "original-root")
+    File.mkdir!(issued_path)
+    File.mkdir!(replacement)
+    File.write!(Path.join(issued_path, "member"), "same")
+    File.write!(Path.join(replacement, "member"), "same")
+
+    issued =
+      Task.async(fn ->
+        Web.root(issued_path, :read, id: "77777777777777777777777777777777")
+      end)
+      |> Task.await()
+
+    assert {:ok, root} = issued
+    assert {:ok, descriptor} = Web.file(root, "member")
+    assert descriptor["sha256"] == :crypto.hash(:sha256, "same") |> Base.encode16(case: :lower)
+
+    File.rename!(issued_path, moved)
+    File.rename!(replacement, issued_path)
+
+    try do
+      assert {:error, :invalid_root} =
+               Web.root(issued_path, :read, id: "77777777777777777777777777777777")
+
+      assert {:error, :invalid_file} = Web.file(root, "member")
+    after
+      File.rm_rf!(issued_path)
+      File.rename!(moved, issued_path)
+    end
+  end
+
   test "requires an exact no-follow attempt marker bound to the output root id", roots do
     assert {:error, :invalid_root} =
              Web.root(roots.output, :write_empty, id: "22222222222222222222222222222222")

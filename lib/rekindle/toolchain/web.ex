@@ -2,6 +2,7 @@ defmodule Rekindle.Toolchain.Web do
   @moduledoc false
 
   alias Rekindle.CanonicalValue
+  alias Rekindle.Toolchain.RootAuthority
 
   @root_keys ~w[id path mode device]
   @file_keys ~w[root_id path sha256 size mode]
@@ -15,7 +16,6 @@ defmodule Rekindle.Toolchain.Web do
   @application_id_pattern ~r/\A[a-z][a-z0-9_-]{0,127}\z/
   @backend_id_pattern ~r/\A[a-z][a-z0-9_.-]{0,127}\z/
   @gpui_revision_pattern ~r/\A[0-9a-f]{40,64}\z/
-  @authority_registry Rekindle.RuntimeRegistry
   @bootstrap_template """
   export async function start(context) {
     if (!context || context.v !== 1) throw new Error("invalid Rekindle context");
@@ -1513,13 +1513,44 @@ defmodule Rekindle.Toolchain.Web do
          true <- before_stat.type == :regular,
          true <- before_stat.uid == root_stat.uid,
          true <- before_stat.major_device == root_stat.major_device,
-         true <- before_stat.minor_device == root_stat.minor_device,
-         {:ok, bytes} <- File.read(path),
-         true <- byte_size(bytes) == before_stat.size,
-         {:ok, after_stat} <- no_follow_stat(path),
-         true <- same_file_identity?(before_stat, after_stat) do
-      {:ok, bytes, before_stat}
+         true <- before_stat.minor_device == root_stat.minor_device do
+      read_qualified_handle(path, before_stat)
     else
+      _ -> {:error, :invalid_file}
+    end
+  end
+
+  defp read_qualified_handle(path, before_stat) do
+    case :file.open(path, [:read, :binary, :raw]) do
+      {:ok, handle} ->
+        try do
+          with {:ok, opened_record} <- :file.read_file_info(handle),
+               opened_stat = File.Stat.from_record(opened_record),
+               true <- same_file_identity?(before_stat, opened_stat),
+               {:ok, bytes} <- read_handle(handle, []),
+               true <- byte_size(bytes) == before_stat.size,
+               {:ok, final_record} <- :file.read_file_info(handle),
+               final_stat = File.Stat.from_record(final_record),
+               true <- same_file_identity?(opened_stat, final_stat),
+               {:ok, after_stat} <- no_follow_stat(path),
+               true <- same_file_identity?(before_stat, after_stat) do
+            {:ok, bytes, before_stat}
+          else
+            _ -> {:error, :invalid_file}
+          end
+        after
+          :file.close(handle)
+        end
+
+      _ ->
+        {:error, :invalid_file}
+    end
+  end
+
+  defp read_handle(handle, chunks) do
+    case :file.read(handle, 64 * 1_024) do
+      {:ok, bytes} when byte_size(bytes) > 0 -> read_handle(handle, [bytes | chunks])
+      :eof -> {:ok, chunks |> Enum.reverse() |> IO.iodata_to_binary()}
       _ -> {:error, :invalid_file}
     end
   end
@@ -1554,28 +1585,13 @@ defmodule Rekindle.Toolchain.Web do
   end
 
   defp register_root_authority(root, stat) do
-    key = root_authority_key(root)
-    identity = root_identity(stat)
-
-    case Registry.register(@authority_registry, key, identity) do
-      {:ok, _owner} ->
-        :ok
-
-      {:error, {:already_registered, owner}} ->
-        case Registry.lookup(@authority_registry, key) do
-          [{^owner, ^identity}] -> :ok
-          _ -> {:error, :root_identity_changed}
-        end
-    end
+    RootAuthority.register(root_authority_key(root), root_identity(stat))
   catch
     :exit, _reason -> {:error, :root_authority_unavailable}
   end
 
   defp root_authority(root) do
-    case Registry.lookup(@authority_registry, root_authority_key(root)) do
-      [{_owner, identity}] -> {:ok, identity}
-      _ -> {:error, :unknown_root_authority}
-    end
+    RootAuthority.fetch(root_authority_key(root))
   catch
     :exit, _reason -> {:error, :root_authority_unavailable}
   end
