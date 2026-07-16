@@ -30,6 +30,7 @@ if Code.ensure_loaded?(Igniter) do
           client_path: options[:client_path],
           targets: targets,
           endpoint: endpoint,
+          accepted_origins: accepted_origins(options[:accepted_origin]),
           no_client: options[:no_client]
         )
       else
@@ -58,5 +59,9 @@ if Code.ensure_loaded?(Igniter) do
         nil -> {:error, "--endpoint must name an already loaded module"}
       end
     end
+
+    defp accepted_origins(nil), do: :endpoint
+    defp accepted_origins([]), do: :endpoint
+    defp accepted_origins(values), do: values
   end
 end

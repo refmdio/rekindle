@@ -15,10 +15,18 @@ if Code.ensure_loaded?(Igniter) do
       client_path = Keyword.get(options, :client_path, "client")
       targets = Keyword.get(options, :targets, [:web, :desktop])
       endpoint = Keyword.get(options, :endpoint, default_endpoint(igniter))
+      accepted_origins = Keyword.get(options, :accepted_origins, :endpoint)
 
       igniter
       |> install_client(client_path, application_id, targets, options)
-      |> install_config(otp_app, application_id, client_path, targets, endpoint)
+      |> install_config(
+        otp_app,
+        application_id,
+        client_path,
+        targets,
+        endpoint,
+        accepted_origins
+      )
       |> install_child(otp_app)
       |> install_aliases(:web in targets)
       |> install_page_marker(otp_app, endpoint, targets)
@@ -43,6 +51,15 @@ if Code.ensure_loaded?(Igniter) do
         |> Enum.map(&elem(&1, 1))
 
       cond do
+        digest_indices != [] and rekindle_indices != [] ->
+          {:error, "assets.deploy mixes phx.digest with a Rekindle deploy step"}
+
+        length(rekindle_indices) > 1 ->
+          {:error, "assets.deploy contains multiple Rekindle deploy steps"}
+
+        rekindle_indices != [] and rekindle_indices != [length(value) - 1] ->
+          {:error, "assets.deploy Rekindle deploy step must be terminal"}
+
         digest_indices == [] and rekindle_indices == [length(value) - 1] ->
           {:ok, value}
 
@@ -63,10 +80,27 @@ if Code.ensure_loaded?(Igniter) do
     def transform_assets_deploy(_value),
       do: {:error, "assets.deploy must be a literal task list"}
 
-    defp install_client(igniter, _client_path, _application_id, _targets, no_client: true),
-      do: igniter
+    defp install_client(igniter, client_path, application_id, targets, options) do
+      if Keyword.get(options, :no_client, false) do
+        validate_adopted_client(igniter, client_path, application_id)
+      else
+        generate_client(igniter, client_path, application_id, targets)
+      end
+    end
 
-    defp install_client(igniter, client_path, application_id, targets, _options) do
+    defp validate_adopted_client(igniter, client_path, application_id) do
+      marker = Path.join(client_path, ".rekindle-client.json")
+
+      if Igniter.exists?(igniter, marker) and adoptable_marker?(igniter, marker, application_id),
+        do: igniter,
+        else:
+          Igniter.add_issue(
+            igniter,
+            "--no-client requires a structurally adoptable #{marker} for #{application_id}"
+          )
+    end
+
+    defp generate_client(igniter, client_path, application_id, targets) do
       files =
         ClientGenerator.render(
           application_id: application_id,
@@ -111,7 +145,15 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp install_config(igniter, otp_app, application_id, client_path, targets, endpoint) do
+    defp install_config(
+           igniter,
+           otp_app,
+           application_id,
+           client_path,
+           targets,
+           endpoint,
+           accepted_origins
+         ) do
       build_targets =
         Enum.map(targets, fn
           :web ->
@@ -172,10 +214,11 @@ if Code.ensure_loaded?(Igniter) do
       |> Config.configure("dev.exs", otp_app, [:rekindle_dev, :schema], 1)
       |> Config.configure("dev.exs", otp_app, [:rekindle_dev, :enabled], true)
       |> Config.configure("dev.exs", otp_app, [:rekindle_dev, :targets], dev_targets)
-      |> maybe_configure_endpoint(endpoint, :web in targets)
+      |> maybe_configure_endpoint(endpoint, accepted_origins, :web in targets)
     end
 
-    defp maybe_configure_endpoint(igniter, endpoint, true) when is_atom(endpoint) do
+    defp maybe_configure_endpoint(igniter, endpoint, accepted_origins, true)
+         when is_atom(endpoint) do
       igniter
       |> Config.configure(
         "dev.exs",
@@ -187,13 +230,13 @@ if Code.ensure_loaded?(Igniter) do
         "dev.exs",
         Application.app_name(igniter),
         [:rekindle_dev, :accepted_origins],
-        :endpoint
+        accepted_origins
       )
     end
 
-    defp maybe_configure_endpoint(igniter, _endpoint, false), do: igniter
+    defp maybe_configure_endpoint(igniter, _endpoint, _accepted_origins, false), do: igniter
 
-    defp maybe_configure_endpoint(igniter, _endpoint, true) do
+    defp maybe_configure_endpoint(igniter, _endpoint, _accepted_origins, true) do
       Igniter.add_issue(igniter, "Web installation requires one selected Phoenix endpoint")
     end
 
@@ -349,6 +392,31 @@ if Code.ensure_loaded?(Igniter) do
 
     defp default_endpoint(igniter) do
       Igniter.Project.Module.module_name(igniter, "Web.Endpoint")
+    end
+
+    defp adoptable_marker?(igniter, path, application_id) do
+      contents =
+        case Rewrite.source(igniter.rewrite, path) do
+          {:ok, source} ->
+            Rewrite.Source.get(source, :content)
+
+          {:error, _} when is_map_key(igniter.assigns, :test_files) ->
+            igniter.assigns.test_files[path]
+
+          _ ->
+            File.read!(path)
+        end
+
+      case Jason.decode(contents) do
+        {:ok, %{"schema" => 1, "application_id" => ^application_id, "package" => package}}
+        when is_binary(package) ->
+          true
+
+        _ ->
+          false
+      end
+    rescue
+      _ -> false
     end
   end
 end

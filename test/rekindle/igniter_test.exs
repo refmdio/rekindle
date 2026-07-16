@@ -19,6 +19,9 @@ defmodule Rekindle.IgniterTest do
       ["cmd npm deploy"],
       ["phx.digest", "phx.digest"],
       ["phx.digest", "cmd after"],
+      ["rekindle.phoenix.deploy", "phx.digest"],
+      ["phx.digest", "rekindle.phoenix.deploy"],
+      ["rekindle.phoenix.deploy", "rekindle.phoenix.deploy"],
       {:dynamic, :alias}
     ]
 
@@ -121,6 +124,41 @@ defmodule Rekindle.IgniterTest do
              conflicting.issues,
              &String.contains?(to_string(&1), "client/src/bin/web.rs")
            )
+  end
+
+  test "propagates explicit accepted origins and validates no-client adoption" do
+    marker =
+      Rekindle.ClientGenerator.render(
+        application_id: "sample_app",
+        package: "sample_app_ui",
+        targets: [:web]
+      )[".rekindle-client.json"]
+
+    adopted =
+      project()
+      |> Igniter.create_new_file("client/.rekindle-client.json", marker)
+      |> apply_igniter!()
+      |> RekindleIgniter.install(
+        client_path: "client",
+        targets: [:web],
+        endpoint: SampleAppWeb.Endpoint,
+        accepted_origins: ["https://example.test"],
+        no_client: true
+      )
+
+    assert adopted.issues == []
+    assert source(adopted, "config/dev.exs") =~ "https://example.test"
+
+    rejected =
+      project()
+      |> RekindleIgniter.install(
+        client_path: "client",
+        targets: [:web],
+        endpoint: SampleAppWeb.Endpoint,
+        no_client: true
+      )
+
+    assert Enum.any?(rejected.issues, &String.contains?(to_string(&1), "structurally adoptable"))
   end
 
   defp project do
