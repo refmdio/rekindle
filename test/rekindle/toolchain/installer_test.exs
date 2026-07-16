@@ -143,20 +143,35 @@ defmodule Rekindle.Toolchain.InstallerTest do
     on_exit(fn ->
       File.rm(linked_root)
       File.rm_rf!(real_root)
+
+      Path.dirname(linked_root)
+      |> File.ls!()
+      |> Enum.filter(&String.starts_with?(&1, Path.basename(linked_root) <> ".quarantine-"))
+      |> Enum.each(&File.rm(Path.join(Path.dirname(linked_root), &1)))
     end)
 
-    assert {:error, %{code: :io_failed}} =
+    assert {:error, %{code: :helper_checksum_mismatch}} =
              Installer.ensure(asset, options(linked_root, fetcher: fn _ -> bytes end))
+
+    refute File.exists?(linked_root)
+
+    assert Enum.any?(File.ls!(Path.dirname(linked_root)), fn entry ->
+             String.starts_with?(entry, Path.basename(linked_root) <> ".quarantine-")
+           end)
 
     assert {:ok, path} = Installer.ensure(asset, options(real_root, fetcher: fn _ -> bytes end))
     admitted = path <> ".admitted"
     File.rename!(path, admitted)
     File.ln_s!(admitted, path)
 
-    assert {:error, %{code: :io_failed}} =
+    assert {:error, %{code: :helper_checksum_mismatch}} =
              Installer.ensure(asset, options(real_root, offline: true))
 
-    assert File.lstat!(path).type == :symlink
+    refute File.exists?(path)
+
+    assert Enum.any?(File.ls!(Path.dirname(path)), fn entry ->
+             String.starts_with?(entry, Path.basename(path) <> ".quarantine-")
+           end)
   end
 
   defp asset(bytes) do

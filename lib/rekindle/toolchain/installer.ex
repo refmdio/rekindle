@@ -50,7 +50,7 @@ defmodule Rekindle.Toolchain.Installer do
   defp acquire({:corrupt, path}, _destination, _asset, _source_build?, _offline?, _options) do
     quarantine = path <> ".quarantine-" <> Integer.to_string(System.unique_integer([:positive]))
 
-    case File.rename(path, quarantine) do
+    case quarantine(path, quarantine) do
       :ok ->
         {:error, :helper_checksum_mismatch,
          "cached helper failed integrity or owner-only mode validation and was quarantined"}
@@ -130,6 +130,12 @@ defmodule Rekindle.Toolchain.Installer do
       {:error, :enoent} ->
         :missing
 
+      {:error, :invalid_path} ->
+        case Executable.first_unsafe_component(path) do
+          {:ok, unsafe_path} -> {:corrupt, unsafe_path}
+          {:error, reason} -> {:error, :io_failed, "helper cache path is unsafe: #{reason}"}
+        end
+
       {:error, reason} ->
         {:error, :io_failed, "helper cache path qualification failed: #{reason}"}
     end
@@ -165,6 +171,23 @@ defmodule Rekindle.Toolchain.Installer do
       true ->
         :ok
     end
+  end
+
+  defp quarantine(path, quarantine) do
+    with {:ok, before_stat} <- File.lstat(path),
+         :ok <- File.rename(path, quarantine),
+         {:ok, after_stat} <- File.lstat(quarantine),
+         true <- same_node?(before_stat, after_stat) do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      false -> {:error, :identity_changed}
+    end
+  end
+
+  defp same_node?(left, right) do
+    fields = [:inode, :uid, :gid, :major_device, :minor_device, :size, :type, :mode]
+    Map.take(left, fields) == Map.take(right, fields)
   end
 
   defp validate_asset(asset, source_build?) do

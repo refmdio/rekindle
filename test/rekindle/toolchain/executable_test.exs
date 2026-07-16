@@ -85,13 +85,46 @@ defmodule Rekindle.Toolchain.ExecutableTest do
     refute File.exists?(marker)
   end
 
+  test "executes the admitted handle across an ABA pathname swap during spawn" do
+    root = temp_root()
+    executable = script!(root, "tool", "printf trusted\n")
+    replacement = script!(root, "replacement", "printf malicious\n")
+    admitted_path = executable <> ".admitted"
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:ok, authority} = Executable.qualify(executable)
+
+    around_spawn = fn _authority, launch_path, spawn ->
+      assert String.contains?(launch_path, ["/proc/", "/dev/fd/"])
+      File.rename!(executable, admitted_path)
+      File.rename!(replacement, executable)
+
+      try do
+        spawn.()
+      after
+        File.rename!(executable, replacement)
+        File.rename!(admitted_path, executable)
+      end
+    end
+
+    assert {:ok, {"trusted", 0}} =
+             Executable.run(authority, [], around_spawn: around_spawn)
+  end
+
   test "rejects path replacement immediately after spawn" do
     root = temp_root()
-    executable = script!(root, "tool", "sleep 1\n")
+    pid_file = Path.join(root, "pid")
+    executable = script!(root, "tool", "echo $$ > #{pid_file}\n")
     replacement = script!(root, "replacement", "exit 0\n")
     on_exit(fn -> File.rm_rf!(root) end)
 
     assert {:ok, authority} = Executable.qualify(executable)
+
+    around_spawn = fn _authority, _launch_path, spawn ->
+      result = spawn.()
+      assert wait_file(pid_file, 1_000)
+      result
+    end
 
     hook = fn ->
       File.rename!(replacement, executable)
@@ -99,7 +132,10 @@ defmodule Rekindle.Toolchain.ExecutableTest do
     end
 
     assert {:error, :executable_changed} =
-             Executable.run(authority, [], after_spawn: hook)
+             Executable.run(authority, [], around_spawn: around_spawn, after_spawn: hook)
+
+    pid = pid_file |> File.read!() |> String.trim() |> String.to_integer()
+    assert wait_process_absent(pid, 1_000)
   end
 
   test "creates a private directory without traversing symlink ancestors" do
@@ -133,5 +169,32 @@ defmodule Rekindle.Toolchain.ExecutableTest do
     File.mkdir_p!(path)
     File.chmod!(path, 0o700)
     path
+  end
+
+  defp wait_file(path, timeout) do
+    wait_until(timeout, fn -> File.regular?(path) end)
+  end
+
+  defp wait_process_absent(pid, timeout) do
+    wait_until(timeout, fn -> not File.exists?("/proc/#{pid}") end)
+  end
+
+  defp wait_until(timeout, predicate) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_until(deadline, predicate)
+  end
+
+  defp do_wait_until(deadline, predicate) do
+    cond do
+      predicate.() ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
+
+      true ->
+        Process.sleep(5)
+        do_wait_until(deadline, predicate)
+    end
   end
 end

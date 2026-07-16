@@ -48,20 +48,25 @@ defmodule Rekindle.Toolchain.Helper do
 
   defp start(executable, mode, options) do
     with {:ok, executable} <- Executable.qualify(executable),
-         {:ok, port} <-
+         {:ok, port, handle} <-
            Executable.open(executable, [mode], Keyword.put(options, :stderr_to_stdout, false)) do
       host = Installer.host() |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
       hello = Handshake.hello(mode, @compatibility, host)
 
-      with :ok <- send_frame(port, hello),
-           {:ok, response, <<>>} <- receive_one(port, <<>>, deadline(options)),
-           :ok <- Handshake.admit_response(response, hello) do
-        {:ok, port, <<>>}
-      else
-        _ ->
-          close(port)
-          {:error, :helper_protocol}
-      end
+      result =
+        with :ok <- send_frame(port, hello),
+             {:ok, response, <<>>} <- receive_one(port, <<>>, deadline(options)),
+             :ok <- Handshake.admit_response(response, hello),
+             :ok <- Executable.revalidate(executable) do
+          {:ok, port, <<>>}
+        else
+          _ ->
+            close(port)
+            {:error, :helper_protocol}
+        end
+
+      Executable.release(handle)
+      result
     else
       _ -> {:error, :helper_missing}
     end

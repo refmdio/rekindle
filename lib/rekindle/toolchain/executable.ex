@@ -51,6 +51,15 @@ defmodule Rekindle.Toolchain.Executable do
     with :ok <- absolute_canonical(path), do: no_follow_stat(path)
   end
 
+  @doc false
+  @spec first_unsafe_component(Path.t()) :: {:ok, Path.t()} | {:error, atom()}
+  def first_unsafe_component(path) do
+    with :ok <- absolute_canonical(path),
+         [_ | _] = components <- Path.split(path) do
+      find_unsafe_component("", components)
+    end
+  end
+
   @spec revalidate(t()) :: :ok | {:error, atom()}
   def revalidate(%__MODULE__{} = admitted) do
     with {:ok, current} <-
@@ -66,21 +75,28 @@ defmodule Rekindle.Toolchain.Executable do
     end
   end
 
-  @spec open(t(), [String.t()], keyword()) :: {:ok, port()} | {:error, atom()}
+  @spec open(t(), [String.t()], keyword()) ::
+          {:ok, port(), :file.io_device()} | {:error, atom()}
   def open(%__MODULE__{} = admitted, argv, options \\ []) do
     with :ok <- argv(argv),
          :ok <- invoke_hook(options, :before_spawn, admitted),
          :ok <- revalidate(admitted),
-         {:ok, port} <- open_port(admitted.path, argv, options) do
-      case invoke_hook(options, :after_spawn, admitted) do
-        :ok ->
-          case revalidate_after_spawn(admitted, port) do
-            :ok -> {:ok, port}
-            {:error, _} = error -> error
+         {:ok, handle, launch_path} <- launch_handle(admitted) do
+      case spawn_handle(admitted, launch_path, argv, options) do
+        {:ok, port} ->
+          case {invoke_hook(options, :after_spawn, admitted),
+                admit_launch_handle(handle, admitted)} do
+            {:ok, {:ok, _launch_path}} ->
+              {:ok, port, handle}
+
+            _error ->
+              close(port)
+              release(handle)
+              {:error, :executable_changed}
           end
 
         _error ->
-          close(port)
+          release(handle)
           {:error, :executable_changed}
       end
     else
@@ -95,15 +111,35 @@ defmodule Rekindle.Toolchain.Executable do
   @spec run(t(), [String.t()], keyword()) ::
           {:ok, {binary(), non_neg_integer()}} | {:error, atom()}
   def run(%__MODULE__{} = admitted, argv, options \\ []) do
-    with {:ok, port} <- open(admitted, argv, options) do
-      collect(
-        port,
-        <<>>,
-        0,
-        Keyword.get(options, :max_output_bytes, 4_194_304),
-        monotonic_ms() + Keyword.get(options, :timeout_ms, 900_000)
-      )
+    with {:ok, port, handle} <- open(admitted, argv, options) do
+      try do
+        result =
+          collect(
+            port,
+            <<>>,
+            0,
+            Keyword.get(options, :max_output_bytes, 4_194_304),
+            monotonic_ms() + Keyword.get(options, :timeout_ms, 900_000)
+          )
+
+        case {result, revalidate(admitted)} do
+          {{:ok, _command} = result, :ok} -> result
+          {{:error, _reason} = error, _revalidation} -> error
+          {_result, {:error, _reason}} -> {:error, :executable_changed}
+        end
+      after
+        release(handle)
+      end
     end
+  end
+
+  @doc false
+  @spec release(:file.io_device()) :: :ok
+  def release(handle) do
+    :file.close(handle)
+    :ok
+  rescue
+    _ -> :ok
   end
 
   @spec ensure_private_directory(Path.t()) :: :ok | {:error, atom()}
@@ -124,11 +160,26 @@ defmodule Rekindle.Toolchain.Executable do
     _ -> {:error, :directory_unqualified}
   end
 
-  defp open_port(path, argv, options) do
+  defp spawn_handle(admitted, launch_path, argv, options) do
+    spawn = fn -> open_port(launch_path, admitted.path, argv, options) end
+
+    case Keyword.get(options, :around_spawn) do
+      nil -> spawn.()
+      hook when is_function(hook, 3) -> hook.(admitted, launch_path, spawn)
+      _ -> {:error, :invalid_hook}
+    end
+  rescue
+    _ -> {:error, :executable_changed}
+  catch
+    _, _ -> {:error, :executable_changed}
+  end
+
+  defp open_port(path, arg0, argv, options) do
     port_options = [
       :binary,
       :exit_status,
       :use_stdio,
+      arg0: String.to_charlist(arg0),
       args: Enum.map(argv, &String.to_charlist/1)
     ]
 
@@ -146,14 +197,54 @@ defmodule Rekindle.Toolchain.Executable do
     {:ok, port}
   end
 
-  defp revalidate_after_spawn(admitted, port) do
-    case revalidate(admitted) do
-      :ok ->
-        :ok
+  defp launch_handle(admitted) do
+    case :file.open(admitted.path, [:read, :binary, :raw]) do
+      {:ok, handle} ->
+        case admit_launch_handle(handle, admitted) do
+          {:ok, launch_path} ->
+            {:ok, handle, launch_path}
 
-      {:error, _} = error ->
-        close(port)
-        error
+          {:error, _} = error ->
+            release(handle)
+            error
+        end
+
+      _ ->
+        {:error, :executable_changed}
+    end
+  end
+
+  defp admit_launch_handle(handle, admitted) do
+    with {:ok, opened_record} <- :file.read_file_info(handle),
+         opened_stat = File.Stat.from_record(opened_record),
+         true <- identity(opened_stat) == admitted.identity,
+         {:ok, context, size} <-
+           hash_handle(handle, :crypto.hash_init(:sha256), 0, admitted.size),
+         true <- size == admitted.size,
+         digest = :crypto.hash_final(context) |> Base.encode16(case: :lower),
+         true <- digest == admitted.sha256,
+         {:ok, _position} <- :file.position(handle, 0),
+         {:ok, launch_path} <- launch_path(handle),
+         {:ok, launch_stat} <- File.stat(launch_path),
+         true <- identity(launch_stat) == admitted.identity do
+      {:ok, launch_path}
+    else
+      _ -> {:error, :executable_changed}
+    end
+  end
+
+  defp launch_path(handle) do
+    with raw when is_binary(raw) <- :prim_file.get_handle(handle),
+         true <- byte_size(raw) in [4, 8],
+         descriptor <- :binary.decode_unsigned(raw, :little),
+         true <- descriptor >= 0 do
+      case :os.type() do
+        {:unix, :linux} -> {:ok, "/proc/#{System.pid()}/fd/#{descriptor}"}
+        {:unix, :darwin} -> {:ok, "/dev/fd/#{descriptor}"}
+        _ -> {:error, :unsupported_host}
+      end
+    else
+      _ -> {:error, :executable_changed}
     end
   end
 
@@ -281,6 +372,27 @@ defmodule Rekindle.Toolchain.Executable do
     end
   end
 
+  defp find_unsafe_component(current, [component | rest]) do
+    path = if current == "", do: component, else: Path.join(current, component)
+
+    case File.lstat(path) do
+      {:ok, %{type: :symlink}} ->
+        {:ok, path}
+
+      {:ok, %{type: :directory}} when rest != [] ->
+        find_unsafe_component(path, rest)
+
+      {:ok, _stat} when rest != [] ->
+        {:ok, path}
+
+      {:ok, _stat} ->
+        {:error, :none}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp ensure_directory_components(current, [component | rest]) do
     path = if current == "", do: component, else: Path.join(current, component)
 
@@ -347,6 +459,10 @@ defmodule Rekindle.Toolchain.Executable do
       hook when is_function(hook, 1) -> hook.(admitted)
       _ -> {:error, :invalid_hook}
     end
+  rescue
+    _ -> {:error, :hook_failed}
+  catch
+    _, _ -> {:error, :hook_failed}
   end
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
