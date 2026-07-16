@@ -576,9 +576,21 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       {"artifact digest", &Map.put(&1, "artifact_id", "invalid")},
       {"build key", &put_in(&1, ["build", "build_key"], "invalid")},
       {"build profile", &put_in(&1, ["build", "profile"], "")},
+      {"build profile bound", &put_in(&1, ["build", "profile"], String.duplicate("a", 129))},
       {"build package", &put_in(&1, ["build", "package"], "bad\npackage")},
+      {"build Unicode package", &put_in(&1, ["build", "package"], "é")},
       {"build binary", &put_in(&1, ["build", "binary"], "cafe\u0301")},
       {"build features", &put_in(&1, ["build", "features"], ["web", "alpha"])},
+      {"build Unicode feature", &put_in(&1, ["build", "features"], ["é"])},
+      {"build feature aggregate",
+       fn value ->
+         features =
+           for number <- 1..65 do
+             String.duplicate("a", 124) <> String.pad_leading("#{number}", 4, "0")
+           end
+
+         put_in(value, ["build", "features"], features)
+       end},
       {"build extra field", &update_in(&1["build"], fn build -> Map.put(build, "extra", 1) end)},
       {"producer kind", &put_in(&1, ["producer", "kind"], "canonical_desktop")},
       {"producer rustc", &put_in(&1, ["producer", "rustc"], "")},

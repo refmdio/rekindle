@@ -1176,8 +1176,8 @@ fn valid_build(build: &Value) -> bool {
     ) && digest(build["build_key"].as_str())
         && ["profile", "package", "binary"]
             .iter()
-            .all(|key| build[*key].as_str().is_some_and(valid_manifest_string))
-        && normalized_strings_sorted_unique(&build["features"])
+            .all(|key| build[*key].as_str().is_some_and(valid_cargo_identifier))
+        && valid_feature_list(&build["features"])
 }
 
 fn valid_canonical_web_producer(producer: &Value) -> bool {
@@ -1614,18 +1614,30 @@ fn relative_strings_sorted_unique(value: &Value) -> bool {
     })
 }
 
-fn normalized_strings_sorted_unique(value: &Value) -> bool {
+fn valid_feature_list(value: &Value) -> bool {
     let Some(values) = value.as_array() else {
         return false;
     };
-    values.windows(2).all(|pair| {
-        pair[0]
-            .as_str()
-            .zip(pair[1].as_str())
-            .is_some_and(|(left, right)| left < right)
-    }) && values
-        .iter()
-        .all(|value| value.as_str().is_some_and(valid_manifest_string))
+
+    values.len() <= 128
+        && values.windows(2).all(|pair| {
+            pair[0]
+                .as_str()
+                .zip(pair[1].as_str())
+                .is_some_and(|(left, right)| left < right)
+        })
+        && values
+            .iter()
+            .all(|value| value.as_str().is_some_and(valid_cargo_identifier))
+        && values
+            .iter()
+            .filter_map(Value::as_str)
+            .try_fold(0_usize, |total, value| total.checked_add(value.len()))
+            .is_some_and(|total| total <= 8_192)
+}
+
+fn valid_cargo_identifier(value: &str) -> bool {
+    (1..=128).contains(&value.len()) && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
 }
 
 fn case_fold_path(value: &str) -> String {
@@ -1792,5 +1804,28 @@ mod graph_tests {
         ] {
             assert!(resolve_reference("app.js", forbidden, true).is_err());
         }
+    }
+
+    #[test]
+    fn enforces_exact_manifest_identifier_and_feature_bounds() {
+        assert!(valid_application_id("sample_app"));
+        assert!(!valid_application_id("é"));
+        assert!(valid_backend_id("example.backend"));
+        assert!(!valid_backend_id("INVALID"));
+        assert!(valid_backend_version("release-1"));
+        assert!(!valid_backend_version("é"));
+        assert!(valid_feature_list(&json!([])));
+
+        let too_many = (0..129)
+            .map(|number| Value::String(format!("f{number:03}")))
+            .collect::<Vec<_>>();
+        assert!(!valid_feature_list(&Value::Array(too_many)));
+
+        let oversized = (0..65)
+            .map(|number| Value::String(format!("{}{number:04}", "a".repeat(124))))
+            .collect::<Vec<_>>();
+        assert!(!valid_feature_list(&Value::Array(oversized)));
+        assert!(!valid_cargo_identifier("é"));
+        assert!(!valid_cargo_identifier(&"a".repeat(129)));
     }
 }

@@ -231,9 +231,27 @@ defmodule Rekindle.Toolchain.Web do
   defp valid_manifest_build?(build) do
     exact?(build, ~w[build_key profile package binary features]) and
       digest?(build["build_key"]) and
-      Enum.all?(~w[profile package binary], &manifest_string?(build[&1])) and
-      relative_strings_sorted_unique?(build["features"], true, &manifest_string?/1)
+      Enum.all?(~w[profile package binary], &cargo_identifier?(build[&1])) and
+      valid_feature_list?(build["features"])
   end
+
+  defp valid_feature_list?(features) do
+    is_list(features) and length(features) <= 128 and features == Enum.sort(features) and
+      unique?(features) and Enum.all?(features, &cargo_identifier?/1) and
+      Enum.reduce_while(features, 0, fn feature, total ->
+        case total + byte_size(feature) do
+          total when total <= 8_192 -> {:cont, total}
+          _total -> {:halt, :overflow}
+        end
+      end) != :overflow
+  end
+
+  defp cargo_identifier?(value) when is_binary(value) do
+    byte_size(value) in 1..128 and
+      Enum.all?(:binary.bin_to_list(value), &(&1 in 0x20..0x7E))
+  end
+
+  defp cargo_identifier?(_value), do: false
 
   defp valid_web_producer?(%{"kind" => "canonical_web"} = producer, producer_kinds) do
     "canonical_web" in producer_kinds and

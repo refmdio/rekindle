@@ -159,6 +159,14 @@ defmodule Rekindle.Toolchain.WebTest do
                put_in(body, [:manifest_base, :build, :features], [])
              )
 
+    too_many_features =
+      for number <- 1..129, do: "f" <> String.pad_leading("#{number}", 3, "0")
+
+    oversized_features =
+      for number <- 1..65 do
+        String.duplicate("a", 124) <> String.pad_leading("#{number}", 4, "0")
+      end
+
     invalid_bases = [
       Map.put(manifest_base(), :unknown, true),
       Map.put(manifest_base(), :rekindle_version, "01.0.0"),
@@ -167,7 +175,13 @@ defmodule Rekindle.Toolchain.WebTest do
       Map.put(manifest_base(), :application_id, "Uppercase"),
       Map.put(manifest_base(), :target, "desktop"),
       put_in(manifest_base(), [:build, :build_key], "invalid"),
+      put_in(manifest_base(), [:build, :package], "é"),
+      put_in(manifest_base(), [:build, :profile], String.duplicate("a", 129)),
+      put_in(manifest_base(), [:build, :binary], "bad\nbinary"),
       put_in(manifest_base(), [:build, :features], ["web", "alpha"]),
+      put_in(manifest_base(), [:build, :features], ["é"]),
+      put_in(manifest_base(), [:build, :features], too_many_features),
+      put_in(manifest_base(), [:build, :features], oversized_features),
       update_in(manifest_base()[:build], &Map.put(&1, :extra, true)),
       put_in(manifest_base(), [:producer, :kind], "extension"),
       put_in(manifest_base(), [:producer, :wasm_bindgen], "0.02.1"),
