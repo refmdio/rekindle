@@ -38,10 +38,64 @@ defmodule Rekindle.ClientGeneratorTest do
              ]
 
     assert marker["schema"] == 1
+    assert marker["template_version"] == "2"
     assert marker["application_id"] == "sample_app"
     assert marker["package"] == "sample_app_ui"
     refute Enum.any?(marker["owned_files"], &(&1["path"] == "src/app.rs"))
     assert Enum.any?(marker["owned_files"], &(&1["path"] == ".rekindle-client.json"))
+  end
+
+  test "recognizes only the exact supported prior marker identity" do
+    options = options(generate_lock: false)
+    assert {:ok, prior} = ClientGenerator.render_prior("1", options)
+
+    assert {:ok, recognized} =
+             ClientGenerator.recognize_prior(prior[".rekindle-client.json"], options)
+
+    assert recognized.files == prior
+
+    assert Map.keys(recognized.recorded_digests) |> Enum.sort() ==
+             ~w[.cargo/config.toml .rekindle-client.json Cargo.toml rust-toolchain.toml src/bin/desktop.rs src/bin/web.rs src/lib.rs]
+
+    assert :error = ClientGenerator.render_prior("0", options)
+
+    marker = Jason.decode!(prior[".rekindle-client.json"])
+
+    for invalid <- [
+          Map.delete(marker, "package"),
+          Map.put(marker, "extra", true),
+          Map.put(marker, "application_id", "foreign"),
+          Map.put(marker, "template_version", "0"),
+          update_in(marker["owned_files"], &tl/1),
+          update_in(marker["owned_files"], fn entries ->
+            entries ++ [%{"path" => "foreign", "template_sha256" => String.duplicate("a", 64)}]
+          end)
+        ] do
+      contents = Rekindle.CanonicalValue.encode!(invalid) <> "\n"
+      assert :error = ClientGenerator.recognize_prior(contents, options)
+    end
+  end
+
+  test "keeps the supported version 1 ownership bytes immutable" do
+    {:ok, prior} =
+      ClientGenerator.render_prior("1",
+        application_id: "sample_app",
+        package: "sample_app_ui",
+        web_binary: "sample_app-web",
+        desktop_binary: "sample_app",
+        targets: [:web, :desktop]
+      )
+
+    marker = Jason.decode!(prior[".rekindle-client.json"])
+
+    assert sha256(prior["Cargo.toml"]) ==
+             "7b0974fbe36e1a0b7ccddd90c7747ef0c03ee83c7e7c38e22a1077afe7309fc0"
+
+    assert Enum.find(marker["owned_files"], &(&1["path"] == "Cargo.toml")) == %{
+             "path" => "Cargo.toml",
+             "template_sha256" =>
+               "7b0974fbe36e1a0b7ccddd90c7747ef0c03ee83c7e7c38e22a1077afe7309fc0"
+           }
   end
 
   test "writes a resolvable Cargo project and both intended bins type-check" do
@@ -254,6 +308,8 @@ defmodule Rekindle.ClientGeneratorTest do
     {path, 0} = System.cmd("rustup", ["which", "--toolchain", toolchain, "rustc"])
     String.trim(path)
   end
+
+  defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
 
   defp copy_client_fixture!(destination) do
     source = Path.expand("crates/rekindle-client")

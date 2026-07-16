@@ -179,31 +179,117 @@ if Code.ensure_loaded?(Igniter) do
     defp generate_client(igniter, client_path, application_id, targets) do
       lock_path = Path.join(client_path, "Cargo.lock")
       generate_lock? = not Igniter.exists?(igniter, lock_path)
-
-      files =
-        ClientGenerator.render(
-          application_id: application_id,
-          package: application_id <> "_ui",
-          web_binary: application_id <> "-web",
-          desktop_binary: application_id,
-          targets: targets
-        )
+      options = client_template_options(application_id, targets)
+      files = ClientGenerator.render(options)
 
       igniter =
-        Enum.reduce(files, igniter, fn {relative, contents}, acc ->
-          path = Path.join(client_path, relative)
-
-          if relative in ["Cargo.lock", "src/app.rs", "public/.gitkeep"] and
-               Igniter.exists?(acc, path) do
-            acc
-          else
-            create_owned_file(acc, path, contents)
-          end
-        end)
+        case classify_client(igniter, client_path, files, options) do
+          {:ok, :install} -> install_client_files(igniter, client_path, files)
+          {:ok, {:upgrade, prior}} -> upgrade_client_files(igniter, client_path, files, prior)
+          {:error, message} -> Igniter.add_issue(igniter, message)
+        end
 
       if generate_lock?,
         do: Igniter.add_task(igniter, "rekindle.client.lock", [client_path]),
         else: igniter
+    end
+
+    defp client_template_options(application_id, targets) do
+      [
+        application_id: application_id,
+        package: application_id <> "_ui",
+        web_binary: application_id <> "-web",
+        desktop_binary: application_id,
+        targets: targets
+      ]
+    end
+
+    defp classify_client(igniter, client_path, current_files, options) do
+      marker_path = Path.join(client_path, ".rekindle-client.json")
+
+      if Igniter.exists?(igniter, marker_path) do
+        marker = read_file(igniter, marker_path)
+
+        cond do
+          marker == current_files[".rekindle-client.json"] ->
+            {:ok, :install}
+
+          true ->
+            with {:ok, prior} <- ClientGenerator.recognize_prior(marker, options),
+                 :ok <- prior_owned_files_replaceable(igniter, client_path, prior) do
+              {:ok, {:upgrade, prior}}
+            else
+              {:error, path} ->
+                {:error, "Rekindle-owned client file conflicts: #{Path.join(client_path, path)}"}
+
+              _ ->
+                {:error, "Rekindle client marker is unsupported or conflicts: #{marker_path}"}
+            end
+        end
+      else
+        {:ok, :install}
+      end
+    end
+
+    defp prior_owned_files_replaceable(igniter, client_path, prior) do
+      prior.recorded_digests
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.reduce_while(:ok, fn
+        {".rekindle-client.json", _recorded}, :ok ->
+          {:cont, :ok}
+
+        {relative, recorded}, :ok ->
+          path = Path.join(client_path, relative)
+
+          if Igniter.exists?(igniter, path) do
+            current_digest = sha256(read_file(igniter, path))
+            known_digest = sha256(Map.fetch!(prior.files, relative))
+
+            if current_digest in [recorded, known_digest],
+              do: {:cont, :ok},
+              else: {:halt, {:error, relative}}
+          else
+            {:halt, {:error, relative}}
+          end
+      end)
+    end
+
+    defp install_client_files(igniter, client_path, files) do
+      Enum.reduce(files, igniter, fn {relative, contents}, acc ->
+        path = Path.join(client_path, relative)
+
+        if application_owned?(relative) and Igniter.exists?(acc, path) do
+          acc
+        else
+          create_owned_file(acc, path, contents)
+        end
+      end)
+    end
+
+    defp upgrade_client_files(igniter, client_path, files, _prior) do
+      Enum.reduce(files, igniter, fn {relative, contents}, acc ->
+        path = Path.join(client_path, relative)
+
+        cond do
+          application_owned?(relative) and Igniter.exists?(acc, path) ->
+            acc
+
+          Igniter.exists?(acc, path) ->
+            replace_owned_file(acc, path, contents)
+
+          true ->
+            Igniter.create_new_file(acc, path, contents)
+        end
+      end)
+    end
+
+    defp application_owned?(relative),
+      do: relative in ["Cargo.lock", "src/app.rs", "public/.gitkeep"]
+
+    defp replace_owned_file(igniter, path, contents) do
+      Igniter.update_file(igniter, path, fn source ->
+        Rewrite.Source.update(source, :content, fn _ -> contents end)
+      end)
     end
 
     defp create_owned_file(igniter, path, contents) do
