@@ -14,6 +14,7 @@ defmodule Rekindle.Toolchain.Web do
   @max_path_bytes 4_096
   @application_id_pattern ~r/\A[a-z][a-z0-9_-]{0,127}\z/
   @backend_id_pattern ~r/\A[a-z][a-z0-9_.-]{0,127}\z/
+  @gpui_revision_pattern ~r/\A[0-9a-f]{40,64}\z/
   @bootstrap_template """
   export async function start(context) {
     if (!context || context.v !== 1) throw new Error("invalid Rekindle context");
@@ -260,9 +261,12 @@ defmodule Rekindle.Toolchain.Web do
         ~w[kind rustc cargo rust_target wasm_bindgen gpui_revision helper_version helper_protocol compatibility_tuple_id]
       ) and
       producer["helper_protocol"] == 1 and
-      Enum.all?(~w[rustc cargo rust_target gpui_revision compatibility_tuple_id], fn key ->
+      Enum.all?(~w[rustc cargo], fn key ->
         manifest_string?(producer[key])
       end) and
+      cargo_identifier?(producer["rust_target"]) and
+      valid_gpui_revision?(producer["gpui_revision"]) and
+      digest?(producer["compatibility_tuple_id"]) and
       valid_semver?(producer["wasm_bindgen"]) and valid_semver?(producer["helper_version"])
   end
 
@@ -281,6 +285,9 @@ defmodule Rekindle.Toolchain.Web do
   end
 
   defp valid_semver?(_value), do: false
+
+  defp valid_gpui_revision?(value),
+    do: is_binary(value) and Regex.match?(@gpui_revision_pattern, value)
 
   defp valid_application_id?(value),
     do: is_binary(value) and Regex.match?(@application_id_pattern, value)

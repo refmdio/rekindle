@@ -1196,15 +1196,16 @@ fn valid_canonical_web_producer(producer: &Value) -> bool {
         ],
     ) && producer["kind"] == "canonical_web"
         && producer["helper_protocol"] == 1
-        && [
-            "rustc",
-            "cargo",
-            "rust_target",
-            "gpui_revision",
-            "compatibility_tuple_id",
-        ]
-        .iter()
-        .all(|key| producer[*key].as_str().is_some_and(valid_manifest_string))
+        && ["rustc", "cargo"]
+            .iter()
+            .all(|key| producer[*key].as_str().is_some_and(valid_manifest_string))
+        && producer["rust_target"]
+            .as_str()
+            .is_some_and(valid_cargo_identifier)
+        && producer["gpui_revision"]
+            .as_str()
+            .is_some_and(valid_gpui_revision)
+        && digest(producer["compatibility_tuple_id"].as_str())
         && producer["wasm_bindgen"].as_str().is_some_and(valid_semver)
         && producer["helper_version"]
             .as_str()
@@ -1640,6 +1641,13 @@ fn valid_cargo_identifier(value: &str) -> bool {
     (1..=128).contains(&value.len()) && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
 }
 
+fn valid_gpui_revision(value: &str) -> bool {
+    (40..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn case_fold_path(value: &str) -> String {
     value.case_fold().collect()
 }
@@ -1827,5 +1835,11 @@ mod graph_tests {
         assert!(!valid_feature_list(&Value::Array(oversized)));
         assert!(!valid_cargo_identifier("é"));
         assert!(!valid_cargo_identifier(&"a".repeat(129)));
+        assert!(valid_gpui_revision(&"a".repeat(40)));
+        assert!(valid_gpui_revision(&"f".repeat(64)));
+        assert!(!valid_gpui_revision(&"a".repeat(39)));
+        assert!(!valid_gpui_revision(&"A".repeat(40)));
+        assert!(digest(Some(&"a".repeat(64))));
+        assert!(!digest(Some(&"A".repeat(64))));
     }
 }

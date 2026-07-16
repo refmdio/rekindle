@@ -184,8 +184,15 @@ defmodule Rekindle.Toolchain.WebTest do
       put_in(manifest_base(), [:build, :features], oversized_features),
       update_in(manifest_base()[:build], &Map.put(&1, :extra, true)),
       put_in(manifest_base(), [:producer, :kind], "extension"),
+      put_in(manifest_base(), [:producer, :rust_target], "é"),
+      put_in(manifest_base(), [:producer, :rust_target], String.duplicate("a", 129)),
       put_in(manifest_base(), [:producer, :wasm_bindgen], "0.02.1"),
+      put_in(manifest_base(), [:producer, :gpui_revision], String.duplicate("b", 39)),
+      put_in(manifest_base(), [:producer, :gpui_revision], String.duplicate("B", 40)),
+      put_in(manifest_base(), [:producer, :gpui_revision], String.duplicate("b", 65)),
       put_in(manifest_base(), [:producer, :helper_protocol], 2),
+      put_in(manifest_base(), [:producer, :compatibility_tuple_id], String.duplicate("c", 63)),
+      put_in(manifest_base(), [:producer, :compatibility_tuple_id], String.duplicate("C", 64)),
       update_in(manifest_base()[:producer], &Map.put(&1, :extra, true)),
       put_in(manifest_base(), [:host_requirements, :secure_context], false),
       update_in(manifest_base()[:host_requirements], &Map.put(&1, :extra, true)),
@@ -388,7 +395,7 @@ defmodule Rekindle.Toolchain.WebTest do
         gpui_revision: String.duplicate("b", 40),
         helper_version: "0.1.0",
         helper_protocol: 1,
-        compatibility_tuple_id: "test-linux-x86_64"
+        compatibility_tuple_id: String.duplicate("c", 64)
       },
       host_requirements: %{secure_context: true, webgpu: true},
       hot_styles: []
