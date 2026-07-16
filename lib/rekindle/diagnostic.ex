@@ -80,7 +80,8 @@ defmodule Rekindle.Diagnostic do
 
     if version == 1 and target in [nil, :web, :desktop] and
          stage in Rekindle.Failure.stages() and severity in [:error, :warning, :info] and
-         is_atom(code) and safe_text?(message) and (is_nil(rendered) or safe_text?(rendered)) do
+         stable_code?(code) and safe_text?(message) and
+         (is_nil(rendered) or safe_text?(rendered)) do
       :ok
     else
       error(:config_invalid, "diagnostic fields do not satisfy the v1 contract")
@@ -126,9 +127,13 @@ defmodule Rekindle.Diagnostic do
   defp safe_file?("<external>"), do: true
 
   defp safe_file?(file) when is_binary(file) do
-    safe_text?(file) and not String.starts_with?(file, ["/", "\\"]) and
-      not Regex.match?(~r/\A[A-Za-z]:[\\\/]/, file) and
-      Enum.all?(String.split(file, "/"), &(&1 not in ["", ".", ".."]))
+    segments = String.split(file, "/")
+
+    file != "" and byte_size(file) <= 4_096 and String.valid?(file) and
+      String.normalize(file, :nfc) == file and Path.type(file) != :absolute and
+      not String.contains?(file, ["\\", <<0>>]) and
+      not Regex.match?(~r/[\x00-\x1F\x7F]/, file) and
+      Enum.all?(segments, &(&1 not in ["", ".", ".."]))
   end
 
   defp safe_file?(_file), do: false
@@ -136,6 +141,8 @@ defmodule Rekindle.Diagnostic do
   defp safe_text?(value) when is_binary(value), do: byte_size(value) <= 8_192
 
   defp safe_text?(_value), do: false
+
+  defp stable_code?(value), do: is_atom(value) and value not in [nil, true, false]
 
   defp encode_atom(value) when is_atom(value) and not is_nil(value), do: Atom.to_string(value)
   defp encode_atom(value), do: value

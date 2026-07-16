@@ -118,6 +118,38 @@ defmodule Rekindle.FailureTest do
                message: "x",
                line: 1
              )
+
+    base = [
+      target: :web,
+      stage: :execution,
+      severity: :error,
+      code: :cargo,
+      message: "safe"
+    ]
+
+    for code <- [nil, true, false] do
+      assert {:error, _} = Diagnostic.new(Keyword.put(base, :code, code))
+    end
+
+    for file <- [
+          "",
+          "foo\\bar.rs",
+          "foo\0bar.rs",
+          "foo\nbar.rs",
+          "foo/../bar.rs",
+          "foo/./bar.rs",
+          "foo//bar.rs",
+          "cafe\u0301.rs",
+          String.duplicate("a", 4_097)
+        ] do
+      assert {:error, _} = Diagnostic.new(Keyword.put(base, :file, file))
+    end
+
+    assert {:ok, %Diagnostic{file: "client/src/nested/main.rs"}} =
+             Diagnostic.new(Keyword.put(base, :file, "client/src/nested/main.rs"))
+
+    assert {:ok, %Diagnostic{file: "<external>"}} =
+             Diagnostic.new(Keyword.put(base, :file, "<external>"))
   end
 
   test "closed structs expose exactly the public fields" do
@@ -219,5 +251,20 @@ defmodule Rekindle.FailureTest do
     directly_mutated = %{failure | diagnostics: [%{diagnostic | message: <<255>>}]}
     refute Failure.render(directly_mutated) =~ <<255>>
     refute Jason.encode!(Failure.to_map(directly_mutated)) =~ <<255>>
+
+    for unsafe <- [
+          %{diagnostic | code: nil},
+          %{diagnostic | code: true},
+          %{diagnostic | file: "foo\\bar.rs"},
+          %{diagnostic | file: "foo\0bar.rs"}
+        ] do
+      assert {:error, _} = Diagnostic.sanitize(unsafe)
+
+      assert %{
+               "code" => "contract_violation",
+               "file" => nil,
+               "message" => "unsafe diagnostic payload"
+             } = Diagnostic.to_map(unsafe)
+    end
   end
 end
