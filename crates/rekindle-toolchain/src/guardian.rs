@@ -283,8 +283,7 @@ fn terminate(
         return cleanup_group(pgid, Duration::ZERO, kill_grace);
     }
     signal_group(pgid, libc::SIGKILL);
-    let reaped = wait_child(child, kill_grace);
-    if reaped && group_absent(pgid) {
+    if wait_terminated(child, pgid, kill_grace) {
         "confirmed"
     } else {
         "uncertain"
@@ -325,6 +324,25 @@ fn wait_group_absent(pgid: i32, duration: Duration) -> bool {
     loop {
         reap_descendants();
         if group_absent(pgid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn wait_terminated(child: &mut Child, pgid: i32, duration: Duration) -> bool {
+    let deadline = Instant::now() + duration;
+    let mut leader_reaped = false;
+
+    loop {
+        if !leader_reaped {
+            leader_reaped = child.try_wait().ok().flatten().is_some();
+        }
+        reap_descendants();
+        if leader_reaped && group_absent(pgid) {
             return true;
         }
         if Instant::now() >= deadline {

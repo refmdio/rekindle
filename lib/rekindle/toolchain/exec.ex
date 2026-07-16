@@ -40,7 +40,8 @@ defmodule Rekindle.Toolchain.Exec do
          {:ok, env_set} <- env_set(env_set),
          {:ok, env_unset} <- env_unset(env_unset),
          true <- MapSet.disjoint?(MapSet.new(env_set, &elem(&1, 0)), MapSet.new(env_unset)),
-         true <- positive(terminate_grace) and positive(kill_grace) do
+         true <- integer_between?(terminate_grace, 0, 30_000),
+         true <- integer_between?(kill_grace, 100, 30_000) do
       header = %{
         "v" => 1,
         "type" => "spawn",
@@ -283,6 +284,10 @@ defmodule Rekindle.Toolchain.Exec do
   defp proper_list?([_head | tail]), do: proper_list?(tail)
   defp proper_list?(_value), do: false
   defp unique?(values), do: length(values) == MapSet.size(MapSet.new(values))
+
+  defp integer_between?(value, minimum, maximum),
+    do: is_integer(value) and value >= minimum and value <= maximum
+
   defp positive(value), do: is_integer(value) and value > 0
   defp nonnegative(value), do: is_integer(value) and value >= 0
   defp exact_keys?(map, keys), do: Map.keys(map) |> Enum.sort() == Enum.sort(keys)

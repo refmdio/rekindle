@@ -37,6 +37,8 @@ struct ExitReport<'a> {
 }
 
 const MAX_STREAM_BYTES: u64 = 1_048_576;
+const MAX_GRACE_MS: u64 = 30_000;
+const MIN_KILL_GRACE_MS: u64 = 100;
 
 pub fn run<R: Read>(mut input: R) -> Result<(), String> {
     let spawn = frame::read(&mut input)?.ok_or_else(|| "missing spawn request".to_string())?;
@@ -206,8 +208,8 @@ fn validate_spawn(value: &Value) -> Result<&Map<String, Value>, String> {
         || !strings(&object["argv"])
         || !matches!(object["env_mode"].as_str(), Some("inherit" | "replace"))
         || !environment(&object["env_set"], &object["env_unset"])
-        || object["terminate_grace_ms"].as_u64().unwrap_or(0) == 0
-        || object["kill_grace_ms"].as_u64().unwrap_or(0) == 0
+        || !milliseconds_in(&object["terminate_grace_ms"], 0, MAX_GRACE_MS)
+        || !milliseconds_in(&object["kill_grace_ms"], MIN_KILL_GRACE_MS, MAX_GRACE_MS)
     {
         return Err("invalid spawn request".into());
     }
@@ -435,4 +437,55 @@ fn valid_env(value: Option<&str>) -> bool {
             && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
             && value.len() <= 128
     })
+}
+
+fn milliseconds_in(value: &Value, minimum: u64, maximum: u64) -> bool {
+    value
+        .as_u64()
+        .is_some_and(|milliseconds| (minimum..=maximum).contains(&milliseconds))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_spawn;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn admits_only_the_exact_grace_boundaries() {
+        for (terminate, kill) in [(0, 100), (30_000, 30_000)] {
+            assert!(validate_spawn(&spawn(terminate.into(), kill.into())).is_ok());
+        }
+
+        for (terminate, kill) in [(-1, 100), (30_001, 100), (0, 99), (0, 30_001)] {
+            assert!(validate_spawn(&spawn(terminate.into(), kill.into())).is_err());
+        }
+
+        for (terminate, kill) in [
+            (json!(0.0), json!(100)),
+            (json!(0), json!(100.0)),
+            (json!("0"), json!(100)),
+            (json!(0), Value::Null),
+        ] {
+            assert!(validate_spawn(&spawn(terminate, kill)).is_err());
+        }
+    }
+
+    fn spawn(terminate: Value, kill: Value) -> Value {
+        let executable = std::env::current_exe().expect("test executable");
+
+        json!({
+            "v": 1,
+            "type": "spawn",
+            "request_id": "0123456789abcdef0123456789abcdef",
+            "payload_len": 0,
+            "executable": {"kind": "path", "value": executable},
+            "argv": [],
+            "cwd": "/",
+            "env_mode": "replace",
+            "env_set": [],
+            "env_unset": [],
+            "terminate_grace_ms": terminate,
+            "kill_grace_ms": kill
+        })
+    }
 }

@@ -1,6 +1,7 @@
 defmodule Rekindle.Toolchain.ExecTest do
   use ExUnit.Case, async: true
 
+  alias Rekindle.CanonicalValue
   alias Rekindle.Toolchain.Exec
 
   @request "0123456789abcdef0123456789abcdef"
@@ -16,7 +17,7 @@ defmodule Rekindle.Toolchain.ExecTest do
                env_set: [{"Z", "2"}, {"A", "1"}],
                env_unset: ["OLD"],
                terminate_grace_ms: 10,
-               kill_grace_ms: 20
+               kill_grace_ms: 100
              )
 
     assert state.request_id == @request
@@ -43,6 +44,50 @@ defmodule Rekindle.Toolchain.ExecTest do
                env_set: [{"A", "1"}],
                env_unset: ["A"]
              )
+  end
+
+  test "encodes zero termination grace exactly and admits only protocol boundaries" do
+    assert {:ok, header, _state} =
+             Exec.spawn_request(
+               request_id: @request,
+               executable: "/usr/bin/true",
+               cwd: "/tmp",
+               terminate_grace_ms: 0,
+               kill_grace_ms: 100
+             )
+
+    assert CanonicalValue.encode!(header) ==
+             ~s({"argv":[],"cwd":"/tmp","env_mode":"replace","env_set":[],"env_unset":[],"executable":{"kind":"path","value":"/usr/bin/true"},"kill_grace_ms":100,"payload_len":0,"request_id":"#{@request}","terminate_grace_ms":0,"type":"spawn","v":1})
+
+    for {terminate, kill} <- [{0, 100}, {30_000, 30_000}] do
+      assert {:ok, _, _} =
+               Exec.spawn_request(
+                 executable: "/usr/bin/true",
+                 cwd: "/tmp",
+                 terminate_grace_ms: terminate,
+                 kill_grace_ms: kill
+               )
+    end
+
+    for {terminate, kill} <- [{-1, 100}, {30_001, 100}, {0, 99}, {0, 30_001}] do
+      assert {:error, :invalid_spawn} =
+               Exec.spawn_request(
+                 executable: "/usr/bin/true",
+                 cwd: "/tmp",
+                 terminate_grace_ms: terminate,
+                 kill_grace_ms: kill
+               )
+    end
+
+    for {terminate, kill} <- [{0.0, 100}, {0, 100.0}, {"0", 100}, {0, nil}] do
+      assert {:error, :invalid_spawn} =
+               Exec.spawn_request(
+                 executable: "/usr/bin/true",
+                 cwd: "/tmp",
+                 terminate_grace_ms: terminate,
+                 kill_grace_ms: kill
+               )
+    end
   end
 
   test "malformed environment entries fail closed without raising or producing a request" do

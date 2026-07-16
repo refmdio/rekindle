@@ -160,6 +160,50 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     refute process_exists?(descendant)
   end
 
+  test "zero terminate grace escalates immediately and reaps the process group", %{
+    helper: helper
+  } do
+    root = temp_root("zero-terminate-grace")
+    script = Path.join(root, "ignore-term")
+    ready = Path.join(root, "ready")
+    File.mkdir_p!(root)
+
+    File.write!(
+      script,
+      "#!/bin/sh\ntrap '' TERM\nprintf ready > #{ready}\nwhile :; do sleep 1; done\n"
+    )
+
+    File.chmod!(script, 0o700)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:ok, spawn, state} =
+             Exec.spawn_request(
+               request_id: @request,
+               executable: script,
+               cwd: root,
+               terminate_grace_ms: 0,
+               kill_grace_ms: 500
+             )
+
+    started_hook = fn _port, _state ->
+      assert wait_file(ready, 1_000)
+      Process.put(:zero_terminate_ready_at, System.monotonic_time(:millisecond))
+    end
+
+    assert {:ok, terminal, "", ""} =
+             Helper.run_exec(helper, spawn, state,
+               timeout_ms: 200,
+               cleanup_timeout_ms: 1_000,
+               started_hook: started_hook
+             )
+
+    elapsed = System.monotonic_time(:millisecond) - Process.get(:zero_terminate_ready_at)
+    assert terminal.outcome == :signaled
+    assert terminal.signal == 9
+    assert terminal.cleanup == :confirmed
+    assert elapsed < 1_000
+  end
+
   test "guardian removes the descendant group when the helper dies after started", %{
     helper: helper
   } do
