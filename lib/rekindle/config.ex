@@ -671,7 +671,7 @@ defmodule Rekindle.Config do
     host_matches? =
       if String.starts_with?(policy_host, "*.") do
         suffix = String.trim_leading(policy_host, "*")
-        String.ends_with?(origin_host, suffix) and origin_host != String.trim_leading(suffix, ".")
+        String.ends_with?(origin_host, suffix) or origin_host == String.trim_leading(suffix, ".")
       else
         origin_host == policy_host
       end
@@ -679,7 +679,7 @@ defmodule Rekindle.Config do
     scheme_matches? =
       scheme_optional? or String.downcase(policy_uri.scheme || "") == origin_uri.scheme
 
-    explicit_port? = Regex.match?(~r/:\d+\z/, pattern)
+    explicit_port? = Regex.match?(~r/:\d+\/?\z/, pattern)
     port_matches? = not explicit_port? or policy_uri.port == origin_uri.port
     host_matches? and scheme_matches? and port_matches?
   end
@@ -768,15 +768,21 @@ defmodule Rekindle.Config do
     project_root = Path.expand(project_root)
 
     unsafe_root? =
-      project_root
-      |> absolute_components()
-      |> Enum.any?(fn path ->
-        case File.lstat(path) do
-          {:ok, %{type: :symlink}} -> true
-          {:ok, _stat} -> false
-          {:error, _} -> true
-        end
-      end)
+      case File.lstat(project_root) do
+        {:ok, %{type: :directory}} ->
+          project_root
+          |> absolute_components()
+          |> Enum.any?(fn path ->
+            case File.lstat(path) do
+              {:ok, %{type: :symlink}} -> true
+              {:ok, _stat} -> false
+              {:error, _} -> true
+            end
+          end)
+
+        _ ->
+          true
+      end
 
     unsafe_child? =
       Enum.any?(paths, fn relative ->

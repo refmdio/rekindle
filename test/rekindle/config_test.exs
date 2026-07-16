@@ -274,6 +274,17 @@ defmodule Rekindle.ConfigTest do
       :path_invalid
     )
 
+    file_root =
+      Path.join(System.tmp_dir!(), "rekindle-file-root-#{System.unique_integer([:positive])}")
+
+    File.write!(file_root, "not a directory")
+    on_exit(fn -> File.rm(file_root) end)
+
+    assert_error(
+      Config.normalize(:demo_app, web_build(), web_dev(), project_root: file_root),
+      :path_invalid
+    )
+
     collision =
       web_build()
       |> Keyword.put(:targets, web_build()[:targets] ++ desktop_build()[:targets])
@@ -333,6 +344,24 @@ defmodule Rekindle.ConfigTest do
              )
 
     assert wildcard_project.dev.accepted_origins == ["https://app.example.com"]
+
+    assert {:ok, _} =
+             Config.normalize(
+               :demo_app,
+               web_build(),
+               Keyword.put(dev, :accepted_origins, ["https://example.com"])
+             )
+
+    Application.put_env(:demo_app, Endpoint, check_origin: ["https://example.com:8443/"])
+
+    assert_error(
+      Config.normalize(
+        :demo_app,
+        web_build(),
+        Keyword.put(dev, :accepted_origins, ["https://example.com:9443"])
+      ),
+      :config_invalid
+    )
   end
 
   defp web_build do
