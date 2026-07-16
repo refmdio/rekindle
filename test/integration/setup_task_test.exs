@@ -2,6 +2,7 @@ defmodule Rekindle.SetupTaskIntegrationTest do
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
+  import ExUnit.CaptureLog
 
   alias Rekindle.Toolchain.{Helper, Installer, Release}
 
@@ -79,6 +80,32 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     assert File.read!(context.rustup_log) ==
              "toolchain install 1.95.0 --profile minimal\n" <>
                "target add --toolchain 1.95.0 wasm32-unknown-unknown\n"
+  end
+
+  test "the public setup adapter correlates unexpected internal termination" do
+    Application.put_env(:rekindle, :redact_values, ["adapter-secret"])
+
+    {outcome, log} =
+      with_log(fn ->
+        Mix.Tasks.Rekindle.Setup.run_outcome([],
+          load_project: fn -> raise "adapter-secret raw exception" end
+        )
+      end)
+
+    public = outcome.stdout <> outcome.stderr
+    assert outcome.exit_status == 3
+
+    assert [[correlation]] =
+             Regex.scan(~r/correlation=([0-9a-f]{32})/, public, capture: :all_but_first)
+
+    assert Regex.scan(~r/correlation=([0-9a-f]{32})/, log, capture: :all_but_first) == [
+             [correlation]
+           ]
+
+    refute public =~ "adapter-secret"
+    refute public =~ "setup_task_test.exs"
+    refute log =~ "adapter-secret"
+    assert log =~ "kind=raise"
   end
 
   test "checksum-valid incompatible helper fails before verified output", context do

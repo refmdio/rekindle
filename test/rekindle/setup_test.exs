@@ -1,6 +1,8 @@
 defmodule Rekindle.SetupTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Rekindle.{Config, Failure, Setup}
 
   test "defaults to all declared targets and verifies the helper last" do
@@ -161,6 +163,36 @@ defmodule Rekindle.SetupTest do
     assert :counters.get(counter, 1) == 2
     assert :counters.get(counter, 2) == 2
     assert before_ports == MapSet.new(Port.list())
+  end
+
+  test "maps every unavailable setup adapter to correlated internal exit 3" do
+    cases = [
+      [],
+      [load_project: fn -> {:ok, project([:web])} end],
+      [
+        load_project: fn -> {:ok, project([:web])} end,
+        ensure_target: fn :web, _config -> {:ok, :present} end
+      ]
+    ]
+
+    for adapters <- cases do
+      {outcome, log} = with_log(fn -> Setup.run([], adapters) end)
+      public = outcome.stdout <> outcome.stderr
+
+      assert outcome.exit_status == 3
+
+      assert [[correlation]] =
+               Regex.scan(~r/correlation=([0-9a-f]{32})/, public, capture: :all_but_first)
+
+      assert Regex.scan(~r/correlation=([0-9a-f]{32})/, log, capture: :all_but_first) == [
+               [correlation]
+             ]
+
+      assert public =~ "contract_violation"
+      refute public =~ "adapter"
+      assert log =~ "setup adapter"
+      assert byte_size(log) < 10_000
+    end
   end
 
   defp project(targets) do

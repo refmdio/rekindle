@@ -1,5 +1,7 @@
 defmodule Rekindle.CommandTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
 
   alias Rekindle.{Command, Failure}
 
@@ -74,11 +76,14 @@ defmodule Rekindle.CommandTest do
   end
 
   test "contains invalid handler values and exceptions as exit 3 without stacks" do
-    invalid = Command.run("rekindle.example", ["web"], @grammar, fn _ -> :invalid end)
+    {invalid, _log} =
+      with_log(fn -> Command.run("rekindle.example", ["web"], @grammar, fn _ -> :invalid end) end)
 
-    raised =
-      Command.run("rekindle.example", ["web", "--json"], @grammar, fn _ ->
-        raise "secret stack"
+    {raised, _log} =
+      with_log(fn ->
+        Command.run("rekindle.example", ["web", "--json"], @grammar, fn _ ->
+          raise "secret stack"
+        end)
       end)
 
     assert invalid.exit_status == 3
@@ -123,11 +128,129 @@ defmodule Rekindle.CommandTest do
     unsafe = %{failure() | message: <<255>>}
 
     for argv <- [["web"], ["web", "--json"]] do
-      outcome = Command.run("rekindle.example", argv, @grammar, fn _ -> {:error, unsafe} end)
+      {outcome, _log} =
+        with_log(fn ->
+          Command.run("rekindle.example", argv, @grammar, fn _ -> {:error, unsafe} end)
+        end)
+
       assert outcome.exit_status == 3
       rendered = outcome.stdout <> outcome.stderr
       assert rendered =~ "contract_violation"
       refute rendered =~ <<255>>
+    end
+  end
+
+  test "classifies every typed internal code as correlated exit 3 in human and JSON modes" do
+    for code <- internal_codes(), argv <- [["web"], ["web", "--json"]] do
+      failure =
+        Failure.new!(
+          target: nil,
+          stage: :internal,
+          code: code,
+          message: "typed internal context"
+        )
+
+      {outcome, log} =
+        with_log(fn ->
+          Command.run("rekindle.example", argv, @grammar, fn _ ->
+            {:error, failure, ["must not emit"]}
+          end)
+        end)
+
+      assert_correlated_internal(outcome, log, "typed internal context")
+      refute outcome.stdout <> outcome.stderr =~ "must not emit"
+    end
+  end
+
+  test "contains raise, throw, and exit with sanitized correlated diagnostics" do
+    previous = Application.get_env(:rekindle, :redact_values)
+
+    secrets = ["raised-secret", "thrown-secret", "exit-secret"]
+    Application.put_env(:rekindle, :redact_values, secrets)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:rekindle, :redact_values, previous),
+        else: Application.delete_env(:rekindle, :redact_values)
+    end)
+
+    operations = [
+      fn -> raise "raised-secret raw exception" end,
+      fn -> throw({:failure, "thrown-secret"}) end,
+      fn -> exit({:failure, "exit-secret"}) end
+    ]
+
+    for operation <- operations, argv <- [["web"], ["web", "--json"]] do
+      {outcome, log} =
+        with_log(fn ->
+          Command.run("rekindle.example", argv, @grammar, fn _ -> operation.() end)
+        end)
+
+      assert_correlated_internal(outcome, log, nil)
+
+      for secret <- secrets do
+        refute outcome.stdout =~ secret
+        refute outcome.stderr =~ secret
+        refute log =~ secret
+      end
+
+      refute outcome.stdout =~ "command_test.exs"
+      refute outcome.stderr =~ "command_test.exs"
+      assert log =~ "context=kind="
+      assert byte_size(log) < 10_000
+    end
+  end
+
+  test "keeps non-internal typed failures in expected exit class" do
+    for code <- Failure.codes() -- internal_codes(), argv <- [["web"], ["web", "--json"]] do
+      {:ok, stage} = Failure.stage_for(code)
+
+      failure =
+        Failure.new!(target: nil, stage: stage, code: code, message: "expected failure")
+
+      {outcome, log} =
+        with_log(fn ->
+          Command.run("rekindle.example", argv, @grammar, fn _ -> {:error, failure} end)
+        end)
+
+      assert outcome.exit_status == 1
+      refute outcome.stdout <> outcome.stderr =~ "correlation="
+      assert log == ""
+    end
+  end
+
+  defp internal_codes do
+    Enum.filter(Failure.codes(), &(Failure.stage_for(&1) == {:ok, :internal}))
+  end
+
+  defp assert_correlated_internal(outcome, log, local_context) do
+    public = outcome.stdout <> outcome.stderr
+
+    assert outcome.exit_status == 3
+
+    assert [[correlation]] =
+             Regex.scan(~r/correlation=([0-9a-f]{32})/, public, capture: :all_but_first)
+
+    assert Regex.scan(~r/correlation=([0-9a-f]{32})/, log, capture: :all_but_first) == [
+             [correlation]
+           ]
+
+    assert public =~ "contract_violation"
+    refute public =~ "stack="
+
+    if local_context do
+      refute public =~ local_context
+      assert log =~ local_context
+    end
+
+    if outcome.stdout != "" do
+      assert outcome.stderr == ""
+      assert String.split(outcome.stdout, "\n", trim: true) |> length() == 1
+
+      assert outcome.stdout ==
+               Rekindle.CanonicalValue.encode!(Jason.decode!(outcome.stdout)) <> "\n"
+    else
+      assert outcome.stderr != ""
     end
   end
 

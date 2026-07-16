@@ -1,7 +1,12 @@
 defmodule Rekindle.Command do
   @moduledoc false
 
-  alias Rekindle.{CanonicalValue, Failure}
+  require Logger
+
+  alias Rekindle.{CanonicalValue, Failure, Redactor}
+
+  @correlation ~r/correlation(?:_id)?=[0-9a-f]{32}/
+  @max_stack_frames 12
 
   defmodule Outcome do
     @moduledoc false
@@ -69,6 +74,15 @@ defmodule Rekindle.Command do
       {:ok, result, progress} ->
         success(command, invocation, result, progress)
 
+      {:error, %Failure{stage: :internal} = failure} ->
+        internal_failure(command, invocation, {:typed_failure, failure})
+
+      {:error, %Failure{stage: :internal} = failure, _progress} ->
+        internal_failure(command, invocation, {:typed_failure, failure})
+
+      {:error, :invocation, %Failure{stage: :internal} = failure} ->
+        internal_failure(command, invocation, {:typed_failure, failure})
+
       {:error, %Failure{} = failure} ->
         expected_failure(command, invocation, failure, [])
 
@@ -79,13 +93,18 @@ defmodule Rekindle.Command do
         invalid_invocation(command, invocation, failure)
 
       _ ->
-        internal_failure(command, invocation, "handler returned an invalid terminal value")
+        internal_failure(
+          command,
+          invocation,
+          {:boundary, "handler returned an invalid terminal value"}
+        )
     end
   rescue
-    _exception -> internal_failure(command, invocation, "command handler raised unexpectedly")
+    exception ->
+      internal_failure(command, invocation, {:raised, exception, __STACKTRACE__})
   catch
-    _kind, _reason ->
-      internal_failure(command, invocation, "command handler terminated unexpectedly")
+    kind, reason ->
+      internal_failure(command, invocation, {:caught, kind, reason, __STACKTRACE__})
   end
 
   defp success(command, %{json?: true}, result, _progress) do
@@ -98,7 +117,8 @@ defmodule Rekindle.Command do
       value: {:ok, result}
     }
   rescue
-    _ -> internal_failure(command, %{json?: true}, "success result is not canonical")
+    exception ->
+      internal_failure(command, %{json?: true}, {:raised, exception, __STACKTRACE__})
   end
 
   defp success(_command, %{json?: false}, result, progress) do
@@ -114,22 +134,31 @@ defmodule Rekindle.Command do
 
   defp expected_failure(command, %{json?: true}, failure, _progress) do
     case Failure.sanitize(failure) do
-      {:ok, failure} -> failure_outcome(command, true, failure, [], 1)
-      {:error, _} -> internal_failure(command, %{json?: true}, "unsafe failure payload")
+      {:ok, failure} ->
+        failure_outcome(command, true, failure, [], 1)
+
+      {:error, _} ->
+        internal_failure(command, %{json?: true}, {:boundary, "unsafe failure payload"})
     end
   end
 
   defp expected_failure(_command, %{json?: false}, failure, progress) do
     case Failure.sanitize(failure) do
-      {:ok, failure} -> failure_outcome(nil, false, failure, progress, 1)
-      {:error, _} -> internal_failure(nil, %{json?: false}, "unsafe failure payload")
+      {:ok, failure} ->
+        failure_outcome(nil, false, failure, progress, 1)
+
+      {:error, _} ->
+        internal_failure(nil, %{json?: false}, {:boundary, "unsafe failure payload"})
     end
   end
 
   defp invalid_invocation(command, invocation, failure) do
     case Failure.sanitize(failure) do
-      {:ok, failure} -> failure_outcome(command, invocation.json?, failure, [], 2)
-      {:error, _} -> internal_failure(command, invocation, "unsafe invocation failure payload")
+      {:ok, failure} ->
+        failure_outcome(command, invocation.json?, failure, [], 2)
+
+      {:error, _} ->
+        internal_failure(command, invocation, {:boundary, "unsafe invocation failure payload"})
     end
   end
 
@@ -162,15 +191,16 @@ defmodule Rekindle.Command do
     }
   end
 
-  defp internal_failure(command, invocation, message) do
+  defp internal_failure(command, invocation, context) do
     correlation = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+    log_internal_failure(command, correlation, context)
 
     failure =
       Failure.new!(
         target: nil,
         stage: :internal,
         code: :contract_violation,
-        message: "#{message}; correlation=#{correlation}"
+        message: "internal command failure; correlation=#{correlation}"
       )
 
     if invocation.json? do
@@ -191,6 +221,93 @@ defmodule Rekindle.Command do
       }
     end
   end
+
+  defp log_internal_failure(command, correlation, context) do
+    command = sanitize_context({:command, command})
+    context = sanitize_context(context)
+
+    Logger.error(
+      "Rekindle internal command failure correlation=#{correlation} command=#{command} context=#{context}"
+    )
+  end
+
+  defp sanitize_context(context) do
+    context
+    |> format_context()
+    |> String.replace(@correlation, "correlation=<redacted>")
+    |> Redactor.sanitize()
+    |> case do
+      {:ok, value} -> value
+      {:error, _reason} -> "diagnostic context unavailable"
+    end
+  rescue
+    _ -> "diagnostic context unavailable"
+  catch
+    _, _ -> "diagnostic context unavailable"
+  end
+
+  defp format_context({:command, command}) when is_binary(command), do: command
+  defp format_context({:command, _command}), do: "unknown"
+  defp format_context({:boundary, message}) when is_binary(message), do: message
+
+  defp format_context({:typed_failure, failure}) do
+    case Failure.sanitize(failure) do
+      {:ok, failure} ->
+        "kind=typed_failure stage=#{failure.stage} code=#{failure.code} " <>
+          "message=#{failure.message} diagnostics=#{length(failure.diagnostics)}"
+
+      {:error, _reason} ->
+        "kind=typed_failure payload=unsafe"
+    end
+  end
+
+  defp format_context({:raised, exception, stacktrace}) do
+    "kind=raise exception=#{exception_name(exception)} message=#{exception_message(exception)} " <>
+      "stack=#{format_stack(stacktrace)}"
+  end
+
+  defp format_context({:caught, kind, reason, stacktrace}) do
+    "kind=#{safe_kind(kind)} reason=#{safe_inspect(reason)} stack=#{format_stack(stacktrace)}"
+  end
+
+  defp format_context(_context), do: "diagnostic context unavailable"
+
+  defp exception_name(%{__struct__: module}) when is_atom(module), do: inspect(module)
+  defp exception_name(_exception), do: "unknown"
+
+  defp exception_message(exception) do
+    Exception.message(exception)
+  rescue
+    _ -> "unavailable"
+  end
+
+  defp safe_kind(kind) when kind in [:throw, :exit, :error], do: Atom.to_string(kind)
+  defp safe_kind(_kind), do: "unknown"
+
+  defp safe_inspect(value) do
+    inspect(value, limit: 20, printable_limit: 2_048, width: 120)
+  rescue
+    _ -> "unavailable"
+  catch
+    _, _ -> "unavailable"
+  end
+
+  defp format_stack(stacktrace) when is_list(stacktrace) do
+    stacktrace
+    |> Enum.take(@max_stack_frames)
+    |> Enum.map_join(",", &format_frame/1)
+  end
+
+  defp format_stack(_stacktrace), do: "unavailable"
+
+  defp format_frame({module, function, arity_or_arguments, metadata})
+       when is_atom(module) and is_atom(function) and is_list(metadata) do
+    arity = if is_integer(arity_or_arguments), do: arity_or_arguments, else: "?"
+    line = Keyword.get(metadata, :line, "?")
+    "#{inspect(module)}.#{function}/#{arity}:#{line}"
+  end
+
+  defp format_frame(_frame), do: "unknown"
 
   defp envelope(command, status, result, failure) do
     %{
