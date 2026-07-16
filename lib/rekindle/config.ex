@@ -749,15 +749,23 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp origins(:endpoint, targets, _endpoint, _otp_app, _path),
-    do: {:ok, if(:web in targets, do: :endpoint, else: nil)}
+  defp origins(:endpoint, targets, endpoint, otp_app, path) do
+    if :web in targets do
+      with {:ok, endpoint_config} <- endpoint_config(otp_app, endpoint, path),
+           {:ok, origins} <- finite_endpoint_origins(endpoint_config, path) do
+        {:ok, %{source: :endpoint, origins: origins}}
+      end
+    else
+      {:ok, nil}
+    end
+  end
 
   defp origins(value, targets, endpoint, otp_app, path) when is_list(value) do
     if :web in targets and bounded_proper_list?(value) do
       with :ok <- nonempty(value, path ++ [:accepted_origins]),
            {:ok, normalized} <- normalize_origins(value, path),
            :ok <- intersects_endpoint_policy(normalized, otp_app, endpoint, path) do
-        {:ok, normalized}
+        {:ok, %{source: :explicit, origins: normalized}}
       else
         _ -> error(path ++ [:accepted_origins], :config_invalid, "accepted origins are invalid")
       end
@@ -801,35 +809,202 @@ defmodule Rekindle.Config do
 
   defp normalize_origin(_), do: :error
 
-  defp intersects_endpoint_policy(origins, otp_app, endpoint, path) do
-    endpoint_config = Application.get_env(otp_app, endpoint, [])
+  defp endpoint_config(otp_app, endpoint, path) do
+    case Application.get_env(otp_app, endpoint, []) do
+      value when is_list(value) ->
+        keys = if bounded_proper_list?(value) and Keyword.keyword?(value), do: Keyword.keys(value)
 
-    if is_list(endpoint_config) and bounded_proper_list?(endpoint_config) and
-         Keyword.keyword?(endpoint_config) do
-      intersects_policy(origins, Keyword.get(endpoint_config, :check_origin), path)
+        if is_list(keys) and length(keys) == MapSet.size(MapSet.new(keys)) do
+          {:ok, value}
+        else
+          endpoint_policy_error(path)
+        end
+
+      _value ->
+        endpoint_policy_error(path)
+    end
+  end
+
+  defp finite_endpoint_origins(endpoint_config, path) do
+    case Keyword.get(endpoint_config, :check_origin, true) do
+      true ->
+        with {:ok, origin} <- endpoint_origin(endpoint_config, path), do: {:ok, [origin]}
+
+      origins when is_list(origins) ->
+        finite_origin_list(origins, path)
+
+      _dynamic_or_disabled ->
+        endpoint_policy_error(path)
+    end
+  end
+
+  defp finite_origin_list(origins, path) do
+    if bounded_proper_list?(origins) and origins != [] do
+      origins
+      |> Enum.reduce_while({:ok, []}, fn origin, {:ok, acc} ->
+        case finite_policy_origin(origin) do
+          {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
+          :error -> {:halt, endpoint_policy_error(path)}
+        end
+      end)
+      |> then(fn
+        {:ok, normalized} ->
+          unique_sorted(Enum.reverse(normalized), & &1, path ++ [:accepted_origins])
+
+        error ->
+          error
+      end)
     else
-      error(
-        path ++ [:accepted_origins],
-        :config_invalid,
-        "endpoint origin policy is invalid"
+      endpoint_policy_error(path)
+    end
+  end
+
+  defp finite_policy_origin(value) when is_binary(value) do
+    with {:ok, %{scheme: scheme, host: {:exact, host}, port: port}}
+         when scheme in ["http", "https"] and is_integer(port) <- normalize_origin_policy(value) do
+      host = if String.contains?(host, ":"), do: "[#{host}]", else: host
+      normalize_origin("#{scheme}://#{host}:#{port}")
+    else
+      _ -> :error
+    end
+  end
+
+  defp finite_policy_origin(_value), do: :error
+
+  defp endpoint_origin(endpoint_config, path) do
+    with {:ok, url} <- endpoint_url_config(endpoint_config, path),
+         {:ok, transport_scheme, transport_port} <- endpoint_transport(endpoint_config, path),
+         {:ok, scheme} <- endpoint_scheme(Keyword.get(url, :scheme, transport_scheme)),
+         {:ok, port} <- endpoint_port(Keyword.get(url, :port, transport_port)),
+         host when is_binary(host) <- Keyword.get(url, :host, "localhost"),
+         host <- endpoint_host_for_origin(host),
+         {:ok, origin} <- normalize_origin("#{scheme}://#{host}:#{port}") do
+      {:ok, origin}
+    else
+      _ -> endpoint_policy_error(path)
+    end
+  end
+
+  defp endpoint_url_config(endpoint_config, path) do
+    url = Keyword.get(endpoint_config, :url, host: "localhost", path: "/")
+
+    with :ok <- closed_keyword(url, [:host, :scheme, :path, :port], path ++ [:endpoint, :url]) do
+      {:ok, url}
+    end
+  end
+
+  defp endpoint_transport(endpoint_config, path) do
+    cond do
+      Keyword.get(endpoint_config, :https, false) not in [false, nil] ->
+        with {:ok, port} <- transport_port(Keyword.get(endpoint_config, :https), 443) do
+          {:ok, "https", port}
+        end
+
+      Keyword.get(endpoint_config, :http, false) not in [false, nil] ->
+        with {:ok, port} <- transport_port(Keyword.get(endpoint_config, :http), 80) do
+          {:ok, "http", port}
+        end
+
+      true ->
+        {:ok, "http", 80}
+    end
+  rescue
+    _ -> endpoint_policy_error(path)
+  end
+
+  defp transport_port(options, default) when is_list(options) do
+    if bounded_proper_list?(options) and Keyword.keyword?(options),
+      do: endpoint_port(Keyword.get(options, :port, default)),
+      else: :error
+  end
+
+  defp transport_port(_options, _default), do: :error
+
+  defp endpoint_scheme(value) when is_binary(value) do
+    if String.valid?(value) do
+      case String.downcase(value) do
+        scheme when scheme in ["http", "https"] -> {:ok, scheme}
+        _scheme -> :error
+      end
+    else
+      :error
+    end
+  end
+
+  defp endpoint_scheme(_value), do: :error
+
+  defp endpoint_port(value) when is_integer(value) and value in 1..65_535, do: {:ok, value}
+
+  defp endpoint_port(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {port, ""} when port in 1..65_535 -> {:ok, port}
+      _ -> :error
+    end
+  end
+
+  defp endpoint_port(_value), do: :error
+
+  defp endpoint_host_for_origin("[" <> _rest = host), do: host
+
+  defp endpoint_host_for_origin(host) do
+    if String.contains?(host, ":"), do: "[#{host}]", else: host
+  end
+
+  defp endpoint_policy_error(path) do
+    error(
+      path ++ [:accepted_origins],
+      :config_invalid,
+      "endpoint origin policy must resolve to a finite origin list"
+    )
+  end
+
+  defp intersects_endpoint_policy(origins, otp_app, endpoint, path) do
+    with {:ok, endpoint_config} <- endpoint_config(otp_app, endpoint, path) do
+      intersects_policy(
+        origins,
+        Keyword.get(endpoint_config, :check_origin, true),
+        endpoint_config,
+        path
       )
     end
   end
 
-  defp intersects_policy(origins, policy, path) do
+  defp intersects_policy(origins, policy, endpoint_config, path) do
     cond do
       policy == false ->
         :ok
 
+      policy == true ->
+        with {:ok, endpoint_origin} <- endpoint_origin(endpoint_config, path),
+             {:ok, endpoint} <- normalize_origin_parts(endpoint_origin) do
+          if Enum.any?(origins, fn origin ->
+               match?(
+                 {:ok, %{host: host}} when host == endpoint.host,
+                 normalize_origin_parts(origin)
+               )
+             end),
+             do: :ok,
+             else:
+               error(
+                 path ++ [:accepted_origins],
+                 :config_invalid,
+                 "accepted origins do not intersect endpoint policy"
+               )
+        end
+
       is_list(policy) and bounded_proper_list?(policy) ->
-        if Enum.any?(origins, fn origin -> Enum.any?(policy, &policy_allows?(&1, origin)) end),
-          do: :ok,
-          else:
-            error(
-              path ++ [:accepted_origins],
-              :config_invalid,
-              "accepted origins do not intersect endpoint policy"
-            )
+        if policy != [] and Enum.all?(policy, &valid_origin_policy?/1) do
+          if Enum.any?(origins, fn origin -> Enum.any?(policy, &policy_allows?(&1, origin)) end),
+            do: :ok,
+            else:
+              error(
+                path ++ [:accepted_origins],
+                :config_invalid,
+                "accepted origins do not intersect endpoint policy"
+              )
+        else
+          endpoint_policy_error(path)
+        end
 
       true ->
         error(
@@ -862,6 +1037,11 @@ defmodule Rekindle.Config do
   end
 
   defp policy_allows?(_pattern, _origin), do: false
+
+  defp valid_origin_policy?(value) when is_binary(value),
+    do: match?({:ok, _policy}, normalize_origin_policy(value))
+
+  defp valid_origin_policy?(_value), do: false
 
   defp normalize_origin_parts(value) do
     with true <- valid_origin_text?(value),

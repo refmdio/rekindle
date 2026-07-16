@@ -65,7 +65,12 @@ defmodule Rekindle.ConfigTest do
 
     assert project.dev.targets == [:web]
     assert project.dev.endpoint == Endpoint
-    assert project.dev.accepted_origins == :endpoint
+
+    assert project.dev.accepted_origins == %{
+             source: :endpoint,
+             origins: ["http://localhost"]
+           }
+
     assert project.dev.debounce_ms == 75
     assert project.dev.diagnostic_limit == 512
     assert project.dev.browser_message_bytes == 1_048_576
@@ -716,7 +721,11 @@ defmodule Rekindle.ConfigTest do
     ]
 
     assert {:ok, project} = Config.normalize(:demo_app, web_build(), dev)
-    assert project.dev.accepted_origins == ["https://allowed.example"]
+
+    assert project.dev.accepted_origins == %{
+             source: :explicit,
+             origins: ["https://allowed.example"]
+           }
 
     assert_error(
       Config.normalize(:demo_app, web_build(),
@@ -740,7 +749,10 @@ defmodule Rekindle.ConfigTest do
                accepted_origins: ["https://app.example.com"]
              )
 
-    assert wildcard_project.dev.accepted_origins == ["https://app.example.com"]
+    assert wildcard_project.dev.accepted_origins == %{
+             source: :explicit,
+             origins: ["https://app.example.com"]
+           }
 
     assert {:ok, _} =
              Config.normalize(
@@ -810,15 +822,18 @@ defmodule Rekindle.ConfigTest do
 
     assert {:ok, project} = Config.normalize(:demo_app, web_build(), dev)
 
-    assert project.dev.accepted_origins ==
-             Enum.sort([
-               "https://example.com",
-               "http://example.com",
-               "https://example.com:8443",
-               "https://127.0.0.1:8443",
-               "https://[::1]",
-               "http://[2001:db8::1]:8080"
-             ])
+    assert project.dev.accepted_origins == %{
+             source: :explicit,
+             origins:
+               Enum.sort([
+                 "https://example.com",
+                 "http://example.com",
+                 "https://example.com:8443",
+                 "https://127.0.0.1:8443",
+                 "https://[::1]",
+                 "http://[2001:db8::1]:8080"
+               ])
+           }
 
     invalid_origins = [
       <<"http://", 255>>,
@@ -901,7 +916,11 @@ defmodule Rekindle.ConfigTest do
 
     Application.put_env(:demo_app, Endpoint, check_origin: ["https://[::1]"])
     assert {:ok, project} = Config.normalize(:demo_app, web_build(), dev)
-    assert project.dev.accepted_origins == ["https://[::1]"]
+
+    assert project.dev.accepted_origins == %{
+             source: :explicit,
+             origins: ["https://[::1]"]
+           }
 
     ipv4_dev = Keyword.put(dev, :accepted_origins, ["https://127.0.0.1"])
 
@@ -926,6 +945,102 @@ defmodule Rekindle.ConfigTest do
       Application.put_env(:demo_app, Endpoint, check_origin: [invalid_policy])
       assert_error(Config.normalize(:demo_app, web_build(), dev), :config_invalid)
     end
+  end
+
+  test "resolves endpoint accepted origins to a finite normalized policy" do
+    previous = Application.get_env(:demo_app, Endpoint)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:demo_app, Endpoint, previous),
+        else: Application.delete_env(:demo_app, Endpoint)
+    end)
+
+    Application.put_env(:demo_app, Endpoint,
+      check_origin: true,
+      url: [host: "EXAMPLE.COM", scheme: "HTTPS", port: "443"]
+    )
+
+    assert {:ok, project} = Config.normalize(:demo_app, web_build(), web_dev())
+
+    assert project.dev.accepted_origins == %{
+             source: :endpoint,
+             origins: ["https://example.com"]
+           }
+
+    Application.put_env(:demo_app, Endpoint,
+      check_origin: true,
+      http: [port: "4000"],
+      url: [host: "LOCALHOST"]
+    )
+
+    assert {:ok, project} = Config.normalize(:demo_app, web_build(), web_dev())
+
+    assert project.dev.accepted_origins == %{
+             source: :endpoint,
+             origins: ["http://localhost:4000"]
+           }
+
+    Application.put_env(:demo_app, Endpoint,
+      check_origin: ["HTTPS://B.EXAMPLE:443", "http://a.example:80/"]
+    )
+
+    assert {:ok, project} = Config.normalize(:demo_app, web_build(), web_dev())
+
+    assert project.dev.accepted_origins == %{
+             source: :endpoint,
+             origins: ["http://a.example", "https://b.example"]
+           }
+
+    Application.delete_env(:demo_app, Endpoint)
+    assert {:ok, default_project} = Config.normalize(:demo_app, web_build(), web_dev())
+
+    assert default_project.dev.accepted_origins == %{
+             source: :endpoint,
+             origins: ["http://localhost"]
+           }
+  end
+
+  test "rejects disabled, dynamic, wildcard, and invalid endpoint origin policies" do
+    previous = Application.get_env(:demo_app, Endpoint)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:demo_app, Endpoint, previous),
+        else: Application.delete_env(:demo_app, Endpoint)
+    end)
+
+    policies = [
+      false,
+      :conn,
+      {__MODULE__, :dynamic_origin, []},
+      [],
+      ["//*.example.com"],
+      ["//example.com:443"],
+      ["https://*.example.com"],
+      ["https://example.com/path"],
+      ["https://example.com", "not-an-origin"]
+    ]
+
+    for policy <- policies do
+      Application.put_env(:demo_app, Endpoint, check_origin: policy)
+      assert_error(Config.normalize(:demo_app, web_build(), web_dev()), :config_invalid)
+    end
+
+    for invalid_url <- [
+          [host: "example.com/path"],
+          [host: {:system, "HOST"}],
+          [host: "example.com", scheme: :https],
+          [host: "example.com", scheme: <<255>>],
+          [host: "example.com", port: 0],
+          [host: "example.com", port: 65_536]
+        ] do
+      Application.put_env(:demo_app, Endpoint, check_origin: true, url: invalid_url)
+      assert_error(Config.normalize(:demo_app, web_build(), web_dev()), :config_invalid)
+    end
+
+    Application.put_env(:demo_app, Endpoint, check_origin: true, check_origin: true)
+    assert_error(Config.normalize(:demo_app, web_build(), web_dev()), :config_invalid)
   end
 
   defp web_build do
