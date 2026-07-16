@@ -430,7 +430,12 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       const obj = { export(value) { return value; } };
       obj.export({ from: "./missing-member.js" });
       const property = obj.export;
-      export default async function init() { return [lazy, wasm, matcher, template, interpolated, nested, templateMatcher, objectKey, property]; }
+      const importKey = { import: { from: "./missing-import-key.js" } };
+      const importObj = { import(value) { return value; } };
+      importObj.import({ from: "./missing-import-member.js" });
+      const importProperty = importObj.import;
+      class Loader { import(value) { return value; } }
+      export default async function init() { return [lazy, wasm, matcher, template, interpolated, nested, templateMatcher, objectKey, property, importKey, importProperty, Loader]; }
       //# sourceMappingURL=app.js.map
       """,
       "app.js.map" => ~s({"version":3}),

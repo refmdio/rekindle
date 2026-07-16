@@ -543,6 +543,19 @@ defmodule Rekindle.Toolchain.Web do
   end
 
   defp javascript_token_references(
+         [{:id, "import"}, "(" | rest],
+         previous,
+         references
+       )
+       when previous in ["{", ",", ";", "}"] do
+    if method_definition_tail?(rest) do
+      javascript_token_references(["(" | rest], {:id, "import"}, references)
+    else
+      dynamic_import_reference(rest, references)
+    end
+  end
+
+  defp javascript_token_references(
          [{:id, "import"}, "(", {:string, specifier}, ")" | rest],
          previous,
          references
@@ -561,15 +574,29 @@ defmodule Rekindle.Toolchain.Web do
        when previous != ".",
        do: {:error, :nonliteral_dynamic_import}
 
-  defp javascript_token_references([{:id, "import"} | rest], previous, references)
-       when previous != "." do
-    with {:ok, specifier} <- static_module_specifier(rest, :import) do
-      references =
-        if is_nil(specifier), do: references, else: [{specifier, "esm_import", true} | references]
+  defp javascript_token_references(
+         [{:id, "import"}, {:string, _specifier} | _rest] = tokens,
+         previous,
+         references
+       )
+       when previous != ".",
+       do: static_import_reference(tokens, references)
 
-      javascript_token_references(rest, {:id, "import"}, references)
-    end
-  end
+  defp javascript_token_references(
+         [{:id, "import"}, {:id, _binding} | _rest] = tokens,
+         previous,
+         references
+       )
+       when previous != ".",
+       do: static_import_reference(tokens, references)
+
+  defp javascript_token_references(
+         [{:id, "import"}, form | _rest] = tokens,
+         previous,
+         references
+       )
+       when previous != "." and form in ["*", "{"],
+       do: static_import_reference(tokens, references)
 
   defp javascript_token_references([{:id, "export"}, form | rest], previous, references)
        when previous != "." and form in ["{", "*"] do
@@ -583,6 +610,34 @@ defmodule Rekindle.Toolchain.Web do
 
   defp javascript_token_references([token | rest], _previous, references),
     do: javascript_token_references(rest, token, references)
+
+  defp dynamic_import_reference([{:string, specifier}, ")" | rest], references) do
+    with {:ok, specifier} <- literal_specifier(specifier) do
+      javascript_token_references(
+        rest,
+        ")",
+        [{specifier, "dynamic_import", true} | references]
+      )
+    end
+  end
+
+  defp dynamic_import_reference(_tokens, _references), do: {:error, :nonliteral_dynamic_import}
+
+  defp static_import_reference([{:id, "import"} | rest], references) do
+    with {:ok, specifier} <- static_module_specifier(rest, :import) do
+      references =
+        if is_nil(specifier), do: references, else: [{specifier, "esm_import", true} | references]
+
+      javascript_token_references(rest, {:id, "import"}, references)
+    end
+  end
+
+  defp method_definition_tail?(tokens), do: method_definition_tail?(tokens, 1)
+  defp method_definition_tail?([], _depth), do: false
+  defp method_definition_tail?(["(" | rest], depth), do: method_definition_tail?(rest, depth + 1)
+  defp method_definition_tail?([")", "{" | _rest], 1), do: true
+  defp method_definition_tail?([")" | rest], depth), do: method_definition_tail?(rest, depth - 1)
+  defp method_definition_tail?([_token | rest], depth), do: method_definition_tail?(rest, depth)
 
   defp static_module_specifier([{:string, specifier} | _rest], :import),
     do: literal_specifier(specifier)
