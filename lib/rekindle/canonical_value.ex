@@ -11,7 +11,6 @@ defmodule Rekindle.CanonicalValue do
 
   @min_integer -9_007_199_254_740_991
   @max_integer 9_007_199_254_740_991
-  @max_list_items 128
   @digest_domain "rekindle-backend-options-v1\0"
 
   @type scalar :: nil | boolean() | integer() | String.t()
@@ -73,7 +72,7 @@ defmodule Rekindle.CanonicalValue do
   end
 
   defp validate(value, path) when is_list(value) do
-    if proper_list_within?(value, @max_list_items) do
+    if proper_list?(value) do
       value
       |> Enum.with_index()
       |> Enum.reduce_while(:ok, fn {item, index}, :ok ->
@@ -83,7 +82,7 @@ defmodule Rekindle.CanonicalValue do
         end
       end)
     else
-      error(path, :unsupported_value, "list must be bounded and proper")
+      error(path, :unsupported_value, "list must be proper")
     end
   end
 
@@ -152,13 +151,9 @@ defmodule Rekindle.CanonicalValue do
     :unicode.characters_to_binary(value, :utf8, {:utf16, :big})
   end
 
-  defp proper_list_within?(values, limit), do: proper_list_within?(values, limit, 0)
-  defp proper_list_within?([], _limit, _count), do: true
-
-  defp proper_list_within?([_value | rest], limit, count) when count < limit,
-    do: proper_list_within?(rest, limit, count + 1)
-
-  defp proper_list_within?(_values, _limit, _count), do: false
+  defp proper_list?([]), do: true
+  defp proper_list?([_value | rest]), do: proper_list?(rest)
+  defp proper_list?(_values), do: false
 
   defp error(path, code, message) do
     {:error, ConfigError.new(path, code, message)}

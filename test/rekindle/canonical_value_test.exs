@@ -39,18 +39,27 @@ defmodule Rekindle.CanonicalValueTest do
              CanonicalValue.validate(%{"outer" => [1.5]})
   end
 
-  test "rejects improper and oversized lists before item traversal" do
+  test "accepts proper lists without an undocumented collection bound" do
+    for size <- [127, 128, 129, 256] do
+      value = List.duplicate(%{"nested" => [nil, true, size]}, size)
+
+      assert :ok = CanonicalValue.validate(value)
+      assert {:ok, encoded} = CanonicalValue.encode(value)
+      assert String.starts_with?(encoded, "[")
+      assert String.ends_with?(encoded, "]")
+    end
+  end
+
+  test "rejects improper lists before item traversal" do
     for {value, path} <- [
           {[1 | :improper_tail], []},
-          {%{"nested" => [1 | :improper_tail]}, ["nested"]},
-          {List.duplicate(nil, 129), []},
-          {%{"nested" => List.duplicate(nil, 129)}, ["nested"]}
+          {%{"nested" => [1 | :improper_tail]}, ["nested"]}
         ] do
       assert {:error,
               %{
                 code: :unsupported_value,
                 path: ^path,
-                message: "list must be bounded and proper"
+                message: "list must be proper"
               }} = CanonicalValue.validate(value)
 
       refute CanonicalValue.valid?(value)

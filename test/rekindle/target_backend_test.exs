@@ -112,6 +112,14 @@ defmodule Rekindle.TargetBackendTest do
     def finalize(_context, _options, _result), do: :ok
   end
 
+  defmodule VersionBackend do
+    def backend_id, do: "version.backend"
+    def backend_version, do: Process.get({__MODULE__, :version}, "1")
+    def validate(_target, options), do: {:ok, options}
+    def plan(_context, _options), do: :ok
+    def finalize(_context, _options, _result), do: :ok
+  end
+
   test "admits an existing conforming module and normalized options" do
     assert {:ok, admission} = TargetBackend.admit(ValidBackend, :web, %{"answer" => 42})
     assert admission.module == ValidBackend
@@ -166,36 +174,64 @@ defmodule Rekindle.TargetBackendTest do
     end
   end
 
-  test "rejects improper and oversized canonical input and callback output lists" do
+  test "rejects improper canonical input and callback output lists" do
     for {value, path} <- [
           {[1 | :improper_tail], [:backend, :options]},
-          {%{"nested" => [1 | :improper_tail]}, [:backend, :options, "nested"]},
-          {List.duplicate(nil, 129), [:backend, :options]}
+          {%{"nested" => [1 | :improper_tail]}, [:backend, :options, "nested"]}
         ] do
       assert {:error,
               [
                 %ConfigError{
                   path: ^path,
                   code: :unsupported_value,
-                  message: "list must be bounded and proper"
+                  message: "list must be proper"
                 }
               ]} = TargetBackend.admit(ValidBackend, :web, value)
     end
 
     for {shape, path} <- [
           {"improper", [:backend, :normalized_options]},
-          {"nested", [:backend, :normalized_options, "nested"]},
-          {"oversized", [:backend, :normalized_options]}
+          {"nested", [:backend, :normalized_options, "nested"]}
         ] do
       assert {:error,
               [
                 %ConfigError{
                   path: ^path,
                   code: :unsupported_value,
-                  message: "list must be bounded and proper"
+                  message: "list must be proper"
                 }
               ]} =
                TargetBackend.admit(CanonicalOutputShapeBackend, :web, %{"case" => shape})
+    end
+
+    assert {:ok, %{options: options}} =
+             TargetBackend.admit(CanonicalOutputShapeBackend, :web, %{"case" => "oversized"})
+
+    assert length(options) == 129
+  end
+
+  test "admits only bounded control-free ASCII backend versions" do
+    on_exit(fn -> Process.delete({VersionBackend, :version}) end)
+
+    for version <- [" ", "1", "v1.2.3+build", String.duplicate("~", 128)] do
+      Process.put({VersionBackend, :version}, version)
+      assert {:ok, %{backend_version: ^version}} = TargetBackend.admit(VersionBackend, :web)
+    end
+
+    for version <- [
+          "",
+          String.duplicate("a", 129),
+          "é",
+          <<0>>,
+          "1\n2",
+          "1\r2",
+          <<0x1F>>,
+          <<0x7F>>
+        ] do
+      Process.put({VersionBackend, :version}, version)
+
+      assert {:error, [%ConfigError{path: [:backend, :backend_version]}]} =
+               TargetBackend.admit(VersionBackend, :web)
     end
   end
 

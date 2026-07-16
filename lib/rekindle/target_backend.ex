@@ -205,7 +205,7 @@ defmodule Rekindle.TargetBackend do
 
   defp valid_version?(value) do
     is_binary(value) and byte_size(value) in 1..128 and String.valid?(value) and
-      Enum.all?(:binary.bin_to_list(value), &(&1 <= 0x7F))
+      Enum.all?(:binary.bin_to_list(value), &(&1 in 0x20..0x7E))
   end
 
   defp error(path, message), do: ConfigError.new(path, :config_invalid, message)
