@@ -64,6 +64,10 @@ defmodule Rekindle.Config do
   @max_collection_items 128
   @max_configuration_depth 32
   @max_feature_bytes 8_192
+  @max_resolved_environment_bytes 262_144
+  @forbidden_environment_names ~w[PWD CARGO CARGO_TARGET_DIR RUSTUP_TOOLCHAIN]
+  @toolchain_environment_names ~w[PATH HOME USER TMPDIR TMP TEMP CARGO_HOME RUSTUP_HOME RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER CC CXX AR LD PKG_CONFIG SDKROOT MACOSX_DEPLOYMENT_TARGET HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY FTP_PROXY http_proxy https_proxy all_proxy no_proxy ftp_proxy]
+  @toolchain_environment_prefixes ~w[CC_ CXX_ AR_ LD_ PKG_CONFIG_ SSL_CERT_]
 
   @spec load(atom(), keyword()) :: {:ok, Project.t()} | {:error, [ConfigError.t()]}
   def load(otp_app, options \\ []) when is_atom(otp_app) do
@@ -78,12 +82,14 @@ defmodule Rekindle.Config do
 
   def normalize(otp_app, build, dev, options)
       when is_atom(otp_app) and is_list(options) do
+    host_environment = System.get_env()
+
     with :ok <- admitted_configuration_term(build, [:rekindle_build]),
          :ok <- admitted_configuration_term(dev, [:rekindle_dev]),
          :ok <- admitted_configuration_term(options, [:options]),
          {:ok, project_root} <- project_root(options),
          {:ok, application_id} <- application_id(otp_app),
-         {:ok, build} <- normalize_build(build),
+         {:ok, build} <- normalize_build(build, host_environment),
          {:ok, dev} <- normalize_dev(dev, build, otp_app),
          :ok <- validate_path_ownership(build, project_root) do
       {:ok,
@@ -142,14 +148,14 @@ defmodule Rekindle.Config do
   defp normalize_project_root(_value),
     do: error([:project_root], :path_invalid, "project root is invalid")
 
-  defp normalize_build(nil),
+  defp normalize_build(nil, _host_environment),
     do: error([:rekindle_build], :config_missing, "rekindle_build is required")
 
-  defp normalize_build(build) do
+  defp normalize_build(build, host_environment) do
     with :ok <- closed_keyword(build, @build_keys, [:rekindle_build]),
          :ok <- exact(Map.new(build)[:schema], 1, [:rekindle_build, :schema]),
          {:ok, client} <- relative_path(fetch(build, :client), [:rekindle_build, :client]),
-         {:ok, targets} <- normalize_targets(fetch(build, :targets)),
+         {:ok, targets} <- normalize_targets(fetch(build, :targets), host_environment),
          {:ok, cache} <- normalize_cache(Keyword.get(build, :cache, @default_cache)),
          {:ok, process} <- normalize_process(Keyword.get(build, :process, @default_process)) do
       {:ok,
@@ -157,15 +163,15 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp normalize_targets(targets) do
+  defp normalize_targets(targets, host_environment) do
     with :ok <- closed_keyword(targets, [:web, :desktop], [:rekindle_build, :targets]),
          :ok <- nonempty(targets, [:rekindle_build, :targets]) do
       Enum.reduce_while(targets, {:ok, %{}}, fn
         {:web, config}, {:ok, acc} ->
-          continue_target(normalize_web(config), :web, acc)
+          continue_target(normalize_web(config, host_environment), :web, acc)
 
         {:desktop, config}, {:ok, acc} ->
-          continue_target(normalize_desktop(config), :desktop, acc)
+          continue_target(normalize_desktop(config, host_environment), :desktop, acc)
       end)
     end
   end
@@ -173,11 +179,11 @@ defmodule Rekindle.Config do
   defp continue_target({:ok, target}, name, acc), do: {:cont, {:ok, Map.put(acc, name, target)}}
   defp continue_target({:error, _} = error, _name, _acc), do: {:halt, error}
 
-  defp normalize_web(config) do
+  defp normalize_web(config, host_environment) do
     path = [:rekindle_build, :targets, :web]
 
     with :ok <- closed_keyword(config, @web_keys, path),
-         {:ok, common} <- normalize_target_common(:web, config, path),
+         {:ok, common} <- normalize_target_common(:web, config, path, host_environment),
          :ok <- validate_web_rust_target(common, path),
          {:ok, public} <- optional_path(Keyword.get(config, :public), path ++ [:public]),
          {:ok, hot_styles} <-
@@ -193,11 +199,11 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp normalize_desktop(config) do
+  defp normalize_desktop(config, host_environment) do
     path = [:rekindle_build, :targets, :desktop]
 
     with :ok <- closed_keyword(config, @desktop_keys, path),
-         {:ok, common} <- normalize_target_common(:desktop, config, path),
+         {:ok, common} <- normalize_target_common(:desktop, config, path, host_environment),
          {:ok, runtime} <-
            normalize_runtime(Keyword.get(config, :runtime, @default_runtime), path),
          {:ok, projection} <- normalize_projection(:desktop, fetch(config, :projection), path) do
@@ -206,14 +212,14 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp normalize_target_common(target, config, path) do
+  defp normalize_target_common(target, config, path, host_environment) do
     with {:ok, package} <- identifier(fetch(config, :package), path ++ [:package]),
          {:ok, binary} <- identifier(fetch(config, :binary), path ++ [:binary]),
          {:ok, features} <- identifiers(Keyword.get(config, :features, []), path ++ [:features]),
          {:ok, profiles} <-
            normalize_profiles(Keyword.get(config, :profiles, @default_profiles), path),
          {:ok, backend} <- normalize_backend(target, Keyword.get(config, :backend), path),
-         {:ok, canonical} <- normalize_pipeline(config, backend, path) do
+         {:ok, canonical} <- normalize_pipeline(config, backend, path, host_environment) do
       {:ok,
        canonical
        |> Map.merge(%{
@@ -254,14 +260,18 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp normalize_pipeline(config, :canonical, path) do
+  defp normalize_pipeline(config, :canonical, path, host_environment) do
     with {:ok, toolchain} <- normalize_toolchain(fetch(config, :toolchain), path),
          {:ok, rust_target} <-
            optional_identifier(Keyword.get(config, :rust_target), path ++ [:rust_target]),
          {:ok, default_features} <-
            boolean(Keyword.get(config, :default_features, true), path ++ [:default_features]),
          {:ok, environment} <-
-           normalize_environment(Keyword.get(config, :environment, @default_environment), path) do
+           normalize_environment(
+             Keyword.get(config, :environment, @default_environment),
+             path,
+             host_environment
+           ) do
       {:ok,
        %{
          toolchain: toolchain,
@@ -272,7 +282,7 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp normalize_pipeline(config, {:external, _admission}, path) do
+  defp normalize_pipeline(config, {:external, _admission}, path, _host_environment) do
     forbidden = [:toolchain, :rust_target, :default_features, :environment]
 
     if Enum.any?(forbidden, &Keyword.has_key?(config, &1)) do
@@ -322,7 +332,7 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp normalize_environment(value, path) do
+  defp normalize_environment(value, path, host_environment) do
     with :ok <- closed_keyword(value, @environment_keys, path ++ [:environment]),
          {:ok, inherit} <-
            member(
@@ -336,14 +346,17 @@ defmodule Rekindle.Config do
            env_names(Keyword.get(value, :build_inputs, []), path ++ [:environment, :build_inputs]),
          {:ok, redact} <-
            env_names(Keyword.get(value, :redact, []), path ++ [:environment, :redact]),
-         :ok <- validate_env_sets(set, build_inputs, redact, path) do
+         :ok <- validate_env_sets(set, build_inputs, redact, path),
+         {:ok, resolved} <-
+           resolve_environment(inherit, set, unset, host_environment, path) do
       {:ok,
        %EnvironmentPolicy{
          inherit: inherit,
          set: set,
          unset: unset,
          build_inputs: build_inputs,
-         redact: redact
+         redact: redact,
+         resolved: resolved
        }}
     end
   end
@@ -354,7 +367,7 @@ defmodule Rekindle.Config do
         {name, {origin, source}}, {:ok, acc}
         when origin in [:literal, :host] and is_binary(source) ->
           with {:ok, name} <- env_name(name, path ++ [:environment, :set]),
-               :ok <- safe_string(source, path ++ [:environment, :set, name]) do
+               :ok <- env_source(origin, source, path ++ [:environment, :set, name]) do
             {:cont, {:ok, [{name, {origin, source}} | acc]}}
           else
             {:error, _} = error -> {:halt, error}
@@ -400,6 +413,87 @@ defmodule Rekindle.Config do
       true ->
         :ok
     end
+  end
+
+  defp env_source(:literal, value, path), do: safe_string(value, path)
+
+  defp env_source(:host, source_name, path) do
+    case env_name(source_name, path) do
+      {:ok, _source_name} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp resolve_environment(inherit, set, unset, host_environment, path) do
+    with {:ok, inherited} <- inherited_environment(inherit, host_environment, path),
+         {:ok, resolved} <- apply_environment_set(inherited, set, host_environment, path) do
+      resolved =
+        resolved
+        |> Map.drop(unset)
+        |> Enum.sort_by(&elem(&1, 0))
+
+      if environment_bytes(resolved) <= @max_resolved_environment_bytes do
+        {:ok, resolved}
+      else
+        error(
+          path ++ [:environment],
+          :config_invalid,
+          "resolved environment exceeds the 262144-byte limit"
+        )
+      end
+    end
+  end
+
+  defp inherited_environment(:none, _host_environment, _path), do: {:ok, %{}}
+
+  defp inherited_environment(inherit, host_environment, path) do
+    host_environment
+    |> Enum.filter(fn {name, _value} -> inherited_name?(inherit, name) end)
+    |> Enum.reduce_while({:ok, %{}}, fn {name, value}, {:ok, acc} ->
+      case safe_string(value, path ++ [:environment, :inherit, name]) do
+        :ok -> {:cont, {:ok, Map.put(acc, name, value)}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp inherited_name?(:host, name),
+    do: environment_name(name) == :ok and not forbidden_env?(name)
+
+  defp inherited_name?(:toolchain, name) do
+    environment_name(name) == :ok and not forbidden_env?(name) and
+      (name in @toolchain_environment_names or
+         Enum.any?(@toolchain_environment_prefixes, &String.starts_with?(name, &1)))
+  end
+
+  defp apply_environment_set(environment, set, host_environment, path) do
+    Enum.reduce_while(set, {:ok, environment}, fn
+      {name, {:literal, value}}, {:ok, acc} ->
+        {:cont, {:ok, Map.put(acc, name, value)}}
+
+      {name, {:host, source_name}}, {:ok, acc} ->
+        case Map.fetch(host_environment, source_name) do
+          {:ok, value} ->
+            case safe_string(value, path ++ [:environment, :set, name]) do
+              :ok -> {:cont, {:ok, Map.put(acc, name, value)}}
+              {:error, _} = error -> {:halt, error}
+            end
+
+          :error ->
+            {:halt,
+             error(
+               path ++ [:environment, :set, name],
+               :config_invalid,
+               "host environment source is missing"
+             )}
+        end
+    end)
+  end
+
+  defp environment_bytes(entries) do
+    Enum.reduce(entries, 0, fn {name, value}, size ->
+      size + byte_size(name) + 1 + byte_size(value) + 1
+    end)
   end
 
   defp normalize_projection(target, value, path) do
@@ -1242,13 +1336,21 @@ defmodule Rekindle.Config do
     do: error(path, :config_invalid, "environment name list is invalid")
 
   defp env_name(value, path) do
-    if is_binary(value) and Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]{0,127}\z/, value) and
-         not String.starts_with?(value, "REKINDLE_") do
+    if environment_name(value) == :ok and not forbidden_env?(value) do
       {:ok, value}
     else
       error(path, :config_invalid, "environment name is invalid or reserved")
     end
   end
+
+  defp environment_name(value) when is_binary(value) do
+    if Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]{0,127}\z/, value), do: :ok, else: :error
+  end
+
+  defp environment_name(_value), do: :error
+
+  defp forbidden_env?(name),
+    do: name in @forbidden_environment_names or String.starts_with?(name, "REKINDLE_")
 
   defp normalized_paths(value, path) when is_list(value) do
     if bounded_proper_list?(value) do

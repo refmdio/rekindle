@@ -418,6 +418,8 @@ defmodule Rekindle.ConfigTest do
   end
 
   test "normalizes environment names and requires identity/redaction coverage" do
+    set_test_env("SOURCE_TOKEN", "captured-secret")
+
     target =
       web_target()
       |> Keyword.put(:environment,
@@ -455,6 +457,131 @@ defmodule Rekindle.ConfigTest do
              )
 
     assert Enum.map(project.build.targets.web.environment.set, &elem(&1, 0)) == ["AA", "ZZ"]
+
+    assert project.build.targets.web.environment.resolved == [
+             {"AA", "captured-secret"},
+             {"ZZ", "2"}
+           ]
+  end
+
+  test "rejects semantic environment overrides in every configuration arm" do
+    forbidden = ["PWD", "CARGO", "CARGO_TARGET_DIR", "RUSTUP_TOOLCHAIN", "REKINDLE_SOCKET"]
+
+    for name <- forbidden,
+        policy <- [
+          [inherit: :none, set: [{name, {:literal, "x"}}], build_inputs: [name]],
+          [
+            inherit: :none,
+            set: [{name, {:host, "SOURCE_TOKEN"}}],
+            build_inputs: [name],
+            redact: [name]
+          ],
+          [inherit: :none, unset: [name]],
+          [inherit: :none, build_inputs: [name]],
+          [inherit: :none, redact: [name]]
+        ] do
+      assert_error(
+        Config.normalize(:demo_app, put_web_environment(policy), web_dev()),
+        :config_invalid
+      )
+    end
+  end
+
+  test "validates and resolves host environment sources during admission" do
+    set_test_env("SOURCE_TOKEN", "resolved-value")
+
+    valid =
+      environment_policy(
+        set: [{"SAFE", {:host, "SOURCE_TOKEN"}}],
+        build_inputs: ["SAFE"],
+        redact: ["SAFE"]
+      )
+
+    assert {:ok, project} = Config.normalize(:demo_app, put_web_environment(valid), web_dev())
+    assert project.build.targets.web.environment.resolved == [{"SAFE", "resolved-value"}]
+
+    for source <- [
+          "BAD-NAME",
+          "",
+          String.duplicate("A", 129),
+          "PWD",
+          "CARGO",
+          "CARGO_TARGET_DIR",
+          "RUSTUP_TOOLCHAIN",
+          "REKINDLE_RUNTIME_TOKEN"
+        ] do
+      invalid =
+        environment_policy(
+          set: [{"SAFE", {:host, source}}],
+          build_inputs: ["SAFE"],
+          redact: ["SAFE"]
+        )
+
+      assert_error(
+        Config.normalize(:demo_app, put_web_environment(invalid), web_dev()),
+        :config_invalid
+      )
+    end
+
+    missing_source = "MISSING_SOURCE_#{System.unique_integer([:positive])}"
+
+    missing =
+      environment_policy(
+        set: [{"SAFE", {:host, missing_source}}],
+        build_inputs: ["SAFE"],
+        redact: ["SAFE"]
+      )
+
+    assert_error(
+      Config.normalize(:demo_app, put_web_environment(missing), web_dev()),
+      :config_invalid
+    )
+  end
+
+  test "captures only admitted toolchain environment names" do
+    set_test_env("CC_x86_64_unknown_linux_gnu", "clang")
+    set_test_env("CCACHE_REKINDLE_TEST", "must-not-inherit")
+    set_test_env("UNRELATED_REKINDLE_TEST", "must-not-inherit")
+    set_test_env("CARGO_TARGET_DIR", "/tmp/host-override")
+
+    assert {:ok, project} = Config.normalize(:demo_app, web_build(), web_dev())
+    resolved = Map.new(project.build.targets.web.environment.resolved)
+
+    assert resolved["CC_x86_64_unknown_linux_gnu"] == "clang"
+    refute Map.has_key?(resolved, "CCACHE_REKINDLE_TEST")
+    refute Map.has_key?(resolved, "UNRELATED_REKINDLE_TEST")
+    refute Map.has_key?(resolved, "CARGO_TARGET_DIR")
+    refute Map.has_key?(resolved, "PWD")
+
+    host_policy = environment_policy(inherit: :host)
+
+    assert {:ok, host_project} =
+             Config.normalize(:demo_app, put_web_environment(host_policy), web_dev())
+
+    host_resolved = Map.new(host_project.build.targets.web.environment.resolved)
+    assert host_resolved["UNRELATED_REKINDLE_TEST"] == "must-not-inherit"
+    refute Map.has_key?(host_resolved, "CARGO_TARGET_DIR")
+    refute Map.has_key?(host_resolved, "PWD")
+  end
+
+  test "enforces the resolved environment aggregate byte boundary" do
+    boundary_value = String.duplicate("x", 262_141)
+    above_value = boundary_value <> "x"
+
+    boundary =
+      environment_policy(set: [{"A", {:literal, boundary_value}}], build_inputs: ["A"])
+
+    assert {:ok, project} =
+             Config.normalize(:demo_app, put_web_environment(boundary), web_dev())
+
+    assert [{"A", ^boundary_value}] = project.build.targets.web.environment.resolved
+
+    above = environment_policy(set: [{"A", {:literal, above_value}}], build_inputs: ["A"])
+
+    assert_error(
+      Config.normalize(:demo_app, put_web_environment(above), web_dev()),
+      :config_invalid
+    )
   end
 
   test "rejects reserved, symlinked, and normalization-colliding roots" do
@@ -853,6 +980,14 @@ defmodule Rekindle.ConfigTest do
     put_web_target(web_build(), &Keyword.put(&1, :features, features))
   end
 
+  defp put_web_environment(environment) do
+    put_web_target(web_build(), &Keyword.put(&1, :environment, environment))
+  end
+
+  defp environment_policy(overrides) do
+    Keyword.merge([inherit: :none, set: [], unset: [], build_inputs: [], redact: []], overrides)
+  end
+
   defp resource_config(:cache, field, value) do
     build = Keyword.update!(web_build(), :cache, &Keyword.put(&1, field, value))
     {build, web_dev()}
@@ -898,6 +1033,18 @@ defmodule Rekindle.ConfigTest do
       |> then(&("f" <> &1))
       |> String.pad_trailing(width, "x")
     end
+  end
+
+  defp set_test_env(name, value) do
+    previous = System.fetch_env(name)
+    System.put_env(name, value)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, previous} -> System.put_env(name, previous)
+        :error -> System.delete_env(name)
+      end
+    end)
   end
 
   defp web_dev do

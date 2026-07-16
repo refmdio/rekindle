@@ -52,7 +52,7 @@ end
 
 defmodule Rekindle.Config.EnvironmentPolicy do
   @moduledoc false
-  @enforce_keys [:inherit, :set, :unset, :build_inputs, :redact]
+  @enforce_keys [:inherit, :set, :unset, :build_inputs, :redact, :resolved]
   defstruct @enforce_keys
 end
 
