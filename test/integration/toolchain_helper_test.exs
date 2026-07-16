@@ -686,6 +686,46 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
              Helper.run_web(internal_helper, request, state)
   end
 
+  test "web-v1 rejects forged Limits above the safe integer ceiling", %{helper: helper} do
+    root = temp_root("web-unsafe-limits")
+    input = Path.join(root, "input")
+    output = Path.join(root, "output")
+    Enum.each([input, output], &File.mkdir_p!/1)
+    File.write!(Path.join(input, "app.wasm"), wasm_module())
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:ok, input_root} = Web.root(input, :read)
+    assert {:ok, wasm} = Web.file(input_root, "app.wasm")
+    assert {:ok, output_root} = Web.prepare_output_root(output)
+    assert {:ok, request, _state} = bindgen_operation(input_root, wasm, output_root, limits())
+
+    for field <- ~w[max_files max_input_bytes max_output_bytes deadline_ms] do
+      forged = put_in(request, ["limits", field], 9_007_199_254_740_992)
+      assert {:error, :invalid_frame} = Frame.encode(forged)
+
+      canonical = CanonicalValue.encode!(request)
+      current = request["limits"][field]
+
+      forged_bytes =
+        String.replace(
+          canonical,
+          ~s("#{field}":#{current}),
+          ~s("#{field}":9007199254740992),
+          global: false
+        )
+
+      refute forged_bytes == canonical
+      port = open_helper(helper, "web-v1")
+      assert :ok = negotiate(port, "web-v1")
+      assert Port.command(port, <<byte_size(forged_bytes)::32, forged_bytes::binary>>)
+
+      assert {:ok, %{"type" => "operation_error", "code" => "invalid_request"}, <<>>} =
+               receive_frame(port, <<>>)
+
+      assert_receive {^port, {:exit_status, 0}}, 1_000
+    end
+  end
+
   test "web-v1 derives the exact transitive JavaScript and CSS graph from member bytes", %{
     helper: helper
   } do

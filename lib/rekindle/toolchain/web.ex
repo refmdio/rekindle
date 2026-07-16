@@ -12,6 +12,7 @@ defmodule Rekindle.Toolchain.Web do
   @marker ".rekindle-attempt"
   @manifest "rekindle-web-manifest-v1.json"
   @max_manifest_string_bytes 4_096
+  @max_safe_integer 9_007_199_254_740_991
   @max_path_bytes 4_096
   @application_id_pattern ~r/\A[a-z][a-z0-9_-]{0,127}\z/
   @backend_id_pattern ~r/\A[a-z][a-z0-9_.-]{0,127}\z/
@@ -320,7 +321,7 @@ defmodule Rekindle.Toolchain.Web do
       "deadline_ms" => Keyword.get(options, :deadline_ms)
     }
 
-    if Enum.all?(Map.values(limits), &(is_integer(&1) and &1 > 0)),
+    if Enum.all?(Map.values(limits), &positive_safe_integer?/1),
       do: {:ok, limits},
       else: {:error, :invalid_limits}
   end
@@ -1624,8 +1625,10 @@ defmodule Rekindle.Toolchain.Web do
   defp write_root?(root), do: validate_root(root) == :ok and root["mode"] == "write_empty"
 
   defp limits?(limits),
-    do:
-      exact?(limits, @limit_keys) and Enum.all?(Map.values(limits), &(is_integer(&1) and &1 > 0))
+    do: exact?(limits, @limit_keys) and Enum.all?(Map.values(limits), &positive_safe_integer?/1)
+
+  defp positive_safe_integer?(value),
+    do: is_integer(value) and value in 1..@max_safe_integer
 
   defp file_descriptor?(file) do
     exact?(file, @file_keys) and request_id(file["root_id"]) == :ok and relative?(file["path"]) and

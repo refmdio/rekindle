@@ -1130,7 +1130,7 @@ fn verify(request: &Value) -> OpResult<Value> {
         .to_owned();
     let (artifact_id, member_count, total_bytes) = validate_web_manifest(&manifest, &root)?;
     enforce_input_limits(&limits, &[bytes.len() as u64, total_bytes])?;
-    if started.elapsed().as_millis() as u64 > limits.deadline_ms {
+    if deadline_exceeded(elapsed_millis(started), limits.deadline_ms) {
         return Err(OpError::new(
             "output_limit",
             "verification deadline exceeded",
@@ -1167,6 +1167,8 @@ struct Limits {
     deadline_ms: u64,
 }
 
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
 impl Limits {
     fn parse(value: &Value) -> OpResult<Self> {
         const KEYS: &[&str] = &[
@@ -1188,8 +1190,15 @@ impl Limits {
             || limits.max_input_bytes == 0
             || limits.max_output_bytes == 0
             || limits.deadline_ms == 0
+            || limits.max_files > MAX_SAFE_INTEGER
+            || limits.max_input_bytes > MAX_SAFE_INTEGER
+            || limits.max_output_bytes > MAX_SAFE_INTEGER
+            || limits.deadline_ms > MAX_SAFE_INTEGER
         {
-            Err(OpError::new("invalid_request", "limits must be positive"))
+            Err(OpError::new(
+                "invalid_request",
+                "limits must be positive safe integers",
+            ))
         } else {
             Ok(limits)
         }
@@ -1736,7 +1745,7 @@ fn enforce_limits(path: &Path, limits: &Limits, started: Instant) -> OpResult<()
     }
     if count > limits.max_files
         || bytes > limits.max_output_bytes
-        || started.elapsed().as_millis() as u64 > limits.deadline_ms
+        || deadline_exceeded(elapsed_millis(started), limits.deadline_ms)
     {
         Err(OpError::new("output_limit", "operation limit exceeded"))
     } else {
@@ -1754,6 +1763,14 @@ fn enforce_input_limits(limits: &Limits, sizes: &[u64]) -> OpResult<()> {
     } else {
         Ok(())
     }
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn deadline_exceeded(elapsed_ms: u64, deadline_ms: u64) -> bool {
+    elapsed_ms > deadline_ms
 }
 
 fn normalized_relative(path: &Path, root: &Path) -> OpResult<String> {
@@ -2075,5 +2092,44 @@ mod graph_tests {
         assert!(!valid_gpui_revision(&"A".repeat(40)));
         assert!(digest(Some(&"a".repeat(64))));
         assert!(!digest(Some(&"A".repeat(64))));
+    }
+
+    #[test]
+    fn enforces_safe_integer_limits_and_exact_deadline_boundary() {
+        let fields = [
+            "max_files",
+            "max_input_bytes",
+            "max_output_bytes",
+            "deadline_ms",
+        ];
+
+        for field in fields {
+            let mut limits = json!({
+                "max_files": 1,
+                "max_input_bytes": 1,
+                "max_output_bytes": 1,
+                "deadline_ms": 1
+            });
+            limits[field] = json!(MAX_SAFE_INTEGER);
+            assert!(Limits::parse(&limits).is_ok(), "safe ceiling for {field}");
+
+            limits[field] = json!(MAX_SAFE_INTEGER + 1);
+            assert!(
+                Limits::parse(&limits).is_err(),
+                "first overflow for {field}"
+            );
+
+            limits[field] = json!(0);
+            assert!(Limits::parse(&limits).is_err(), "zero for {field}");
+
+            limits[field] = json!(-1);
+            assert!(Limits::parse(&limits).is_err(), "negative for {field}");
+
+            limits[field] = json!(1.5);
+            assert!(Limits::parse(&limits).is_err(), "non-integer for {field}");
+        }
+
+        assert!(!deadline_exceeded(MAX_SAFE_INTEGER, MAX_SAFE_INTEGER));
+        assert!(deadline_exceeded(MAX_SAFE_INTEGER + 1, MAX_SAFE_INTEGER));
     }
 }

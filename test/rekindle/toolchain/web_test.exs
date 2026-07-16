@@ -5,6 +5,7 @@ defmodule Rekindle.Toolchain.WebTest do
   alias Rekindle.CanonicalValue
 
   @request "0123456789abcdef0123456789abcdef"
+  @max_safe_integer 9_007_199_254_740_991
 
   setup do
     base = Path.join(System.tmp_dir!(), "rekindle-web-#{System.unique_integer([:positive])}")
@@ -79,6 +80,45 @@ defmodule Rekindle.Toolchain.WebTest do
 
     assert {:ok, _, %Web{op: "verify_web"}} =
              Web.operation("verify_web", verify, request_id: @request)
+  end
+
+  test "admits only positive safe integers for every Limits field", roots do
+    fields = [:max_files, :max_input_bytes, :max_output_bytes, :deadline_ms]
+    defaults = [max_files: 1, max_input_bytes: 1, max_output_bytes: 1, deadline_ms: 1]
+
+    for field <- fields do
+      assert {:ok, limits} = Web.limits(Keyword.put(defaults, field, @max_safe_integer))
+      assert is_binary(CanonicalValue.encode!(limits))
+
+      for invalid <- [0, -1, 1.5, @max_safe_integer + 1] do
+        assert {:error, :invalid_limits} = Web.limits(Keyword.put(defaults, field, invalid))
+      end
+    end
+
+    assert {:ok, input_root} = Web.root(roots.input, :read)
+    assert {:ok, wasm} = Web.file(input_root, "app.wasm")
+    assert {:ok, output_root} = Web.prepare_output_root(roots.output)
+    {:ok, limits} = Web.limits(defaults)
+
+    body = %{
+      input_root: input_root,
+      input_wasm: wasm,
+      output_root: output_root,
+      output_stem: "app",
+      debug: false,
+      source_maps: :none,
+      expected_wasm_bindgen: "0.2.121",
+      limits: limits
+    }
+
+    for field <- Enum.map(fields, &Atom.to_string/1) do
+      safe = put_in(body, [:limits, field], @max_safe_integer)
+      assert {:ok, request, _state} = Web.operation("bindgen_web", safe)
+      assert is_binary(CanonicalValue.encode!(request))
+
+      overflow = put_in(body, [:limits, field], @max_safe_integer + 1)
+      assert {:error, :invalid_operation} = Web.operation("bindgen_web", overflow)
+    end
   end
 
   test "encodes the closed bindgen request byte-exactly" do
