@@ -398,6 +398,38 @@ defmodule Rekindle.IgniterTest do
     assert adopted.issues == []
     assert source(adopted, "config/dev.exs") =~ "https://example.test"
 
+    marker = Jason.decode!(client[".rekindle-client.json"])
+
+    for invalid_marker <- [
+          Map.delete(marker, "template_version"),
+          Map.put(marker, "targets", ["web"])
+        ] do
+      invalid_client =
+        Map.put(
+          client,
+          ".rekindle-client.json",
+          Rekindle.CanonicalValue.encode!(invalid_marker) <> "\n"
+        )
+
+      rejected =
+        invalid_client
+        |> Enum.reduce(project(), fn {path, contents}, igniter ->
+          Igniter.create_new_file(igniter, Path.join("client", path), contents)
+        end)
+        |> apply_igniter!()
+        |> RekindleIgniter.install(
+          client_path: "client",
+          targets: [:web],
+          endpoint: SampleAppWeb.Endpoint,
+          no_client: true
+        )
+
+      assert Enum.any?(
+               rejected.issues,
+               &String.contains?(to_string(&1), "structurally adoptable")
+             )
+    end
+
     marker_only =
       project()
       |> Igniter.create_new_file("client/.rekindle-client.json", client[".rekindle-client.json"])

@@ -51,7 +51,6 @@ defmodule Rekindle.ClientGenerator do
       "desktop_binary" => desktop_binary,
       "gpui_revision" => @gpui_revision,
       "rekindle_client_version" => @client_version,
-      "targets" => Enum.map(targets, &Atom.to_string/1),
       "owned_files" =>
         Enum.map(owned_paths, fn path ->
           %{"path" => path, "template_sha256" => sha256(Map.fetch!(files, path))}

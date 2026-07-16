@@ -23,6 +23,20 @@ defmodule Rekindle.ClientGeneratorTest do
     refute Map.has_key?(first, "assets")
 
     marker = Jason.decode!(first[".rekindle-client.json"])
+
+    assert Map.keys(marker) |> Enum.sort() ==
+             [
+               "application_id",
+               "desktop_binary",
+               "gpui_revision",
+               "owned_files",
+               "package",
+               "rekindle_client_version",
+               "schema",
+               "template_version",
+               "web_binary"
+             ]
+
     assert marker["schema"] == 1
     assert marker["application_id"] == "sample_app"
     assert marker["package"] == "sample_app_ui"
