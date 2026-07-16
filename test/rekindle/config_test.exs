@@ -570,6 +570,111 @@ defmodule Rekindle.ConfigTest do
     )
   end
 
+  test "accepted origins are canonical HTTP authorities even when endpoint checks are disabled" do
+    previous = Application.get_env(:demo_app, Endpoint)
+    Application.put_env(:demo_app, Endpoint, check_origin: false)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:demo_app, Endpoint, previous),
+        else: Application.delete_env(:demo_app, Endpoint)
+    end)
+
+    dev = [
+      schema: 1,
+      enabled: true,
+      targets: [:web],
+      endpoint: Endpoint,
+      accepted_origins: [
+        "HTTPS://EXAMPLE.COM:443",
+        "http://example.com:80",
+        "https://example.com:8443",
+        "https://127.0.0.1:8443",
+        "https://[0:0:0:0:0:0:0:1]:443",
+        "http://[2001:0db8:0:0:0:0:0:1]:8080"
+      ]
+    ]
+
+    assert {:ok, project} = Config.normalize(:demo_app, web_build(), dev)
+
+    assert project.dev.accepted_origins ==
+             Enum.sort([
+               "https://example.com",
+               "http://example.com",
+               "https://example.com:8443",
+               "https://127.0.0.1:8443",
+               "https://[::1]",
+               "http://[2001:db8::1]:8080"
+             ])
+
+    invalid_origins = [
+      <<"http://", 255>>,
+      "https://cafe\u0301.example",
+      "https://user@example.com",
+      "https:// example.com",
+      "https://example .com",
+      "https://exa%20mple.com",
+      "https://example.com/path",
+      "https://example.com?query",
+      "https://example.com#fragment",
+      "https://[:::1]",
+      "https://::1",
+      "https://[::1",
+      "https://example.com:",
+      "https://example.com:0",
+      "https://example.com:65536",
+      "https://example.com:99999",
+      "https://example.com:-1",
+      "https://999.999.999.999",
+      "https://-example.com",
+      "https://example-.com"
+    ]
+
+    Enum.each(invalid_origins, fn origin ->
+      assert_error(
+        Config.normalize(
+          :demo_app,
+          web_build(),
+          Keyword.put(dev, :accepted_origins, [origin])
+        ),
+        :config_invalid
+      )
+    end)
+  end
+
+  test "endpoint origin policies use the same exact authority grammar" do
+    previous = Application.get_env(:demo_app, Endpoint)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:demo_app, Endpoint, previous),
+        else: Application.delete_env(:demo_app, Endpoint)
+    end)
+
+    dev = [
+      schema: 1,
+      enabled: true,
+      targets: [:web],
+      endpoint: Endpoint,
+      accepted_origins: ["https://[0:0:0:0:0:0:0:1]:443"]
+    ]
+
+    Application.put_env(:demo_app, Endpoint, check_origin: ["https://[::1]"])
+    assert {:ok, project} = Config.normalize(:demo_app, web_build(), dev)
+    assert project.dev.accepted_origins == ["https://[::1]"]
+
+    for invalid_policy <- [
+          "https://user@[::1]",
+          "https://[:::1]",
+          "https://[::1]:0",
+          "https://[::1]//",
+          "//*.example.com/socket"
+        ] do
+      Application.put_env(:demo_app, Endpoint, check_origin: [invalid_policy])
+      assert_error(Config.normalize(:demo_app, web_build(), dev), :config_invalid)
+    end
+  end
+
   defp web_build do
     [
       schema: 1,

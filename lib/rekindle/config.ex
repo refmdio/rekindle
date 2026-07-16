@@ -668,22 +668,10 @@ defmodule Rekindle.Config do
   end
 
   defp normalize_origin(value) when is_binary(value) do
-    uri = URI.parse(value)
-
-    if String.downcase(uri.scheme || "") in ["http", "https"] and is_binary(uri.host) and
-         uri.host != "" and uri.path in [nil, ""] and is_nil(uri.query) and
-         is_nil(uri.fragment) do
-      scheme = String.downcase(uri.scheme)
-      host = String.downcase(uri.host)
-
-      default_port? =
-        (scheme == "https" and uri.port in [nil, 443]) or
-          (scheme == "http" and uri.port in [nil, 80])
-
-      port = if default_port?, do: "", else: ":#{uri.port}"
-      {:ok, "#{scheme}://#{host}#{port}"}
-    else
-      :error
+    with {:ok, origin} <- normalize_origin_parts(value) do
+      host = if origin.host_kind == :ipv6, do: "[#{origin.host}]", else: origin.host
+      port = if origin.port == default_port(origin.scheme), do: "", else: ":#{origin.port}"
+      {:ok, "#{origin.scheme}://#{host}#{port}"}
     end
   end
 
@@ -729,32 +717,201 @@ defmodule Rekindle.Config do
   end
 
   defp policy_allows?(pattern, origin) when is_binary(pattern) do
-    origin_uri = URI.parse(origin)
-    scheme_optional? = String.starts_with?(pattern, "//")
-    policy_uri = URI.parse(if(scheme_optional?, do: "http:" <> pattern, else: pattern))
-    policy_host = String.downcase(policy_uri.host || "")
-    origin_host = String.downcase(origin_uri.host || "")
+    with {:ok, policy} <- normalize_origin_policy(pattern),
+         {:ok, origin} <- normalize_origin_parts(origin) do
+      scheme_matches? = is_nil(policy.scheme) or policy.scheme == origin.scheme
 
-    host_matches? =
-      if String.starts_with?(policy_host, "*.") do
-        suffix = String.trim_leading(policy_host, "*")
-        String.ends_with?(origin_host, suffix) or origin_host == String.trim_leading(suffix, ".")
-      else
-        origin_host == policy_host
-      end
+      host_matches? =
+        case policy.host do
+          {:exact, host} ->
+            host == origin.host
 
-    scheme_matches? =
-      scheme_optional? or String.downcase(policy_uri.scheme || "") == origin_uri.scheme
+          {:wildcard, suffix} ->
+            origin.host == suffix or String.ends_with?(origin.host, "." <> suffix)
+        end
 
-    explicit_port? = Regex.match?(~r/:\d+\z/, policy_uri.authority || "")
-
-    port_matches? =
-      (scheme_optional? and not explicit_port?) or policy_uri.port == origin_uri.port
-
-    host_matches? and scheme_matches? and port_matches?
+      port_matches? = policy.port == :any or policy.port == origin.port
+      scheme_matches? and host_matches? and port_matches?
+    else
+      _ -> false
+    end
   end
 
   defp policy_allows?(_pattern, _origin), do: false
+
+  defp normalize_origin_parts(value) do
+    with true <- valid_origin_text?(value),
+         [raw_scheme, authority] <- String.split(value, "://", parts: 2),
+         scheme when scheme in ["http", "https"] <- String.downcase(raw_scheme),
+         {:ok, raw_host, explicit_port, host_kind} <- split_authority(authority),
+         {:ok, host} <- canonical_host(raw_host, host_kind) do
+      {:ok,
+       %{
+         scheme: scheme,
+         host: host,
+         host_kind: host_kind,
+         port: explicit_port || default_port(scheme)
+       }}
+    else
+      _ -> :error
+    end
+  end
+
+  defp normalize_origin_policy(value) do
+    with true <- valid_origin_text?(value) do
+      value =
+        if String.ends_with?(value, "/") do
+          binary_part(value, 0, byte_size(value) - 1)
+        else
+          value
+        end
+
+      case value do
+        "//" <> authority ->
+          normalize_policy_authority(nil, authority)
+
+        _ ->
+          case String.split(value, "://", parts: 2) do
+            [raw_scheme, authority] ->
+              case String.downcase(raw_scheme) do
+                scheme when scheme in ["http", "https"] ->
+                  normalize_policy_authority(scheme, authority)
+
+                _ ->
+                  :error
+              end
+
+            _ ->
+              :error
+          end
+      end
+    else
+      _ -> :error
+    end
+  end
+
+  defp normalize_policy_authority(scheme, authority) do
+    with {:ok, raw_host, explicit_port, host_kind} <- split_authority(authority),
+         {:ok, host} <- canonical_policy_host(raw_host, host_kind) do
+      port =
+        cond do
+          explicit_port -> explicit_port
+          is_nil(scheme) -> :any
+          true -> default_port(scheme)
+        end
+
+      {:ok, %{scheme: scheme, host: host, port: port}}
+    end
+  end
+
+  defp canonical_policy_host("*." <> suffix, :plain) do
+    with {:ok, host} <- canonical_dns_host(suffix), do: {:ok, {:wildcard, host}}
+  end
+
+  defp canonical_policy_host(raw_host, host_kind) do
+    with {:ok, host} <- canonical_host(raw_host, host_kind), do: {:ok, {:exact, host}}
+  end
+
+  defp split_authority("[" <> rest) do
+    case :binary.match(rest, "]") do
+      {closing, 1} ->
+        <<host::binary-size(^closing), "]", suffix::binary>> = rest
+
+        with {:ok, port} <- parse_port_suffix(suffix),
+             false <- String.contains?(host, ["[", "]"]) do
+          {:ok, host, port, :ipv6}
+        else
+          _ -> :error
+        end
+
+      :nomatch ->
+        :error
+    end
+  end
+
+  defp split_authority(authority) do
+    case String.split(authority, ":") do
+      [host] when host != "" ->
+        {:ok, host, nil, :plain}
+
+      [host, port] when host != "" ->
+        with {:ok, port} <- parse_port(port), do: {:ok, host, port, :plain}
+
+      _ ->
+        :error
+    end
+  end
+
+  defp parse_port_suffix(""), do: {:ok, nil}
+  defp parse_port_suffix(":" <> port), do: parse_port(port)
+  defp parse_port_suffix(_suffix), do: :error
+
+  defp parse_port(value) do
+    if byte_size(value) in 1..5 and Regex.match?(~r/\A[0-9]+\z/, value) do
+      case Integer.parse(value) do
+        {port, ""} when port in 1..65_535 -> {:ok, port}
+        _ -> :error
+      end
+    else
+      :error
+    end
+  end
+
+  defp canonical_host(host, :ipv6) do
+    with {:ok, address} <- :inet.parse_address(String.to_charlist(host)),
+         true <- tuple_size(address) == 8 do
+      {:ok, address |> :inet.ntoa() |> to_string() |> String.downcase()}
+    else
+      _ -> :error
+    end
+  end
+
+  defp canonical_host(host, :plain) do
+    cond do
+      not valid_ascii_host_text?(host) ->
+        :error
+
+      Regex.match?(~r/\A[0-9.]+\z/, host) ->
+        with {:ok, address} <- :inet.parse_address(String.to_charlist(host)),
+             true <- tuple_size(address) == 4 do
+          {:ok, address |> :inet.ntoa() |> to_string()}
+        else
+          _ -> :error
+        end
+
+      true ->
+        canonical_dns_host(host)
+    end
+  end
+
+  defp canonical_dns_host(host) do
+    host = String.downcase(host)
+    labels = String.split(host, ".")
+
+    if byte_size(host) <= 253 and labels != [] and
+         Enum.all?(labels, fn label ->
+           byte_size(label) in 1..63 and
+             Regex.match?(~r/\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/, label)
+         end) do
+      {:ok, host}
+    else
+      :error
+    end
+  end
+
+  defp valid_origin_text?(value) do
+    is_binary(value) and value != "" and byte_size(value) <= 4_096 and String.valid?(value) and
+      String.normalize(value, :nfc) == value and
+      not Regex.match?(~r/[\x00-\x20\x7F]/u, value)
+  end
+
+  defp valid_ascii_host_text?(host) do
+    host != "" and byte_size(host) <= 253 and ascii?(host) and
+      not String.contains?(host, ["@", "%", "/", "?", "#", "\\"])
+  end
+
+  defp default_port("http"), do: 80
+  defp default_port("https"), do: 443
 
   defp validate_web_rust_target(
          %{backend: :canonical, rust_target: "wasm32-unknown-unknown"},
