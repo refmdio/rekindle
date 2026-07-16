@@ -141,8 +141,8 @@ defmodule Rekindle.ClientGenerator do
 
     [features]
     default = []
-    web = []
-    desktop = []
+    web = ["rekindle-client/web"]
+    desktop = ["rekindle-client/desktop"]
     state-handoff = ["rekindle-client/state-handoff"]
 
     [dependencies]
@@ -178,7 +178,31 @@ defmodule Rekindle.ClientGenerator do
 
   defp app_rs do
     """
-    pub fn build(cx: &mut gpui::App) {
+    use gpui::prelude::*;
+    use gpui::{App, Context, IntoElement, Render, Window, WindowOptions, div};
+
+    struct StarterView;
+
+    impl Render for StarterView {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child("Rekindle GPUI")
+        }
+    }
+
+    pub fn build(cx: &mut App) {
+        cx.open_window(WindowOptions::default(), |_window, cx| {
+            cx.new(|_| StarterView)
+        })
+        .expect("failed to open the starter GPUI window");
         cx.activate(true);
     }
     """

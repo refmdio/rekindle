@@ -15,6 +15,10 @@ defmodule Rekindle.ClientGeneratorTest do
     assert first["src/lib.rs"] =~ "rekindle_client::ClientOptions"
     assert first["src/bin/web.rs"] =~ "rekindle_client::web::run"
     assert first["src/bin/desktop.rs"] =~ "rekindle_client::desktop::run"
+    assert first["Cargo.toml"] =~ ~s(web = ["rekindle-client/web"])
+    assert first["Cargo.toml"] =~ ~s(desktop = ["rekindle-client/desktop"])
+    assert first["src/app.rs"] =~ "cx.open_window"
+    assert first["src/app.rs"] =~ "Rekindle GPUI"
     refute Map.has_key?(first, "assets")
 
     marker = Jason.decode!(first[".rekindle-client.json"])
