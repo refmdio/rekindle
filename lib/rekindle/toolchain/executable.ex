@@ -6,6 +6,7 @@ defmodule Rekindle.Toolchain.Executable do
 
   @max_bytes 1_073_741_824
   @identity_fields [:inode, :uid, :gid, :major_device, :minor_device, :size, :type, :mode]
+  @launch_root_prefix ".rekindle-launch-"
 
   @type t :: %__MODULE__{
           path: Path.t(),
@@ -81,12 +82,12 @@ defmodule Rekindle.Toolchain.Executable do
     with :ok <- argv(argv),
          :ok <- invoke_hook(options, :before_spawn, admitted),
          :ok <- revalidate(admitted),
-         {:ok, handle, launch_path} <- launch_handle(admitted) do
+         {:ok, handle, launch_path, launch_authority} <- launch_handle(admitted) do
       case spawn_handle(admitted, launch_path, argv, options) do
         {:ok, port} ->
           case {invoke_hook(options, :after_spawn, admitted),
-                admit_launch_handle(handle, admitted)} do
-            {:ok, {:ok, _launch_path}} ->
+                admit_launch_handle(handle, launch_authority)} do
+            {:ok, :ok} ->
               {:ok, port, handle}
 
             _error ->
@@ -199,14 +200,17 @@ defmodule Rekindle.Toolchain.Executable do
 
   defp launch_handle(admitted) do
     case :file.open(admitted.path, [:read, :binary, :raw]) do
-      {:ok, handle} ->
-        case admit_launch_handle(handle, admitted) do
-          {:ok, launch_path} ->
-            {:ok, handle, launch_path}
-
-          {:error, _} = error ->
-            release(handle)
-            error
+      {:ok, source} ->
+        try do
+          with :ok <- admit_source_handle(source, admitted),
+               {:ok, handle, launch_authority} <- sealed_copy(source, admitted),
+               {:ok, launch} <- prepare_launch_reference(handle, launch_authority) do
+            {:ok, launch.handle, launch.path, launch.authority}
+          else
+            _ -> {:error, :executable_changed}
+          end
+        after
+          release(source)
         end
 
       _ ->
@@ -214,7 +218,19 @@ defmodule Rekindle.Toolchain.Executable do
     end
   end
 
-  defp admit_launch_handle(handle, admitted) do
+  defp prepare_launch_reference(handle, launch_authority) do
+    with {:ok, launch_path} <- launch_path(handle),
+         {:ok, launch_stat} <- File.stat(launch_path),
+         true <- identity(launch_stat) == launch_authority.identity do
+      {:ok, %{handle: handle, path: launch_path, authority: launch_authority}}
+    else
+      _ ->
+        release(handle)
+        {:error, :executable_changed}
+    end
+  end
+
+  defp admit_source_handle(handle, admitted) do
     with {:ok, opened_record} <- :file.read_file_info(handle),
          opened_stat = File.Stat.from_record(opened_record),
          true <- identity(opened_stat) == admitted.identity,
@@ -223,13 +239,123 @@ defmodule Rekindle.Toolchain.Executable do
          true <- size == admitted.size,
          digest = :crypto.hash_final(context) |> Base.encode16(case: :lower),
          true <- digest == admitted.sha256,
-         {:ok, _position} <- :file.position(handle, 0),
-         {:ok, launch_path} <- launch_path(handle),
-         {:ok, launch_stat} <- File.stat(launch_path),
-         true <- identity(launch_stat) == admitted.identity do
-      {:ok, launch_path}
+         {:ok, _position} <- :file.position(handle, 0) do
+      :ok
     else
       _ -> {:error, :executable_changed}
+    end
+  end
+
+  defp sealed_copy(source, admitted) do
+    root = Path.join(System.tmp_dir!(), @launch_root_prefix <> System.pid())
+    name = "exec-#{System.unique_integer([:positive, :monotonic])}"
+    path = Path.join(root, name)
+
+    with :ok <- ensure_private_directory(root),
+         {:ok, destination} <- :file.open(path, [:write, :binary, :raw, :exclusive]) do
+      result =
+        try do
+          with :ok <- copy_handle(source, destination, admitted.size),
+               :ok <- :file.sync(destination) do
+            :ok
+          end
+        after
+          release(destination)
+        end
+
+      with :ok <- result,
+           :ok <- File.chmod(path, 0o500) do
+        sealed = open_unlinked_seal(path, admitted)
+        File.rm(path)
+        sealed
+      else
+        _ ->
+          File.rm(path)
+          {:error, :executable_changed}
+      end
+    else
+      _ -> {:error, :executable_changed}
+    end
+  end
+
+  defp open_unlinked_seal(path, admitted) do
+    case :file.open(path, [:read, :binary, :raw]) do
+      {:ok, handle} ->
+        case File.rm(path) do
+          :ok ->
+            case seal_authority(handle, admitted) do
+              {:ok, launch_authority} ->
+                {:ok, handle, launch_authority}
+
+              {:error, _} = error ->
+                release(handle)
+                error
+            end
+
+          _error ->
+            release(handle)
+            {:error, :executable_changed}
+        end
+
+      _error ->
+        File.rm(path)
+        {:error, :executable_changed}
+    end
+  end
+
+  defp seal_authority(handle, admitted) do
+    with {:ok, opened_record} <- :file.read_file_info(handle),
+         opened_stat = File.Stat.from_record(opened_record),
+         true <- opened_stat.type == :regular,
+         true <- opened_stat.size == admitted.size,
+         true <- Bitwise.band(opened_stat.mode, 0o777) == 0o500,
+         {:ok, context, size} <-
+           hash_handle(handle, :crypto.hash_init(:sha256), 0, admitted.size),
+         true <- size == admitted.size,
+         digest = :crypto.hash_final(context) |> Base.encode16(case: :lower),
+         true <- digest == admitted.sha256,
+         {:ok, _position} <- :file.position(handle, 0) do
+      {:ok, %{identity: identity(opened_stat), sha256: digest, size: size, mode: 0o500}}
+    else
+      _ -> {:error, :executable_changed}
+    end
+  end
+
+  defp admit_launch_handle(handle, launch_authority) do
+    with {:ok, opened_record} <- :file.read_file_info(handle),
+         opened_stat = File.Stat.from_record(opened_record),
+         true <- identity(opened_stat) == launch_authority.identity,
+         true <- Bitwise.band(opened_stat.mode, 0o777) == launch_authority.mode,
+         {:ok, context, size} <-
+           hash_handle(handle, :crypto.hash_init(:sha256), 0, launch_authority.size),
+         true <- size == launch_authority.size,
+         digest = :crypto.hash_final(context) |> Base.encode16(case: :lower),
+         true <- digest == launch_authority.sha256,
+         {:ok, _position} <- :file.position(handle, 0) do
+      :ok
+    else
+      _ -> {:error, :executable_changed}
+    end
+  end
+
+  defp copy_handle(source, destination, expected_size) do
+    with {:ok, _position} <- :file.position(source, 0) do
+      copy_handle(source, destination, 0, expected_size)
+    end
+  end
+
+  defp copy_handle(source, destination, copied, expected_size) do
+    case :file.read(source, 64 * 1_024) do
+      {:ok, bytes} when copied + byte_size(bytes) <= expected_size ->
+        with :ok <- :file.write(destination, bytes) do
+          copy_handle(source, destination, copied + byte_size(bytes), expected_size)
+        end
+
+      :eof when copied == expected_size ->
+        :ok
+
+      _ ->
+        {:error, :executable_changed}
     end
   end
 

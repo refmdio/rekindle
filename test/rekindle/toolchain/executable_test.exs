@@ -111,6 +111,53 @@ defmodule Rekindle.Toolchain.ExecutableTest do
              Executable.run(authority, [], around_spawn: around_spawn)
   end
 
+  test "executes immutable admitted bytes across a same-inode content ABA during spawn" do
+    root = temp_root()
+    trusted_marker = Path.join(root, "trusted-ran")
+    malicious_marker = Path.join(root, "malicious-ran")
+    executable = Path.join(root, "tool")
+
+    trusted =
+      padded_script(
+        "printf started > #{trusted_marker}\nprintf trusted\n",
+        512
+      )
+
+    malicious =
+      padded_script(
+        "printf started > #{malicious_marker}\nprintf hostile\n",
+        512
+      )
+
+    assert byte_size(trusted) == byte_size(malicious)
+    File.write!(executable, trusted)
+    File.chmod!(executable, 0o700)
+    original_inode = File.stat!(executable).inode
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:ok, authority} = Executable.qualify(executable)
+
+    around_spawn = fn _authority, launch_path, spawn ->
+      assert String.contains?(launch_path, ["/proc/", "/dev/fd/"])
+      File.write!(executable, malicious)
+      assert File.stat!(executable).inode == original_inode
+
+      result = spawn.()
+
+      assert wait_file(trusted_marker, 1_000)
+      refute File.exists?(malicious_marker)
+      File.write!(executable, trusted)
+      assert File.stat!(executable).inode == original_inode
+      result
+    end
+
+    assert {:ok, {"trusted", 0}} =
+             Executable.run(authority, [], around_spawn: around_spawn)
+
+    refute File.exists?(malicious_marker)
+    assert File.stat!(executable).inode == original_inode
+  end
+
   test "rejects path replacement immediately after spawn" do
     root = temp_root()
     pid_file = Path.join(root, "pid")
@@ -160,6 +207,12 @@ defmodule Rekindle.Toolchain.ExecutableTest do
     File.write!(path, "#!/bin/sh\n" <> body)
     File.chmod!(path, 0o700)
     path
+  end
+
+  defp padded_script(body, size) do
+    prefix = "#!/bin/sh\n" <> body <> "#"
+    true = byte_size(prefix) <= size
+    prefix <> String.duplicate("x", size - byte_size(prefix))
   end
 
   defp temp_root do

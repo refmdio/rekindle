@@ -51,6 +51,58 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     end
   end
 
+  test "helper launch executes immutable admitted bytes across a same-inode content ABA", %{
+    helper: helper
+  } do
+    root = temp_root("helper-content-aba")
+    marker = Path.join(root, "malicious-ran")
+    trusted = File.read!(helper)
+    original_inode = File.stat!(helper).inode
+    malicious = padded_script("printf malicious > #{marker}\nexit 0\n", byte_size(trusted))
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert byte_size(malicious) == byte_size(trusted)
+
+    assert {:ok, spawn, state} =
+             Exec.spawn_request(
+               request_id: @request,
+               executable: "/usr/bin/true",
+               cwd: System.tmp_dir!(),
+               terminate_grace_ms: 100,
+               kill_grace_ms: 100
+             )
+
+    around_spawn = fn _authority, launch_path, launch ->
+      assert String.contains?(launch_path, ["/proc/", "/dev/fd/"])
+      File.write!(helper, malicious)
+      assert File.stat!(helper).inode == original_inode
+
+      result = launch.()
+      Process.sleep(100)
+
+      File.write!(helper, trusted)
+      assert File.stat!(helper).inode == original_inode
+      result
+    end
+
+    try do
+      assert {:ok, terminal, "", ""} =
+               Helper.run_exec(helper, spawn, state,
+                 around_spawn: around_spawn,
+                 timeout_ms: 5_000
+               )
+
+      assert terminal.outcome == :exited
+      assert terminal.code == 0
+      refute File.exists?(marker)
+    after
+      File.write!(helper, trusted)
+      File.chmod!(helper, 0o700)
+    end
+
+    assert File.stat!(helper).inode == original_inode
+  end
+
   test "exec-v1 negotiates, preserves binary streams, and reports a confirmed exit", %{
     helper: helper
   } do
@@ -1670,6 +1722,12 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
         Process.sleep(5)
         wait_process_absent(pid, deadline - System.monotonic_time(:millisecond))
     end
+  end
+
+  defp padded_script(body, size) do
+    prefix = "#!/bin/sh\n" <> body <> "#"
+    true = byte_size(prefix) <= size
+    prefix <> String.duplicate("x", size - byte_size(prefix))
   end
 
   defp temp_root(label) do
