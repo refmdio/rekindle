@@ -150,6 +150,30 @@ defmodule Rekindle.IgniterTest do
     assert :rekindle in snapshot.mix_dependencies
     assert snapshot.application_children =~ "SampleApp.HostChild"
     assert snapshot.application_children =~ "Rekindle"
+
+    root = temp_dir!("rekindle-manual-equivalence")
+    automatic_root = Path.join(root, "automatic/client")
+    manual_root = Path.join(root, "manual/client")
+    fixture_client = Path.join(root, "registry-fixture/rekindle-client")
+    cargo_home = Path.join(root, "cargo-home")
+    copy_client_fixture!(fixture_client)
+    prepare_cargo_home!(cargo_home, fixture_client)
+    materialize_client!(automatic, automatic_root)
+    materialize_client!(manual, manual_root)
+
+    assert {"rekindle.client.lock", ["client"]} in automatic.tasks
+
+    with_env("CARGO_HOME", cargo_home, fn ->
+      with_env("CARGO_NET_OFFLINE", "true", fn ->
+        Mix.Tasks.Rekindle.Client.Lock.run([automatic_root])
+        Mix.Tasks.Rekindle.Client.Lock.run([manual_root])
+      end)
+    end)
+
+    automatic_lock = File.read!(Path.join(automatic_root, "Cargo.lock"))
+    manual_lock = File.read!(Path.join(manual_root, "Cargo.lock"))
+    assert automatic_lock == manual_lock
+    assert automatic_lock =~ ~s(name = "rekindle-client")
   end
 
   test "client path admission is project-relative and precedes every proposal mutation" do
