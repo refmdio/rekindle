@@ -1,6 +1,7 @@
 defmodule Rekindle.ToolchainHelperIntegrationTest do
   use ExUnit.Case, async: false
 
+  alias Rekindle.CanonicalValue
   alias Rekindle.Toolchain.{Exec, Frame, Handshake, Helper, Installer, Release, Web}
 
   @request "0123456789abcdef0123456789abcdef"
@@ -301,6 +302,109 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     end
   end
 
+  test "web-v1 classifies real package import, collision, and I/O failures", %{helper: helper} do
+    root = temp_root("web-package-errors")
+    bindgen = Path.join(root, "bindgen")
+    public_html = Path.join(root, "public-html")
+    public_collision = Path.join(root, "public-collision")
+    Enum.each([bindgen, public_html, public_collision], &File.mkdir_p!/1)
+    File.write!(Path.join(bindgen, "app.js"), "export default async function() {}\n")
+    File.write!(Path.join(bindgen, "app_bg.wasm"), wasm_module())
+    File.write!(Path.join(public_html, "index.html"), "<!doctype html>")
+    File.write!(Path.join(public_collision, "app.js"), "collision")
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:ok, bindgen_root} = Web.root(bindgen, :read, id: id(40))
+
+    bindgen_files =
+      Enum.map(["app.js", "app_bg.wasm"], fn path ->
+        {:ok, descriptor} = Web.file(bindgen_root, path)
+        descriptor
+      end)
+
+    assert {:ok, html_root} = Web.root(public_html, :read, id: id(41))
+    assert {:ok, html} = Web.file(html_root, "index.html")
+    assert {:ok, collision_root} = Web.root(public_collision, :read, id: id(42))
+    assert {:ok, collision} = Web.file(collision_root, "app.js")
+
+    cases = [
+      {:unsupported_import, html_root, [html], "unsupported_import"},
+      {:asset_collision, collision_root, [collision], "asset_collision"},
+      {:io_failed, nil, [], "io_failed"}
+    ]
+
+    for {{name, public_root, public_files, expected_code}, number} <-
+          Enum.with_index(cases, 43) do
+      output = Path.join(root, Atom.to_string(name))
+      File.mkdir_p!(output)
+      assert {:ok, output_root} = Web.prepare_output_root(output, id: id(number))
+
+      assert {:ok, request, state} =
+               package_operation(
+                 bindgen_root,
+                 bindgen_files,
+                 public_root,
+                 public_files,
+                 output_root
+               )
+
+      if name == :io_failed, do: File.chmod!(output, 0o500)
+
+      assert {:ok, %{"type" => "operation_error", "code" => ^expected_code}, []} =
+               Helper.run_web(helper, request, state)
+
+      if name == :io_failed, do: File.chmod!(output, 0o700)
+    end
+  end
+
+  test "the BEAM client rejects forged success and post-terminal helper frames", %{
+    helper: _helper
+  } do
+    root = temp_root("web-forged-helper")
+    input = Path.join(root, "input")
+    output = Path.join(root, "output")
+    Enum.each([input, output], &File.mkdir_p!/1)
+    File.write!(Path.join(input, "app.wasm"), wasm_module())
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:ok, input_root} = Web.root(input, :read, id: id(50))
+    assert {:ok, wasm} = Web.file(input_root, "app.wasm")
+    assert {:ok, output_root} = Web.prepare_output_root(output, id: id(51))
+    assert {:ok, request, state} = bindgen_operation(input_root, wasm, output_root, limits())
+
+    File.write!(Path.join(output, "app.js"), "export default async function() {}\n")
+    File.write!(Path.join(output, "app_bg.wasm"), wasm_module())
+
+    files =
+      Enum.map(["app.js", "app_bg.wasm"], fn path ->
+        {:ok, descriptor} = Web.file(output_root, path)
+        descriptor
+      end)
+
+    terminal = bindgen_terminal(files)
+    forged = put_in(terminal, ["files", Access.at(0), "sha256"], String.duplicate("0", 64))
+    forged_helper = fake_web_helper(root, "forged", forged)
+    assert {:error, :helper_protocol} = Helper.run_web(forged_helper, request, state)
+
+    extra_helper = fake_web_helper(root, "extra", terminal, extra: true)
+    assert {:error, :post_terminal_frame} = Helper.run_web(extra_helper, request, state)
+
+    internal = %{
+      "v" => 1,
+      "type" => "operation_error",
+      "payload_len" => 0,
+      "op" => "bindgen_web",
+      "code" => "internal",
+      "message" => "controlled internal failure",
+      "diagnostics" => []
+    }
+
+    internal_helper = fake_web_helper(root, "internal", internal)
+
+    assert {:ok, %{"type" => "operation_error", "code" => "internal"}, []} =
+             Helper.run_web(internal_helper, request, state)
+  end
+
   test "web-v1 performs bindgen, package, verify, and detects post-package tampering", %{
     helper: helper
   } do
@@ -444,6 +548,89 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       },
       request_id: @request
     )
+  end
+
+  defp package_operation(bindgen_root, bindgen_files, public_root, public_files, output_root) do
+    Web.operation(
+      "package_web",
+      %{
+        bindgen_root: bindgen_root,
+        bindgen_files: bindgen_files,
+        public_root: public_root,
+        public_files: public_files,
+        bootstrap_template: Web.bootstrap_template(),
+        output_root: output_root,
+        manifest_base: manifest_base(),
+        limits: limits()
+      },
+      request_id: @request
+    )
+  end
+
+  defp bindgen_terminal(files) do
+    %{
+      "v" => 1,
+      "type" => "operation_ok",
+      "payload_len" => 0,
+      "op" => "bindgen_web",
+      "files" => files,
+      "javascript_entry" => "app.js",
+      "wasm" => "app_bg.wasm"
+    }
+  end
+
+  defp fake_web_helper(root, label, terminal, options \\ []) do
+    python = System.find_executable("python3") || raise "python3 is required for helper fixtures"
+    path = Path.join(root, "fake-helper-#{label}")
+    terminal = CanonicalValue.encode!(terminal)
+    extra = if Keyword.get(options, :extra, false), do: "write_frame(terminal)", else: ""
+
+    File.write!(
+      path,
+      """
+      ##!#{python}
+      import json
+      import struct
+      import sys
+
+      def read_frame():
+          length_bytes = sys.stdin.buffer.read(4)
+          if len(length_bytes) != 4:
+              raise SystemExit(2)
+          length = struct.unpack(">I", length_bytes)[0]
+          header = json.loads(sys.stdin.buffer.read(length))
+          payload_length = header.get("payload_len", 0)
+          if payload_length:
+              sys.stdin.buffer.read(payload_length)
+          return header
+
+      def write_frame(header):
+          body = json.dumps(header, sort_keys=True, separators=(",", ":")).encode()
+          sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
+          sys.stdout.buffer.flush()
+
+      hello = read_frame()
+      write_frame({
+          "v": 1,
+          "type": "hello_ok",
+          "request_id": hello["request_id"],
+          "payload_len": 0,
+          "session_nonce": hello["session_nonce"],
+          "mode": hello["mode"],
+          "actual": hello["expected"],
+          "host": hello["host"]
+      })
+      operation = read_frame()
+      terminal = json.loads(#{inspect(terminal)})
+      terminal["request_id"] = operation["request_id"]
+      write_frame(terminal)
+      #{extra}
+      """
+      |> String.replace_leading("##!", "#!")
+    )
+
+    File.chmod!(path, 0o700)
+    path
   end
 
   defp wasm_module, do: <<0, 97, 115, 109, 1, 0, 0, 0>>
