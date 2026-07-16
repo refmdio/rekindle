@@ -439,6 +439,26 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     assert {:error, :helper_protocol} =
              Helper.run_web(wrong_device_helper, wrong_device_request, state)
 
+    replacement_output = Path.join(root, "replacement-output")
+    moved_output = Path.join(root, "admitted-output")
+    File.mkdir!(replacement_output)
+
+    Enum.each([Web.marker(), "app.js", "app_bg.wasm"], fn path ->
+      File.cp!(Path.join(output, path), Path.join(replacement_output, path))
+    end)
+
+    File.chmod!(Path.join(replacement_output, Web.marker()), 0o600)
+    replacement_helper = fake_web_helper(root, "replacement-output", terminal)
+    File.rename!(output, moved_output)
+    File.rename!(replacement_output, output)
+
+    try do
+      assert {:error, :helper_protocol} = Helper.run_web(replacement_helper, request, state)
+    after
+      File.rm_rf!(output)
+      File.rename!(moved_output, output)
+    end
+
     extra_helper = fake_web_helper(root, "extra", terminal, extra: true)
     assert {:error, :post_terminal_frame} = Helper.run_web(extra_helper, request, state)
 

@@ -15,6 +15,7 @@ defmodule Rekindle.Toolchain.Web do
   @application_id_pattern ~r/\A[a-z][a-z0-9_-]{0,127}\z/
   @backend_id_pattern ~r/\A[a-z][a-z0-9_.-]{0,127}\z/
   @gpui_revision_pattern ~r/\A[0-9a-f]{40,64}\z/
+  @authority_registry Rekindle.RuntimeRegistry
   @bootstrap_template """
   export async function start(context) {
     if (!context || context.v !== 1) throw new Error("invalid Rekindle context");
@@ -48,14 +49,15 @@ defmodule Rekindle.Toolchain.Web do
     with :ok <- request_id(id),
          {:ok, stat} <- no_follow_stat(path),
          true <- stat.type == :directory,
-         :ok <- validate_empty(path, mode, id, stat) do
-      {:ok,
-       %{
-         "id" => id,
-         "path" => path,
-         "mode" => Atom.to_string(mode),
-         "device" => stat.major_device * 4_294_967_296 + stat.minor_device
-       }}
+         :ok <- validate_empty(path, mode, id, stat),
+         root = %{
+           "id" => id,
+           "path" => path,
+           "mode" => Atom.to_string(mode),
+           "device" => stat.major_device * 4_294_967_296 + stat.minor_device
+         },
+         :ok <- register_root_authority(root, stat) do
+      {:ok, root}
     else
       _ -> {:error, :invalid_root}
     end
@@ -1481,9 +1483,11 @@ defmodule Rekindle.Toolchain.Web do
 
   defp revalidate_root(root) do
     with :ok <- validate_root(root),
+         {:ok, admitted_identity} <- root_authority(root),
          {:ok, stat} <- no_follow_stat(root["path"]),
          true <- stat.type == :directory,
-         true <- root["device"] == device_identity(stat) do
+         true <- root["device"] == device_identity(stat),
+         true <- root_identity(stat) == admitted_identity do
       {:ok, stat}
     else
       _ -> {:error, :invalid_root}
@@ -1547,6 +1551,41 @@ defmodule Rekindle.Toolchain.Web do
   defp same_file_identity?(left, right) do
     fields = [:inode, :uid, :gid, :major_device, :minor_device, :size, :type, :mode]
     Map.take(left, fields) == Map.take(right, fields)
+  end
+
+  defp register_root_authority(root, stat) do
+    key = root_authority_key(root)
+    identity = root_identity(stat)
+
+    case Registry.register(@authority_registry, key, identity) do
+      {:ok, _owner} ->
+        :ok
+
+      {:error, {:already_registered, owner}} ->
+        case Registry.lookup(@authority_registry, key) do
+          [{^owner, ^identity}] -> :ok
+          _ -> {:error, :root_identity_changed}
+        end
+    end
+  catch
+    :exit, _reason -> {:error, :root_authority_unavailable}
+  end
+
+  defp root_authority(root) do
+    case Registry.lookup(@authority_registry, root_authority_key(root)) do
+      [{_owner, identity}] -> {:ok, identity}
+      _ -> {:error, :unknown_root_authority}
+    end
+  catch
+    :exit, _reason -> {:error, :root_authority_unavailable}
+  end
+
+  defp root_authority_key(root) do
+    {__MODULE__, :root, root["id"], root["path"], root["mode"], root["device"]}
+  end
+
+  defp root_identity(stat) do
+    Map.take(stat, [:inode, :uid, :gid, :major_device, :minor_device, :type, :mode])
   end
 
   defp valid_diagnostic?(value) do

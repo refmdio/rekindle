@@ -312,6 +312,20 @@ defmodule Rekindle.Toolchain.WebTest do
     assert {:error, :invalid_file} =
              Web.file(%{input_root | "device" => input_root["device"] + 1}, "app.wasm")
 
+    replacement_input = Path.join(base, "replacement-input")
+    moved_input = Path.join(base, "admitted-input")
+    File.mkdir!(replacement_input)
+    File.write!(Path.join(replacement_input, "app.wasm"), "wasm")
+    File.rename!(roots.input, moved_input)
+    File.rename!(replacement_input, roots.input)
+
+    try do
+      assert {:error, :invalid_file} = Web.file(input_root, "app.wasm")
+    after
+      File.rm_rf!(roots.input)
+      File.rename!(moved_input, roots.input)
+    end
+
     nested = Path.join(roots.input, "nested")
     moved_nested = Path.join(roots.input, "nested-real")
     File.mkdir!(nested)
@@ -358,6 +372,22 @@ defmodule Rekindle.Toolchain.WebTest do
                %{output_root | "device" => output_root["device"] + 1},
                [descriptor]
              )
+
+    replacement_output = Path.join(base, "replacement-output")
+    moved_output = Path.join(base, "admitted-output")
+    File.mkdir!(replacement_output)
+    File.cp!(Path.join(roots.output, Web.marker()), Path.join(replacement_output, Web.marker()))
+    File.chmod!(Path.join(replacement_output, Web.marker()), 0o600)
+    File.write!(Path.join(replacement_output, "app.js"), "app")
+    File.rename!(roots.output, moved_output)
+    File.rename!(replacement_output, roots.output)
+
+    try do
+      assert {:error, :output_changed} = Web.revalidate_files(output_root, [descriptor])
+    after
+      File.rm_rf!(roots.output)
+      File.rename!(moved_output, roots.output)
+    end
   end
 
   test "requires an exact no-follow attempt marker bound to the output root id", roots do
