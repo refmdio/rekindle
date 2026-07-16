@@ -8,18 +8,15 @@ defmodule Mix.Tasks.Rekindle.Setup do
 
   @impl Mix.Task
   def run(argv) do
-    outcome = run_outcome(argv)
-    status = Rekindle.Command.emit(outcome)
-    if status != 0, do: Mix.raise("rekindle.setup failed with exit #{status}")
-    :ok
+    argv
+    |> run_outcome()
+    |> Rekindle.Command.emit_and_exit()
   end
 
   @doc false
   def run_outcome(argv, overrides \\ []) do
-    otp_app = Mix.Project.config()[:app]
-
     adapters = [
-      load_project: fn -> Config.load(otp_app) |> map_config_error() end,
+      load_project: fn -> Config.load(Mix.Project.config()[:app]) |> map_config_error() end,
       ensure_target: &ensure_target/2,
       ensure_helper: &ensure_helper/1
     ]

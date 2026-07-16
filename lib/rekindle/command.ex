@@ -31,6 +31,14 @@ defmodule Rekindle.Command do
     outcome.exit_status
   end
 
+  @spec emit_and_exit(Outcome.t(), module()) :: :ok | no_return()
+  def emit_and_exit(%Outcome{} = outcome, shell \\ Mix.shell()) do
+    case emit(outcome, shell) do
+      0 -> :ok
+      status when status in 1..3 -> exit({:shutdown, status})
+    end
+  end
+
   defp parse(argv, grammar) do
     switches = Keyword.fetch!(grammar, :switches)
     aliases = Keyword.get(grammar, :aliases, [])
@@ -67,6 +75,9 @@ defmodule Rekindle.Command do
       {:error, %Failure{} = failure, progress} ->
         expected_failure(command, invocation, failure, progress)
 
+      {:error, :invocation, %Failure{} = failure} ->
+        invalid_invocation(command, invocation, failure)
+
       _ ->
         internal_failure(command, invocation, "handler returned an invalid terminal value")
     end
@@ -102,26 +113,24 @@ defmodule Rekindle.Command do
   end
 
   defp expected_failure(command, %{json?: true}, failure, _progress) do
-    failure = sanitize_failure(failure)
-    envelope = envelope(command, "error", nil, Failure.to_map(failure))
-
-    %Outcome{
-      exit_status: 1,
-      stdout: CanonicalValue.encode!(envelope) <> "\n",
-      stderr: "",
-      value: {:error, failure}
-    }
+    case Failure.sanitize(failure) do
+      {:ok, failure} -> failure_outcome(command, true, failure, [], 1)
+      {:error, _} -> internal_failure(command, %{json?: true}, "unsafe failure payload")
+    end
   end
 
   defp expected_failure(_command, %{json?: false}, failure, progress) do
-    failure = sanitize_failure(failure)
+    case Failure.sanitize(failure) do
+      {:ok, failure} -> failure_outcome(nil, false, failure, progress, 1)
+      {:error, _} -> internal_failure(nil, %{json?: false}, "unsafe failure payload")
+    end
+  end
 
-    %Outcome{
-      exit_status: 1,
-      stdout: lines(progress),
-      stderr: Failure.render(failure) <> "\n",
-      value: {:error, failure}
-    }
+  defp invalid_invocation(command, invocation, failure) do
+    case Failure.sanitize(failure) do
+      {:ok, failure} -> failure_outcome(command, invocation.json?, failure, [], 2)
+      {:error, _} -> internal_failure(command, invocation, "unsafe invocation failure payload")
+    end
   end
 
   defp invocation_failure(command, argv, message) do
@@ -130,23 +139,27 @@ defmodule Rekindle.Command do
     failure =
       Failure.new!(target: nil, stage: :configuration, code: :config_invalid, message: message)
 
-    if json? do
-      envelope = envelope(command, "error", nil, Failure.to_map(failure))
+    failure_outcome(command, json?, failure, [], 2)
+  end
 
-      %Outcome{
-        exit_status: 2,
-        stdout: CanonicalValue.encode!(envelope) <> "\n",
-        stderr: "",
-        value: {:error, failure}
-      }
-    else
-      %Outcome{
-        exit_status: 2,
-        stdout: "",
-        stderr: Failure.render(failure) <> "\n",
-        value: {:error, failure}
-      }
-    end
+  defp failure_outcome(command, true, failure, _progress, exit_status) do
+    envelope = envelope(command, "error", nil, Failure.to_map(failure))
+
+    %Outcome{
+      exit_status: exit_status,
+      stdout: CanonicalValue.encode!(envelope) <> "\n",
+      stderr: "",
+      value: {:error, failure}
+    }
+  end
+
+  defp failure_outcome(_command, false, failure, progress, exit_status) do
+    %Outcome{
+      exit_status: exit_status,
+      stdout: lines(progress),
+      stderr: Failure.render(failure) <> "\n",
+      value: {:error, failure}
+    }
   end
 
   defp internal_failure(command, invocation, message) do
@@ -209,19 +222,4 @@ defmodule Rekindle.Command do
 
   defp format_invalid(values),
     do: Enum.map_join(values, ", ", fn {name, value} -> "#{name}=#{inspect(value)}" end)
-
-  defp sanitize_failure(failure) do
-    case Failure.sanitize(failure) do
-      {:ok, sanitized} ->
-        sanitized
-
-      {:error, _} ->
-        Failure.new!(
-          target: nil,
-          stage: :internal,
-          code: :contract_violation,
-          message: "unsafe failure payload"
-        )
-    end
-  end
 end

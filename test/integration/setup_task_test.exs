@@ -58,6 +58,40 @@ defmodule Rekindle.SetupTaskIntegrationTest do
                "target add --toolchain 1.95.0 wasm32-unknown-unknown\n"
   end
 
+  test "the public Mix task preserves success status", context do
+    assert :ok = Mix.Tasks.Rekindle.Setup.run(["--target", "web"])
+
+    assert File.read!(context.rustup_log) ==
+             "toolchain install 1.95.0 --profile minimal\n" <>
+               "target add --toolchain 1.95.0 wasm32-unknown-unknown\n"
+  end
+
+  test "the public Mix task preserves semantic nonzero statuses through subprocess exit" do
+    mix = System.find_executable("mix") || raise "mix executable is required"
+
+    {invalid_output, invalid_status} =
+      System.cmd(mix, ["rekindle.setup", "--target", "mobile"],
+        env: [{"MIX_ENV", "test"}],
+        stderr_to_stdout: true
+      )
+
+    assert invalid_status == 2
+    assert invalid_output =~ "config_invalid"
+    refute invalid_output =~ "** (Mix)"
+
+    {expected_output, expected_status} =
+      System.cmd(mix, ["rekindle.setup"],
+        env: [{"MIX_ENV", "test"}],
+        stderr_to_stdout: true
+      )
+
+    assert expected_status == 1
+    assert expected_output =~ "config_missing"
+    refute expected_output =~ "** (Mix)"
+
+    assert_semantic_exit_boundary()
+  end
+
   defp build_config do
     [
       schema: 1,
@@ -107,6 +141,36 @@ defmodule Rekindle.SetupTaskIntegrationTest do
 
     File.chmod!(path, 0o700)
     path
+  end
+
+  defp assert_semantic_exit_boundary do
+    elixir = System.find_executable("elixir") || raise "elixir executable is required"
+    ebin = Path.expand("_build/test/lib/rekindle/ebin")
+
+    for status <- 0..3 do
+      {stdout, stderr, value} =
+        if status == 0,
+          do: {"status-0\n", "", "{:ok, nil}"},
+          else: {"", "status-#{status}\n", "{:error, nil}"}
+
+      expression = """
+      Mix.start()
+      outcome = %Rekindle.Command.Outcome{
+        exit_status: #{status},
+        stdout: #{inspect(stdout)},
+        stderr: #{inspect(stderr)},
+        value: #{value}
+      }
+      Rekindle.Command.emit_and_exit(outcome)
+      """
+
+      {output, actual_status} =
+        System.cmd(elixir, ["-pa", ebin, "-e", expression], stderr_to_stdout: true)
+
+      assert actual_status == status
+      assert output == "status-#{status}\n"
+      refute output =~ "** (Mix)"
+    end
   end
 
   defp temp_dir! do

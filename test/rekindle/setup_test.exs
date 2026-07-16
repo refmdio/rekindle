@@ -70,7 +70,7 @@ defmodule Rekindle.SetupTest do
 
     for argv <- [["web"], ["--unknown"], ["--target", "mobile"]] do
       outcome = Setup.run(argv, adapters)
-      assert outcome.exit_status in [1, 2]
+      assert outcome.exit_status == 2
       refute_received :loaded
     end
   end

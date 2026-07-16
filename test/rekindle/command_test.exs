@@ -91,6 +91,46 @@ defmodule Rekindle.CommandTest do
     refute raised.stdout =~ "command_test.exs"
   end
 
+  test "classifies handler-declared invocation failures as exit 2" do
+    invocation_failure =
+      Failure.new!(
+        target: nil,
+        stage: :configuration,
+        code: :config_invalid,
+        message: "invalid target"
+      )
+
+    human =
+      Command.run("rekindle.example", ["web"], @grammar, fn _ ->
+        {:error, :invocation, invocation_failure}
+      end)
+
+    assert human.exit_status == 2
+    assert human.stdout == ""
+    assert human.stderr == "config_invalid: invalid target\n"
+
+    json =
+      Command.run("rekindle.example", ["web", "--json"], @grammar, fn _ ->
+        {:error, :invocation, invocation_failure}
+      end)
+
+    assert json.exit_status == 2
+    assert json.stderr == ""
+    assert Jason.decode!(json.stdout)["failure"]["code"] == "config_invalid"
+  end
+
+  test "classifies structurally unsafe Failure values as exit 3" do
+    unsafe = %{failure() | message: <<255>>}
+
+    for argv <- [["web"], ["web", "--json"]] do
+      outcome = Command.run("rekindle.example", argv, @grammar, fn _ -> {:error, unsafe} end)
+      assert outcome.exit_status == 3
+      rendered = outcome.stdout <> outcome.stderr
+      assert rendered =~ "contract_violation"
+      refute rendered =~ <<255>>
+    end
+  end
+
   defp failure do
     Failure.new!(target: :web, stage: :execution, code: :cargo_failed, message: "Cargo failed")
   end
