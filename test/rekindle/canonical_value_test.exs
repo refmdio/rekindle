@@ -39,6 +39,27 @@ defmodule Rekindle.CanonicalValueTest do
              CanonicalValue.validate(%{"outer" => [1.5]})
   end
 
+  test "rejects improper and oversized lists before item traversal" do
+    for {value, path} <- [
+          {[1 | :improper_tail], []},
+          {%{"nested" => [1 | :improper_tail]}, ["nested"]},
+          {List.duplicate(nil, 129), []},
+          {%{"nested" => List.duplicate(nil, 129)}, ["nested"]}
+        ] do
+      assert {:error,
+              %{
+                code: :unsupported_value,
+                path: ^path,
+                message: "list must be bounded and proper"
+              }} = CanonicalValue.validate(value)
+
+      refute CanonicalValue.valid?(value)
+
+      assert {:error, %{code: :unsupported_value, path: ^path}} =
+               CanonicalValue.encode(value)
+    end
+  end
+
   test "encodes maps in RFC 8785 UTF-16 property order" do
     value = %{"€" => 5, "\r" => 1, "😀" => 6, "1" => 2, "ö" => 4, "\u0080" => 3}
 

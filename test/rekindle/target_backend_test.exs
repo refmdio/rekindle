@@ -102,6 +102,16 @@ defmodule Rekindle.TargetBackendTest do
       do: Rekindle.ConfigError.new(path, :config_invalid, "invalid backend configuration")
   end
 
+  defmodule CanonicalOutputShapeBackend do
+    def backend_id, do: "invalid.canonical-output-shape"
+    def backend_version, do: "1"
+    def validate(_target, %{"case" => "improper"}), do: {:ok, [1 | :improper_tail]}
+    def validate(_target, %{"case" => "nested"}), do: {:ok, %{"nested" => [1 | :bad]}}
+    def validate(_target, %{"case" => "oversized"}), do: {:ok, List.duplicate(nil, 129)}
+    def plan(_context, _options), do: :ok
+    def finalize(_context, _options, _result), do: :ok
+  end
+
   test "admits an existing conforming module and normalized options" do
     assert {:ok, admission} = TargetBackend.admit(ValidBackend, :web, %{"answer" => 42})
     assert admission.module == ValidBackend
@@ -153,6 +163,39 @@ defmodule Rekindle.TargetBackendTest do
                   message: "validate/2 returned invalid errors"
                 }
               ]} = TargetBackend.admit(ErrorShapeBackend, :web, %{"case" => shape})
+    end
+  end
+
+  test "rejects improper and oversized canonical input and callback output lists" do
+    for {value, path} <- [
+          {[1 | :improper_tail], [:backend, :options]},
+          {%{"nested" => [1 | :improper_tail]}, [:backend, :options, "nested"]},
+          {List.duplicate(nil, 129), [:backend, :options]}
+        ] do
+      assert {:error,
+              [
+                %ConfigError{
+                  path: ^path,
+                  code: :unsupported_value,
+                  message: "list must be bounded and proper"
+                }
+              ]} = TargetBackend.admit(ValidBackend, :web, value)
+    end
+
+    for {shape, path} <- [
+          {"improper", [:backend, :normalized_options]},
+          {"nested", [:backend, :normalized_options, "nested"]},
+          {"oversized", [:backend, :normalized_options]}
+        ] do
+      assert {:error,
+              [
+                %ConfigError{
+                  path: ^path,
+                  code: :unsupported_value,
+                  message: "list must be bounded and proper"
+                }
+              ]} =
+               TargetBackend.admit(CanonicalOutputShapeBackend, :web, %{"case" => shape})
     end
   end
 
