@@ -17,18 +17,229 @@ const MARKER: &str = ".rekindle-attempt";
 const MANIFEST: &str = "rekindle-web-manifest-v1.json";
 const MAX_PATH_BYTES: usize = 4_096;
 const MAX_MANIFEST_STRING_BYTES: usize = 4_096;
-const BOOTSTRAP_TEMPLATE: &str = r#"export async function start(context) {
-  if (!context || context.v !== 1) throw new Error("invalid Rekindle context");
-  const styles = __REKINDLE_HOT_STYLES__;
-  await Promise.all(styles.map((href) => new Promise((resolve, reject) => {
-    const link = Object.assign(document.createElement("link"), { rel: "stylesheet", href });
-    link.onload = resolve;
-    link.onerror = reject;
-    document.head.appendChild(link);
-  })));
-  const module = await import(__REKINDLE_ENTRY__);
-  const wasm = new URL(__REKINDLE_WASM__, import.meta.url);
-  await module.default(wasm);
+const BOOTSTRAP_TEMPLATE: &str = r#"const BRIDGE_KEY = "__REKINDLE_RUNTIME_V1__";
+const STARTUP_TIMEOUT_MS = 15000;
+const MAX_TEXT_BYTES = 8192;
+const MAX_HANDOFF_BYTES = 16777216;
+const APPLICATION_ID = /^[a-z][a-z0-9_-]{0,127}$/;
+const GENERATION_ID = /^[0-9a-f]{32}$/;
+const ARTIFACT_ID = /^[0-9a-f]{64}$/;
+const FAILURE_CODES = new Set([
+  "platform_init", "window_open", "application", "handoff_retry_clean",
+]);
+
+function exactObject(value, keys) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function uint(value, maximum = Number.MAX_SAFE_INTEGER) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+}
+
+function bridgeError(code, message) {
+  const error = new Error(message);
+  error.name = "RekindleBridgeError";
+  error.code = code;
+  return error;
+}
+
+function validateContext(context) {
+  if (!exactObject(context, ["v", "generation_id", "artifact_id", "handoff"]) ||
+      context.v !== 1 ||
+      !(context.generation_id === null || GENERATION_ID.test(context.generation_id)) ||
+      !ARTIFACT_ID.test(context.artifact_id) ||
+      !(context.handoff === null ||
+        (exactObject(context.handoff, ["take", "register"]) &&
+         typeof context.handoff.take === "function" &&
+         typeof context.handoff.register === "function"))) {
+    throw bridgeError("incompatible", "invalid Rekindle startup context");
+  }
+}
+
+function validatePage() {
+  if (typeof window === "undefined" || window.top !== window ||
+      typeof document === "undefined" || !document.body || !document.head ||
+      typeof document.querySelectorAll !== "function") {
+    throw bridgeError("incompatible", "Rekindle requires a top-level document body");
+  }
+  const markers = document.querySelectorAll('[data-rekindle-page="v1"]');
+  if (markers.length !== 1 || markers[0].tagName !== "SCRIPT" ||
+      markers[0].getAttribute("type") !== "module") {
+    throw bridgeError("incompatible", "Rekindle requires exactly one page marker");
+  }
+}
+
+function createBridge(context) {
+  let state = "installed";
+  let handoffTaken = false;
+  let handoffRegistered = false;
+  let resolveReadiness;
+  let rejectReadiness;
+  const readiness = new Promise((resolve, reject) => {
+    resolveReadiness = resolve;
+    rejectReadiness = reject;
+  });
+  readiness.catch(() => {});
+
+  function requireInitializing() {
+    if (state !== "initializing") {
+      throw bridgeError("invalid_state", "Rekindle bridge call is out of order");
+    }
+  }
+
+  async function take_handoff(request) {
+    requireInitializing();
+    if (handoffTaken || !exactObject(request,
+      ["v", "application_id", "schema_version", "destination_artifact_id"]) ||
+        request.v !== 1 || !APPLICATION_ID.test(request.application_id) ||
+        !uint(request.schema_version, 0xffffffff) ||
+        request.destination_artifact_id !== context.artifact_id) {
+      throw bridgeError("invalid_state", "invalid Rekindle handoff request");
+    }
+    handoffTaken = true;
+    if (context.handoff === null) return null;
+    let payload;
+    try {
+      payload = await context.handoff.take(request);
+    } catch (_error) {
+      throw bridgeError("application", "Rekindle handoff restore failed");
+    }
+    if (payload !== null && !(payload instanceof Uint8Array)) {
+      throw bridgeError("invalid_payload", "Rekindle handoff payload is invalid");
+    }
+    return payload;
+  }
+
+  function register_handoff(request) {
+    requireInitializing();
+    if (handoffRegistered || !exactObject(request,
+      ["v", "application_id", "schema_version", "max_bytes", "snapshot"]) ||
+        request.v !== 1 || !APPLICATION_ID.test(request.application_id) ||
+        !uint(request.schema_version, 0xffffffff) ||
+        !uint(request.max_bytes, MAX_HANDOFF_BYTES) ||
+        typeof request.snapshot !== "function") {
+      throw bridgeError("invalid_state", "invalid Rekindle handoff registration");
+    }
+    handoffRegistered = true;
+    if (context.handoff === null) return Object.freeze({v: 1, status: "disabled"});
+    let result;
+    try {
+      result = context.handoff.register(request);
+    } catch (_error) {
+      throw bridgeError("application", "Rekindle handoff registration failed");
+    }
+    if (!exactObject(result, ["v", "status"]) || result.v !== 1 ||
+        !["registered", "disabled"].includes(result.status)) {
+      throw bridgeError("incompatible", "invalid Rekindle handoff registration result");
+    }
+    return Object.freeze({v: 1, status: result.status});
+  }
+
+  function ready(message) {
+    requireInitializing();
+    if (!exactObject(message, ["v", "window_count"]) || message.v !== 1 ||
+        !uint(message.window_count)) {
+      throw bridgeError("invalid_payload", "invalid Rekindle readiness payload");
+    }
+    state = "ready";
+    resolveReadiness(Object.freeze({
+      v: 1,
+      generation_id: context.generation_id,
+      window_count: message.window_count,
+    }));
+  }
+
+  function fail(message) {
+    requireInitializing();
+    if (!exactObject(message, ["v", "code", "message"]) || message.v !== 1 ||
+        !FAILURE_CODES.has(message.code) || typeof message.message !== "string" ||
+        message.message.length === 0 || new TextEncoder().encode(message.message).length > MAX_TEXT_BYTES) {
+      throw bridgeError("invalid_payload", "invalid Rekindle failure payload");
+    }
+    state = "failed";
+    rejectReadiness(bridgeError(message.code, message.message));
+  }
+
+  const bridge = Object.freeze({
+    v: 1,
+    generation_id: context.generation_id,
+    artifact_id: context.artifact_id,
+    take_handoff,
+    register_handoff,
+    ready,
+    fail,
+  });
+
+  return {
+    bridge,
+    readiness,
+    initialize() { state = "initializing"; },
+    abort(error) {
+      if (state !== "removed") {
+        state = "failed";
+        rejectReadiness(error);
+      }
+    },
+    remove() {
+      if (globalThis[BRIDGE_KEY] === bridge) delete globalThis[BRIDGE_KEY];
+      state = "removed";
+    },
+  };
+}
+
+function withStartupDeadline(promise) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(bridgeError("deadline", "Rekindle startup timed out")),
+      STARTUP_TIMEOUT_MS);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+export async function start(context) {
+  validateContext(context);
+  validatePage();
+  if (Object.prototype.hasOwnProperty.call(globalThis, BRIDGE_KEY)) {
+    throw bridgeError("invalid_state", "a Rekindle generation bridge is already installed");
+  }
+
+  const runtime = createBridge(context);
+  const links = [];
+  globalThis[BRIDGE_KEY] = runtime.bridge;
+  runtime.initialize();
+
+  const operation = (async () => {
+    const styles = __REKINDLE_HOT_STYLES__;
+    await Promise.all(styles.map((href) => new Promise((resolve, reject) => {
+      const link = Object.assign(document.createElement("link"), {rel: "stylesheet", href});
+      link.onload = resolve;
+      link.onerror = () => reject(bridgeError("application", "Rekindle stylesheet failed"));
+      links.push(link);
+      document.head.appendChild(link);
+    })));
+    const module = await import(__REKINDLE_ENTRY__);
+    if (typeof module.default !== "function") {
+      throw bridgeError("incompatible", "wasm-bindgen initializer is missing");
+    }
+    const wasm = new URL(__REKINDLE_WASM__, import.meta.url);
+    await module.default(wasm);
+    return await runtime.readiness;
+  })();
+
+  try {
+    return await withStartupDeadline(operation);
+  } catch (error) {
+    const failure = error instanceof Error ? error : bridgeError("application", "Rekindle startup failed");
+    runtime.abort(failure);
+    runtime.remove();
+    for (const link of links) if (typeof link.remove === "function") link.remove();
+    throw failure;
+  }
 }
 "#;
 
