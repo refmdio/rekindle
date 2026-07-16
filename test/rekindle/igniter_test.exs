@@ -28,6 +28,35 @@ defmodule Rekindle.IgniterTest do
     for value <- invalid do
       assert {:error, _message} = RekindleIgniter.transform_assets_deploy(value)
     end
+
+    for value <- [
+          ["phx.digest", "rekindle.phoenix.deploy --force"],
+          ["cmd rekindle.phoenix.deploy", "phx.digest"]
+        ] do
+      assert {:error, message} = RekindleIgniter.transform_assets_deploy(value)
+      assert message =~ "foreign or malformed"
+    end
+  end
+
+  test "development build alias recognizes only one exact terminal owned step" do
+    assert {:ok, ["cmd host.build", "rekindle.build web"]} =
+             RekindleIgniter.transform_assets_build(["cmd host.build"])
+
+    assert {:ok, ["cmd host.build", "rekindle.build web"]} =
+             RekindleIgniter.transform_assets_build(["cmd host.build", "rekindle.build web"])
+
+    for value <- [
+          ["rekindle.build web", "cmd after"],
+          ["rekindle.build web", "rekindle.build web"],
+          ["rekindle.build desktop"],
+          ["cmd rekindle.build web"],
+          {:dynamic, :alias}
+        ] do
+      assert {:error, _message} = RekindleIgniter.transform_assets_build(value)
+    end
+
+    assert {:ok, ["cmd my_rekindle.build", "rekindle.build web"]} =
+             RekindleIgniter.transform_assets_build(["cmd my_rekindle.build"])
   end
 
   test "fresh install is semantically idempotent and preserves unrelated host content" do
@@ -361,6 +390,58 @@ defmodule Rekindle.IgniterTest do
     assert Enum.any?(dynamic.issues, &String.contains?(to_string(&1), "literal top-level"))
   end
 
+  test "classifies exact owned child and alias forms without substring matches" do
+    unrelated =
+      project(
+        children: "[SampleApp.HostChild, SampleApp.MyRekindleWorker]",
+        assets_build: ~s(["cmd my_rekindle.build"])
+      )
+      |> RekindleIgniter.install(targets: [:web], endpoint: SampleAppWeb.Endpoint)
+
+    assert unrelated.issues == []
+    assert source(unrelated, "mix.exs") =~ ~s("cmd my_rekindle.build", "rekindle.build web")
+
+    malformed_child =
+      project(children: "[SampleApp.HostChild, {Rekindle, otp_app: :other}]")
+      |> RekindleIgniter.install(targets: [:web], endpoint: SampleAppWeb.Endpoint)
+
+    assert Enum.any?(
+             malformed_child.issues,
+             &String.contains?(to_string(&1), "foreign or malformed Rekindle child")
+           )
+
+    branch = """
+    if Code.ensure_loaded?(Mix) and Mix.env() != :prod do
+      [{Rekindle, otp_app: :sample_app, name: SampleApp.Rekindle}]
+    else
+      []
+    end
+    """
+
+    duplicate_child =
+      project(children: "([SampleApp.HostChild] ++ (#{branch})) ++ (#{branch})")
+      |> RekindleIgniter.install(targets: [:web], endpoint: SampleAppWeb.Endpoint)
+
+    assert Enum.any?(
+             duplicate_child.issues,
+             &String.contains?(to_string(&1), "Rekindle child forms")
+           )
+
+    for {label, options} <- [
+          {:malformed_build, [assets_build: ~s(["cmd host.build", "rekindle.build desktop"])]},
+          {:duplicate_build, [assets_build: ~s(["rekindle.build web", "rekindle.build web"])]},
+          {:malformed_deploy, [assets_deploy: ~s(["cmd rekindle.phoenix.deploy", "phx.digest"])]}
+        ] do
+      initial = project(options)
+
+      conflict =
+        RekindleIgniter.install(initial, targets: [:web], endpoint: SampleAppWeb.Endpoint)
+
+      assert source_issues(conflict, "mix.exs") != [], "#{label} should be rejected"
+      assert source(conflict, "mix.exs") == source(initial, "mix.exs")
+    end
+  end
+
   test "desktop-only installation preserves all host asset aliases" do
     installed =
       project()
@@ -378,6 +459,11 @@ defmodule Rekindle.IgniterTest do
   defp project(options \\ []) do
     endpoint_extra = Keyword.get(options, :endpoint_extra, "")
     static_paths = Keyword.get(options, :static_paths, "~w(assets images favicon.ico)")
+    children = Keyword.get(options, :children, "[SampleApp.HostChild]")
+    assets_build = Keyword.get(options, :assets_build, ~s(["cmd host.build"]))
+
+    assets_deploy =
+      Keyword.get(options, :assets_deploy, ~s(["cmd host.deploy", "phx.digest"]))
 
     test_project(
       app_name: :sample_app,
@@ -396,8 +482,8 @@ defmodule Rekindle.IgniterTest do
           defp aliases do
             [
               unrelated: ["cmd keep"],
-              "assets.build": ["cmd host.build"],
-              "assets.deploy": ["cmd host.deploy", "phx.digest"]
+              "assets.build": #{assets_build},
+              "assets.deploy": #{assets_deploy}
             ]
           end
         end
@@ -406,7 +492,7 @@ defmodule Rekindle.IgniterTest do
         defmodule SampleApp.Application do
           use Application
           def start(_type, _args) do
-            children = [SampleApp.HostChild]
+            children = #{children}
             Supervisor.start_link(children, strategy: :one_for_one)
           end
         end
@@ -436,6 +522,12 @@ defmodule Rekindle.IgniterTest do
     igniter.rewrite
     |> Rewrite.source!(path)
     |> Rewrite.Source.get(:content)
+  end
+
+  defp source_issues(igniter, path) do
+    igniter.rewrite
+    |> Rewrite.source!(path)
+    |> Rewrite.Source.issues()
   end
 
   defp materialize_client!(igniter, client_root) do

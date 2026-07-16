@@ -54,7 +54,16 @@ if Code.ensure_loaded?(Igniter) do
         |> Enum.filter(fn {entry, _index} -> entry == "rekindle.phoenix.deploy" end)
         |> Enum.map(&elem(&1, 1))
 
+      malformed_rekindle? =
+        Enum.any?(value, fn entry ->
+          entry != "rekindle.phoenix.deploy" and
+            alias_command_reference?(entry, "rekindle.phoenix.deploy")
+        end)
+
       cond do
+        malformed_rekindle? ->
+          {:error, "assets.deploy contains a foreign or malformed Rekindle deploy step"}
+
         digest_indices != [] and rekindle_indices != [] ->
           {:error, "assets.deploy mixes phx.digest with a Rekindle deploy step"}
 
@@ -83,6 +92,42 @@ if Code.ensure_loaded?(Igniter) do
 
     def transform_assets_deploy(_value),
       do: {:error, "assets.deploy must be a literal task list"}
+
+    @spec transform_assets_build(term()) :: {:ok, list()} | {:error, String.t()}
+    def transform_assets_build({:__block__, _meta, [value]}), do: transform_assets_build(value)
+
+    def transform_assets_build(value) when is_list(value) do
+      owned_indices =
+        value
+        |> Enum.with_index()
+        |> Enum.filter(fn {entry, _index} -> entry == "rekindle.build web" end)
+        |> Enum.map(&elem(&1, 1))
+
+      malformed_rekindle? =
+        Enum.any?(value, fn entry ->
+          entry != "rekindle.build web" and alias_command_reference?(entry, "rekindle.build")
+        end)
+
+      cond do
+        malformed_rekindle? ->
+          {:error, "assets.build contains a foreign or malformed Rekindle build step"}
+
+        length(owned_indices) > 1 ->
+          {:error, "assets.build contains multiple Rekindle build steps"}
+
+        owned_indices != [] and owned_indices != [length(value) - 1] ->
+          {:error, "assets.build Rekindle build step must be terminal"}
+
+        owned_indices == [length(value) - 1] ->
+          {:ok, value}
+
+        true ->
+          {:ok, value ++ ["rekindle.build web"]}
+      end
+    end
+
+    def transform_assets_build(_value),
+      do: {:error, "assets.build must be a literal task list"}
 
     defp install_client(igniter, client_path, application_id, targets, options) do
       if Keyword.get(options, :no_client, false) do
@@ -482,27 +527,23 @@ if Code.ensure_loaded?(Igniter) do
                ),
              {:ok, zipper} <- Function.move_to_nth_argument(zipper, 1) do
           node = Sourceror.Zipper.node(zipper)
+          branch = child_branch(otp_app, child_name)
 
-          cond do
-            String.contains?(Macro.to_string(node), "Rekindle") ->
+          case classify_child_node(node, branch) do
+            :owned ->
               {:ok, zipper}
 
-            match?({:ok, value} when is_list(value), Common.expand_literal(zipper)) ->
-              {:ok, base_children} = Common.expand_literal(zipper)
+            :absent ->
+              if match?({:ok, value} when is_list(value), Common.expand_literal(zipper)) do
+                {:ok, base_children} = Common.expand_literal(zipper)
+                {:ok, Common.replace_code(zipper, {:++, [], [base_children, branch]})}
+              else
+                {:error,
+                 "application children must be a literal list or recognized Rekindle form"}
+              end
 
-              branch =
-                Sourceror.parse_string!("""
-                if Code.ensure_loaded?(Mix) and Mix.env() != :prod do
-                  [{Rekindle, otp_app: #{inspect(otp_app)}, name: #{inspect(child_name)}}]
-                else
-                  []
-                end
-                """)
-
-              {:ok, Common.replace_code(zipper, {:++, [], [base_children, branch]})}
-
-            true ->
-              {:error, "application children must be a literal list or recognized Rekindle form"}
+            {:error, message} ->
+              {:error, message}
           end
         else
           _ -> {:error, "could not find the application children list"}
@@ -513,33 +554,123 @@ if Code.ensure_loaded?(Igniter) do
     defp install_aliases(igniter, false), do: igniter
 
     defp install_aliases(igniter, true) do
-      igniter
-      |> append_web_build()
-      |> TaskAliases.modify_existing_alias(:"assets.deploy", fn zipper ->
+      issue_count = mix_source_issue_count(igniter)
+
+      validated =
+        igniter
+        |> validate_alias(:"assets.build", &transform_assets_build/1)
+        |> validate_alias(:"assets.deploy", &transform_assets_deploy/1)
+
+      if mix_source_issue_count(validated) > issue_count do
+        validated
+      else
+        validated
+        |> append_web_build()
+        |> replace_phoenix_deploy()
+      end
+    end
+
+    defp validate_alias(igniter, name, transform) do
+      TaskAliases.modify_existing_alias(igniter, name, fn zipper ->
         with {:ok, value} <- Common.expand_literal(zipper),
-             {:ok, updated} <- transform_assets_deploy(value) do
-          {:ok, Common.replace_code(zipper, updated)}
+             {:ok, _updated} <- transform.(value) do
+          {:ok, zipper}
         else
-          :error -> {:error, "assets.deploy must be a literal task list"}
+          :error -> {:error, "#{name} must be a literal task list"}
           {:error, message} -> {:error, message}
         end
       end)
     end
 
+    defp replace_phoenix_deploy(igniter) do
+      TaskAliases.modify_existing_alias(igniter, :"assets.deploy", fn zipper ->
+        {:ok, value} = Common.expand_literal(zipper)
+        {:ok, updated} = transform_assets_deploy(value)
+        {:ok, Common.replace_code(zipper, updated)}
+      end)
+    end
+
+    defp mix_source_issue_count(igniter) do
+      case Rewrite.source(igniter.rewrite, "mix.exs") do
+        {:ok, source} -> source |> Rewrite.Source.issues() |> length()
+        {:error, _reason} -> 0
+      end
+    end
+
     defp append_web_build(igniter) do
       TaskAliases.modify_existing_alias(igniter, :"assets.build", fn zipper ->
-        case Common.expand_literal(zipper) do
-          {:ok, value} when is_list(value) ->
-            updated =
-              if "rekindle.build web" in value, do: value, else: value ++ ["rekindle.build web"]
-
-            {:ok, Common.replace_code(zipper, updated)}
-
-          _ ->
-            {:error, "assets.build must be a literal task list"}
+        with {:ok, value} <- Common.expand_literal(zipper),
+             {:ok, updated} <- transform_assets_build(value) do
+          {:ok, Common.replace_code(zipper, updated)}
+        else
+          :error -> {:error, "assets.build must be a literal task list"}
+          {:error, message} -> {:error, message}
         end
       end)
     end
+
+    defp child_branch(otp_app, child_name) do
+      Sourceror.parse_string!("""
+      if Code.ensure_loaded?(Mix) and Mix.env() != :prod do
+        [{Rekindle, otp_app: #{inspect(otp_app)}, name: #{inspect(child_name)}}]
+      else
+        []
+      end
+      """)
+    end
+
+    defp classify_child_node(node, branch) do
+      normalized = normalize_ast(node)
+      expected_branch = normalize_ast(branch)
+
+      case normalized do
+        {:++, [], [base, ^expected_branch]} ->
+          if not Macro.quoted_literal?(base) or rekindle_reference?(base) do
+            {:error, "application children contain multiple or foreign Rekindle child forms"}
+          else
+            :owned
+          end
+
+        _ ->
+          if rekindle_reference?(normalized) do
+            {:error, "application children contain a foreign or malformed Rekindle child form"}
+          else
+            :absent
+          end
+      end
+    end
+
+    defp normalize_ast(ast) do
+      Macro.prewalk(ast, fn
+        {:__block__, _meta, [value]} -> value
+        {form, meta, arguments} when is_list(meta) -> {form, [], arguments}
+        node -> node
+      end)
+    end
+
+    defp rekindle_reference?(ast) do
+      {_ast, found?} =
+        Macro.prewalk(ast, false, fn
+          {:__aliases__, _meta, [:Rekindle | _]} = node, _found -> {node, true}
+          module, found when is_atom(module) -> {module, found or rekindle_module_atom?(module)}
+          node, found -> {node, found}
+        end)
+
+      found?
+    end
+
+    defp rekindle_module_atom?(module) do
+      name = Atom.to_string(module)
+      name == "Elixir.Rekindle" or String.starts_with?(name, "Elixir.Rekindle.")
+    end
+
+    defp alias_command_reference?(entry, command) when is_binary(entry) do
+      entry
+      |> String.split(~r/\s+/, trim: true)
+      |> Enum.member?(command)
+    end
+
+    defp alias_command_reference?(_entry, _command), do: false
 
     defp install_page_marker(igniter, otp_app, endpoint, targets) do
       layout = "lib/#{otp_app}_web/components/layouts/root.html.heex"
