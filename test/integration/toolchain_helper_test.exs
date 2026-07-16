@@ -372,9 +372,10 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     end
   end
 
-  test "the real helper admits the exact hello schema and exposes every mismatch class", %{
-    helper: helper
-  } do
+  test "the real helper admits the exact hello schema and responds only to echoable mismatches",
+       %{
+         helper: helper
+       } do
     host = Installer.host() |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
     expected = Helper.compatibility()
     nonce = String.duplicate("a", 64)
@@ -390,24 +391,38 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       "host" => host
     }
 
+    missing_hellos = Enum.map(Map.keys(hello), &Map.delete(hello, &1))
+
     invalid_hellos = [
+      %{hello | "v" => 2},
+      %{hello | "type" => "other"},
+      %{hello | "request_id" => String.upcase(@request)},
+      %{hello | "payload_len" => 1},
+      %{hello | "session_nonce" => String.duplicate("a", 63)},
+      %{hello | "session_nonce" => String.duplicate("A", 64)},
+      %{hello | "session_nonce" => String.duplicate("z", 64)},
+      %{hello | "mode" => "other"},
+      %{hello | "expected" => nil},
       update_in(hello, ["expected"], &Map.delete(&1, "helper_version")),
       put_in(hello, ["expected", "extra"], 1),
       put_in(hello, ["expected", "toolframe"], "1"),
+      %{hello | "host" => nil},
       update_in(hello, ["host"], &Map.delete(&1, "arch")),
       put_in(hello, ["host", "extra"], "value"),
-      put_in(hello, ["host", "os"], 1)
+      put_in(hello, ["host", "os"], 1),
+      Map.put(hello, "extra", true)
     ]
 
     mismatch_hellos = [
+      {%{hello | "mode" => "exec-v1"}, "protocol_mismatch"},
       {put_in(hello, ["expected", "toolframe"], 2), "protocol_mismatch"},
       {put_in(hello, ["expected", "wasm_bindgen_schema"], "0.0.0"), "schema_mismatch"},
       {put_in(hello, ["expected", "helper_version"], "9.9.9"), "version_mismatch"},
       {put_in(hello, ["host", "arch"], "other"), "host_mismatch"}
     ]
 
-    for invalid <- invalid_hellos do
-      assert_hello_error(helper, invalid, "invalid_hello", expected, host)
+    for invalid <- missing_hellos ++ invalid_hellos do
+      assert_hello_rejected_silently(helper, invalid)
     end
 
     for {mismatch, code} <- mismatch_hellos do
@@ -1980,6 +1995,21 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
     assert expected == hello["expected"]
     assert_receive {^port, {:exit_status, 2}}, 1_000
+  end
+
+  defp assert_hello_rejected_silently(helper, hello) do
+    port = open_helper(helper, "web-v1")
+    header = CanonicalValue.encode!(hello)
+
+    payload =
+      case hello["payload_len"] do
+        length when is_integer(length) and length in 1..1_024 -> :binary.copy(<<0>>, length)
+        _ -> <<>>
+      end
+
+    assert Port.command(port, <<byte_size(header)::32, header::binary, payload::binary>>)
+    assert_receive {^port, {:exit_status, 2}}, 1_000
+    refute_receive {^port, {:data, _bytes}}, 50
   end
 
   defp open_helper(helper, mode) do

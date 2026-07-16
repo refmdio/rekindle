@@ -85,6 +85,43 @@ fn run() -> Result<(), String> {
 }
 
 fn admit_hello(header: &Value, mode: &str) -> Result<String, String> {
+    let hello = echoable_hello(header).ok_or_else(|| "invalid hello".to_string())?;
+
+    if hello.mode != mode {
+        return hello_error(&hello, mode, "protocol_mismatch");
+    }
+    if hello.host != &host() {
+        return hello_error(&hello, mode, "host_mismatch");
+    }
+    if hello.expected != &compatibility_value() {
+        let actual = compatibility_value();
+        let code = if hello.expected.get("toolframe") != actual.get("toolframe")
+            || hello.expected.get("exec_protocol") != actual.get("exec_protocol")
+            || hello.expected.get("web_protocol") != actual.get("web_protocol")
+        {
+            "protocol_mismatch"
+        } else if hello.expected.get("wasm_bindgen_schema") != actual.get("wasm_bindgen_schema")
+            || hello.expected.get("web_manifest") != actual.get("web_manifest")
+            || hello.expected.get("native_manifest") != actual.get("native_manifest")
+        {
+            "schema_mismatch"
+        } else {
+            "version_mismatch"
+        };
+        return hello_error(&hello, mode, code);
+    }
+    Ok(hello.request_id.to_owned())
+}
+
+struct EchoableHello<'a> {
+    request_id: &'a str,
+    session_nonce: &'a str,
+    mode: &'a str,
+    expected: &'a Value,
+    host: &'a Value,
+}
+
+fn echoable_hello(header: &Value) -> Option<EchoableHello<'_>> {
     const KEYS: &[&str] = &[
         "v",
         "type",
@@ -96,46 +133,35 @@ fn admit_hello(header: &Value, mode: &str) -> Result<String, String> {
         "host",
     ];
     if !frame::exact_keys(header, KEYS) {
-        return hello_error(header, mode, "invalid_hello");
+        return None;
     }
     let object = header.as_object().expect("exact keys requires object");
-    let nonce = object["session_nonce"].as_str().unwrap_or_default();
-    if object["type"] != "hello"
+    let request_id = object["request_id"].as_str()?;
+    let session_nonce = object["session_nonce"].as_str()?;
+    let hello_mode = object["mode"].as_str()?;
+
+    if object["v"] != 1
+        || object["type"] != "hello"
         || object["payload_len"] != 0
-        || nonce.len() != 64
-        || !nonce
+        || !frame::is_request_id(object.get("request_id"))
+        || session_nonce.len() != 64
+        || !session_nonce
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        || !matches!(hello_mode, "exec-v1" | "web-v1")
         || !valid_compatibility(&object["expected"])
         || !valid_host(&object["host"])
     {
-        return hello_error(header, mode, "invalid_hello");
+        return None;
     }
-    if object["mode"] != mode {
-        return hello_error(header, mode, "protocol_mismatch");
-    }
-    if object["host"] != host() {
-        return hello_error(header, mode, "host_mismatch");
-    }
-    if object["expected"] != compatibility_value() {
-        let expected = &object["expected"];
-        let actual = compatibility_value();
-        let code = if expected.get("toolframe") != actual.get("toolframe")
-            || expected.get("exec_protocol") != actual.get("exec_protocol")
-            || expected.get("web_protocol") != actual.get("web_protocol")
-        {
-            "protocol_mismatch"
-        } else if expected.get("wasm_bindgen_schema") != actual.get("wasm_bindgen_schema")
-            || expected.get("web_manifest") != actual.get("web_manifest")
-            || expected.get("native_manifest") != actual.get("native_manifest")
-        {
-            "schema_mismatch"
-        } else {
-            "version_mismatch"
-        };
-        return hello_error(header, mode, code);
-    }
-    Ok(object["request_id"].as_str().unwrap().to_owned())
+
+    Some(EchoableHello {
+        request_id,
+        session_nonce,
+        mode: hello_mode,
+        expected: &object["expected"],
+        host: &object["host"],
+    })
 }
 
 fn valid_compatibility(value: &Value) -> bool {
@@ -165,17 +191,16 @@ fn valid_host(value: &Value) -> bool {
     frame::exact_keys(value, KEYS) && value["os"].is_string() && value["arch"].is_string()
 }
 
-fn hello_error<T>(header: &Value, mode: &str, code: &str) -> Result<T, String> {
-    let object = header.as_object().ok_or("invalid hello")?;
+fn hello_error<T>(hello: &EchoableHello<'_>, mode: &str, code: &str) -> Result<T, String> {
     let response = json!({
         "v": 1,
         "type": "hello_error",
-        "request_id": object.get("request_id").cloned().unwrap_or(Value::Null),
+        "request_id": hello.request_id,
         "payload_len": 0,
-        "session_nonce": object.get("session_nonce").cloned().unwrap_or(Value::Null),
+        "session_nonce": hello.session_nonce,
         "mode": mode,
         "code": code,
-        "expected": object.get("expected").cloned().unwrap_or(Value::Null),
+        "expected": hello.expected,
         "actual": compatibility_value(),
         "host": host()
     });
