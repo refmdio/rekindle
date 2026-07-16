@@ -729,15 +729,19 @@ defmodule Rekindle.Config do
       [build.cache.root] ++
         Enum.map(build.targets, fn {_name, target} -> target.projection.root end)
 
+    folded_sources = Enum.map(sources, &path_fold/1)
+    folded_outputs = Enum.map(outputs, &path_fold/1)
+
     conflict =
-      Enum.find(outputs, fn output ->
-        Enum.any?(sources, &overlap?(output, &1)) or
-          Enum.count(outputs, &overlap?(output, &1)) > 1
+      Enum.find(folded_outputs, fn output ->
+        Enum.any?(folded_sources, &overlap?(output, &1)) or
+          Enum.count(folded_outputs, &overlap?(output, &1)) > 1
       end)
 
     with true <- is_nil(conflict),
          :ok <- reject_reserved_sources(sources),
          :ok <- reject_normalization_collisions(sources ++ outputs),
+         :ok <- require_source_directories(project_root, sources),
          :ok <- reject_symlink_components(project_root, sources ++ outputs) do
       :ok
     else
@@ -773,6 +777,20 @@ defmodule Rekindle.Config do
 
   defp path_fold(path), do: path |> String.normalize(:nfkc) |> String.downcase()
 
+  defp require_source_directories(project_root, sources) do
+    valid? =
+      Enum.all?(sources, fn source ->
+        case File.lstat(Path.join(project_root, source)) do
+          {:ok, %{type: :directory}} -> true
+          _ -> false
+        end
+      end)
+
+    if valid?,
+      do: :ok,
+      else: error([:rekindle_build], :path_invalid, "source roots must be existing directories")
+  end
+
   defp reject_symlink_components(project_root, paths) do
     project_root = Path.expand(project_root)
 
@@ -800,8 +818,10 @@ defmodule Rekindle.Config do
         |> Enum.scan(project_root, &Path.join(&2, &1))
         |> Enum.any?(fn path ->
           case File.lstat(path) do
-            {:ok, %{type: :symlink}} -> true
-            _ -> false
+            {:ok, %{type: :directory}} -> false
+            {:ok, _other} -> true
+            {:error, :enoent} -> false
+            {:error, _} -> true
           end
         end)
       end)

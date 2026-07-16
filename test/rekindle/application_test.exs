@@ -83,7 +83,7 @@ defmodule Rekindle.ApplicationTest do
   defp build_config do
     [
       schema: 1,
-      client: "client",
+      client: "lib",
       targets: [
         desktop: [
           package: "lifecycle_ui",

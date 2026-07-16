@@ -148,7 +148,7 @@ defmodule Rekindle.SetupTest do
       end)
 
     {:ok, project} =
-      Config.normalize(:setup_test, [schema: 1, client: "client", targets: target_configs],
+      Config.normalize(:setup_test, [schema: 1, client: "lib", targets: target_configs],
         schema: 1,
         enabled: true,
         targets: [List.first(targets)],

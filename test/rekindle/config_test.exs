@@ -40,7 +40,7 @@ defmodule Rekindle.ConfigTest do
 
     assert project.application_id == "demo_app"
     assert project.build.schema == 1
-    assert project.build.client == "client"
+    assert project.build.client == "lib"
     assert project.build.cache.root == ".rekindle/cache"
     assert project.build.cache.retained_generations == 3
     assert project.build.cache.max_generation_bytes == 2_147_483_648
@@ -55,7 +55,7 @@ defmodule Rekindle.ConfigTest do
     assert web.default_features == false
     assert web.profiles == %{dev: "dev", release: "release"}
     assert web.environment.inherit == :toolchain
-    assert web.public == "client/public"
+    assert web.public == "test"
     assert web.hot_styles == ["styles/app.css"]
     assert web.projection == %{mode: :phoenix_static, root: "priv/static/rekindle"}
 
@@ -89,7 +89,7 @@ defmodule Rekindle.ConfigTest do
     assert {:ok, project} =
              Config.normalize(
                :demo_app,
-               [schema: 1, client: "client", targets: [web: target]],
+               [schema: 1, client: "lib", targets: [web: target]],
                web_dev()
              )
 
@@ -102,7 +102,7 @@ defmodule Rekindle.ConfigTest do
     assert_error(
       Config.normalize(
         :demo_app,
-        [schema: 1, client: "client", targets: [web: mixed]],
+        [schema: 1, client: "lib", targets: [web: mixed]],
         web_dev()
       ),
       :config_invalid
@@ -132,7 +132,7 @@ defmodule Rekindle.ConfigTest do
     )
 
     overlap =
-      Keyword.update!(web_build(), :cache, &Keyword.put(&1, :root, "client/cache"))
+      Keyword.update!(web_build(), :cache, &Keyword.put(&1, :root, "lib/cache"))
 
     assert_error(Config.normalize(:demo_app, overlap, web_dev()), :path_overlap)
 
@@ -203,7 +203,7 @@ defmodule Rekindle.ConfigTest do
     assert_error(
       Config.normalize(
         :demo_app,
-        [schema: 1, client: "client", targets: [web: target]],
+        [schema: 1, client: "lib", targets: [web: target]],
         web_dev()
       ),
       :config_invalid
@@ -221,7 +221,7 @@ defmodule Rekindle.ConfigTest do
     assert {:ok, project} =
              Config.normalize(
                :demo_app,
-               [schema: 1, client: "client", targets: [web: target]],
+               [schema: 1, client: "lib", targets: [web: target]],
                web_dev()
              )
 
@@ -235,19 +235,20 @@ defmodule Rekindle.ConfigTest do
     )
 
     for reserved_equivalent <- [".GIT", "ＤＩＳＴ", "ＰＲＩＶ/ＳＴＡＴＩＣ"] do
-      assert_error(
-        Config.normalize(
-          :demo_app,
-          Keyword.put(web_build(), :client, reserved_equivalent),
-          web_dev()
-        ),
-        :path_invalid
-      )
+      assert {:error, errors} =
+               Config.normalize(
+                 :demo_app,
+                 Keyword.put(web_build(), :client, reserved_equivalent),
+                 web_dev()
+               )
+
+      assert Enum.any?(errors, &(&1.code in [:path_invalid, :path_overlap]))
     end
 
     root = Path.join(System.tmp_dir!(), "rekindle-config-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
-    File.ln_s!(Path.expand("client"), Path.join(root, "client"))
+    File.mkdir_p!(Path.join(root, "test"))
+    File.ln_s!(Path.expand("lib"), Path.join(root, "lib"))
     on_exit(fn -> File.rm_rf!(root) end)
 
     assert_error(
@@ -260,6 +261,8 @@ defmodule Rekindle.ConfigTest do
 
     linked_root = real_root <> "-link"
     File.mkdir_p!(real_root)
+    File.mkdir_p!(Path.join(real_root, "lib"))
+    File.mkdir_p!(Path.join(real_root, "test"))
     File.ln_s!(real_root, linked_root)
 
     on_exit(fn ->
@@ -277,6 +280,8 @@ defmodule Rekindle.ConfigTest do
 
     nested_root = Path.join(ancestor_link, "project")
     File.mkdir_p!(Path.join(real_root, "project"))
+    File.mkdir_p!(Path.join(real_root, "project/lib"))
+    File.mkdir_p!(Path.join(real_root, "project/test"))
     File.ln_s!(real_root, ancestor_link)
     on_exit(fn -> File.rm(ancestor_link) end)
 
@@ -309,6 +314,31 @@ defmodule Rekindle.ConfigTest do
       end)
 
     assert_error(Config.normalize(:demo_app, collision, web_dev()), :path_overlap)
+
+    case_overlap =
+      web_build()
+      |> Keyword.put(:client, "CLIENT")
+      |> Keyword.put(:cache, root: "client/cache")
+
+    File.mkdir_p!(Path.join(root, "CLIENT"))
+
+    assert_error(
+      Config.normalize(:demo_app, case_overlap, web_dev(), project_root: root),
+      :path_overlap
+    )
+
+    source_file = Path.join(root, "source-file")
+    File.write!(source_file, "not a directory")
+
+    assert_error(
+      Config.normalize(
+        :demo_app,
+        Keyword.put(web_build(), :client, "source-file"),
+        web_dev(),
+        project_root: root
+      ),
+      :path_invalid
+    )
   end
 
   test "explicit accepted origins must intersect the endpoint policy" do
@@ -400,7 +430,7 @@ defmodule Rekindle.ConfigTest do
   defp web_build do
     [
       schema: 1,
-      client: "client",
+      client: "lib",
       targets: [web: web_target()],
       cache: [root: ".rekindle/cache"],
       process: [max_cargo_builds: 2]
@@ -415,7 +445,7 @@ defmodule Rekindle.ConfigTest do
       rust_target: "wasm32-unknown-unknown",
       features: ["web", "alpha"],
       default_features: false,
-      public: "client/public",
+      public: "test",
       hot_styles: ["styles/app.css"],
       projection: [mode: :phoenix_static, root: "priv/static/rekindle"]
     ]
@@ -424,7 +454,7 @@ defmodule Rekindle.ConfigTest do
   defp desktop_build do
     [
       schema: 1,
-      client: "client",
+      client: "lib",
       targets: [
         desktop: [
           package: "demo_app_ui",
