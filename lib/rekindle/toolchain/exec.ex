@@ -241,18 +241,25 @@ defmodule Rekindle.Toolchain.Exec do
   defp absolute(_), do: {:error, :path}
 
   defp strings(values) when is_list(values) do
-    if Enum.all?(
-         values,
-         &(is_binary(&1) and String.valid?(&1) and not String.contains?(&1, <<0>>))
-       ), do: :ok, else: {:error, :strings}
+    if proper_list?(values) and
+         Enum.all?(
+           values,
+           &(is_binary(&1) and String.valid?(&1) and not String.contains?(&1, <<0>>))
+         ), do: :ok, else: {:error, :strings}
   end
 
   defp strings(_), do: {:error, :strings}
 
   defp env_set(values) when is_list(values) do
-    with true <-
-           Enum.all?(values, fn {key, value} ->
-             valid_env?(key) and is_binary(value) and String.valid?(value)
+    with true <- proper_list?(values),
+         true <-
+           Enum.all?(values, fn
+             {key, value} ->
+               valid_env?(key) and is_binary(value) and String.valid?(value) and
+                 not String.contains?(value, <<0>>)
+
+             _malformed ->
+               false
            end),
          true <- unique?(Enum.map(values, &elem(&1, 0))) do
       {:ok, Enum.sort_by(values, &elem(&1, 0))}
@@ -264,7 +271,7 @@ defmodule Rekindle.Toolchain.Exec do
   defp env_set(_), do: {:error, :environment}
 
   defp env_unset(values) when is_list(values) do
-    if Enum.all?(values, &valid_env?/1) and unique?(values),
+    if proper_list?(values) and Enum.all?(values, &valid_env?/1) and unique?(values),
       do: {:ok, Enum.sort(values)},
       else: {:error, :environment}
   end
@@ -272,6 +279,9 @@ defmodule Rekindle.Toolchain.Exec do
   defp env_unset(_), do: {:error, :environment}
 
   defp valid_env?(value), do: is_binary(value) and Regex.match?(@env_name, value)
+  defp proper_list?([]), do: true
+  defp proper_list?([_head | tail]), do: proper_list?(tail)
+  defp proper_list?(_value), do: false
   defp unique?(values), do: length(values) == MapSet.size(MapSet.new(values))
   defp positive(value), do: is_integer(value) and value > 0
   defp nonnegative(value), do: is_integer(value) and value >= 0

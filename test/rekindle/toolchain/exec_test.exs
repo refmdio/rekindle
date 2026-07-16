@@ -45,6 +45,44 @@ defmodule Rekindle.Toolchain.ExecTest do
              )
   end
 
+  test "malformed environment entries fail closed without raising or producing a request" do
+    malformed_env_set = [
+      [:bad],
+      [{"A"}],
+      [{"A", "1", "extra"}],
+      [{"A", 1}],
+      [{1, "value"}],
+      [{"A", "value\0suffix"}],
+      [{"A", <<255>>}],
+      [{"A", "1"} | :improper]
+    ]
+
+    for env_set <- malformed_env_set do
+      assert {:error, :invalid_spawn} =
+               Exec.spawn_request(
+                 executable: "/bin/echo",
+                 cwd: "/tmp",
+                 env_set: env_set
+               )
+    end
+
+    for env_unset <- [[1], ["A", "A"], ["A" | :improper]] do
+      assert {:error, :invalid_spawn} =
+               Exec.spawn_request(
+                 executable: "/bin/echo",
+                 cwd: "/tmp",
+                 env_unset: env_unset
+               )
+    end
+
+    assert {:error, :invalid_spawn} =
+             Exec.spawn_request(
+               executable: "/bin/echo",
+               cwd: "/tmp",
+               argv: ["ok" | :improper]
+             )
+  end
+
   test "admits independently sequenced bounded byte streams and terminal exit" do
     state = state()
     assert {:ok, state} = Exec.accept(state, started(), <<>>)
