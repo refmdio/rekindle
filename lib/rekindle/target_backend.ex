@@ -252,7 +252,7 @@ defmodule Rekindle.TargetBackend do
   defp valid_cwd?(_cwd), do: false
 
   defp valid_env_set?(entries) when is_list(entries) do
-    length(entries) <= @max_plan_entries and
+    proper_list_within?(entries, @max_plan_entries) and
       Enum.all?(entries, fn
         %{name: name, value: value, secret: secret?} = entry ->
           Map.keys(entry) |> Enum.sort() == [:name, :secret, :value] and
@@ -286,7 +286,7 @@ defmodule Rekindle.TargetBackend do
   end
 
   defp valid_argv?(argv) when is_list(argv) do
-    length(argv) <= @max_plan_entries and Enum.all?(argv, &valid_plan_string?/1) and
+    proper_list_within?(argv, @max_plan_entries) and Enum.all?(argv, &valid_plan_string?/1) and
       aggregate_bytes(argv, &byte_size/1) <= @max_plan_bytes
   end
 
@@ -303,4 +303,12 @@ defmodule Rekindle.TargetBackend do
       if next <= @max_plan_bytes, do: {:cont, next}, else: {:halt, next}
     end)
   end
+
+  defp proper_list_within?(values, limit), do: proper_list_within?(values, limit, 0)
+  defp proper_list_within?([], _limit, _count), do: true
+
+  defp proper_list_within?([_value | rest], limit, count) when count < limit,
+    do: proper_list_within?(rest, limit, count + 1)
+
+  defp proper_list_within?(_values, _limit, _count), do: false
 end

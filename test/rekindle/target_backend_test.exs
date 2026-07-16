@@ -182,6 +182,9 @@ defmodule Rekindle.TargetBackendTest do
                TargetBackend.validate_plan_result({:ok, %{plan | argv: argv}})
     end
 
+    assert {:error, %ConfigError{}} =
+             TargetBackend.validate_plan_result({:ok, %{plan | argv: ["x" | "tail"]}})
+
     for env_set <- [
           [%{name: "A", value: "bad\0value", secret: false}],
           [%{name: "A", value: invalid_utf8, secret: false}],
@@ -193,6 +196,12 @@ defmodule Rekindle.TargetBackendTest do
       assert {:error, %ConfigError{}} =
                TargetBackend.validate_plan_result({:ok, %{plan | env_set: env_set}})
     end
+
+    assert {:error, %ConfigError{}} =
+             TargetBackend.validate_plan_result({
+               :ok,
+               %{plan | env_set: [%{name: "A", value: "a", secret: false} | "tail"]}
+             })
 
     failure =
       Failure.new!(target: :web, stage: :internal, code: :internal, message: "backend failed")
