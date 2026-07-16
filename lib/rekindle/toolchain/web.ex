@@ -10,6 +10,8 @@ defmodule Rekindle.Toolchain.Web do
   @error_codes ~w[invalid_request incompatible_schema input_changed invalid_wasm bindgen_failed unsupported_import asset_escape asset_collision output_limit io_failed internal]
   @marker ".rekindle-attempt"
   @manifest "rekindle-web-manifest-v1.json"
+  @max_manifest_string_bytes 4_096
+  @max_path_bytes 4_096
   @bootstrap_template """
   export async function start(context) {
     if (!context || context.v !== 1) throw new Error("invalid Rekindle context");
@@ -210,16 +212,171 @@ defmodule Rekindle.Toolchain.Web do
 
   defp terminal_manifest_descriptor(_terminal, _actual), do: :ok
 
+  defp valid_manifest_base?(base, producer_kinds) do
+    exact?(
+      base,
+      ~w[rekindle_version application_id target build producer host_requirements hot_styles]
+    ) and
+      valid_semver?(base["rekindle_version"]) and
+      manifest_string?(base["application_id"]) and
+      base["target"] == "web" and
+      valid_manifest_build?(base["build"]) and
+      valid_web_producer?(base["producer"], producer_kinds) and
+      base["host_requirements"] == %{"secure_context" => true, "webgpu" => true} and
+      relative_strings_sorted_unique?(base["hot_styles"], true)
+  end
+
+  defp valid_manifest_build?(build) do
+    exact?(build, ~w[build_key profile package binary features]) and
+      digest?(build["build_key"]) and
+      Enum.all?(~w[profile package binary], &manifest_string?(build[&1])) and
+      relative_strings_sorted_unique?(build["features"], false, &manifest_string?/1)
+  end
+
+  defp valid_web_producer?(%{"kind" => "canonical_web"} = producer, producer_kinds) do
+    "canonical_web" in producer_kinds and
+      exact?(
+        producer,
+        ~w[kind rustc cargo rust_target wasm_bindgen gpui_revision helper_version helper_protocol compatibility_tuple_id]
+      ) and
+      producer["helper_protocol"] == 1 and
+      Enum.all?(~w[rustc cargo rust_target gpui_revision compatibility_tuple_id], fn key ->
+        manifest_string?(producer[key])
+      end) and
+      valid_semver?(producer["wasm_bindgen"]) and valid_semver?(producer["helper_version"])
+  end
+
+  defp valid_web_producer?(%{"kind" => "extension"} = producer, producer_kinds) do
+    "extension" in producer_kinds and
+      exact?(producer, ~w[kind backend_id backend_version options_digest]) and
+      manifest_string?(producer["backend_id"]) and
+      manifest_string?(producer["backend_version"]) and digest?(producer["options_digest"])
+  end
+
+  defp valid_web_producer?(_producer, _producer_kinds), do: false
+
+  defp valid_semver?(value) when is_binary(value) do
+    manifest_string?(value) and match?({:ok, %Version{}}, Version.parse(value))
+  end
+
+  defp valid_semver?(_value), do: false
+
+  defp manifest_string?(value) when is_binary(value) do
+    value != "" and byte_size(value) <= @max_manifest_string_bytes and String.valid?(value) and
+      String.normalize(value, :nfc) == value and
+      not String.match?(value, ~r/[\x00-\x1F\x7F]/u)
+  end
+
+  defp manifest_string?(_value), do: false
+
+  defp relative_strings_sorted_unique?(values, allow_empty?, validator \\ &relative?/1) do
+    is_list(values) and (allow_empty? or values != []) and values == Enum.sort(values) and
+      unique?(values) and Enum.all?(values, validator)
+  end
+
+  defp member_metadata(role, path) when is_binary(path) do
+    extension = path |> case_fold() |> Path.extname()
+
+    case {role, extension} do
+      {"bootstrap", ".js"} ->
+        {:ok, "text/javascript; charset=utf-8", "no_cache"}
+
+      {"javascript", ".js"} ->
+        {:ok, "text/javascript; charset=utf-8", "immutable"}
+
+      {"wasm", ".wasm"} ->
+        {:ok, "application/wasm", "immutable"}
+
+      {"css", ".css"} ->
+        {:ok, "text/css; charset=utf-8", "immutable"}
+
+      {"source_map", ".map"} ->
+        {:ok, "application/json; charset=utf-8", "immutable"}
+
+      {"asset", extension} when extension not in [".js", ".wasm", ".css", ".map"] ->
+        {:ok, asset_mime(extension), "immutable"}
+
+      _ ->
+        {:error, :role_extension}
+    end
+  end
+
+  defp member_metadata(_role, _path), do: {:error, :role_extension}
+
+  defp asset_mime(extension) do
+    Map.get(
+      %{
+        ".png" => "image/png",
+        ".jpg" => "image/jpeg",
+        ".jpeg" => "image/jpeg",
+        ".gif" => "image/gif",
+        ".webp" => "image/webp",
+        ".avif" => "image/avif",
+        ".svg" => "image/svg+xml",
+        ".ico" => "image/x-icon",
+        ".woff" => "font/woff",
+        ".woff2" => "font/woff2",
+        ".ttf" => "font/ttf",
+        ".otf" => "font/otf",
+        ".txt" => "text/plain; charset=utf-8",
+        ".json" => "application/json; charset=utf-8"
+      },
+      extension,
+      "application/octet-stream"
+    )
+  end
+
+  defp case_fold(value) when is_binary(value) do
+    value |> String.to_charlist() |> :string.casefold() |> List.to_string()
+  end
+
   defp manifest_shape(manifest) do
     keys =
       ~w[contract_version rekindle_version application_id target artifact_id build producer host_requirements entry hot_styles members edges manifest_digest]
 
+    base =
+      Map.take(
+        manifest,
+        ~w[rekindle_version application_id target build producer host_requirements hot_styles]
+      )
+
     if exact?(manifest, keys) and manifest["contract_version"] == 1 and
-         manifest["target"] == "web" and digest?(manifest["artifact_id"]) and
-         digest?(manifest["manifest_digest"]) and is_list(manifest["members"]) and
-         is_list(manifest["edges"]),
+         valid_manifest_base?(base, ~w[canonical_web extension]) and
+         digest?(manifest["artifact_id"]) and digest?(manifest["manifest_digest"]) and
+         relative?(manifest["entry"]) and is_list(manifest["members"]) and
+         manifest["members"] != [] and is_list(manifest["edges"]) and
+         valid_manifest_members_shape?(manifest),
        do: :ok,
        else: {:error, :manifest_shape}
+  end
+
+  defp valid_manifest_members_shape?(manifest) do
+    members = manifest["members"]
+    paths = Enum.map(members, & &1["path"])
+    folded_paths = Enum.map(paths, &case_fold/1)
+    roles = Map.new(members, &{&1["path"], &1["role"]})
+
+    paths == Enum.sort(paths) and length(paths) == MapSet.size(MapSet.new(paths)) and
+      length(folded_paths) == MapSet.size(MapSet.new(folded_paths)) and
+      Enum.all?(members, &valid_manifest_member_shape?/1) and
+      Enum.count(members, &(&1["role"] == "bootstrap")) == 1 and
+      roles[manifest["entry"]] == "bootstrap" and
+      Enum.all?(manifest["hot_styles"], &(roles[&1] == "css"))
+  rescue
+    _ -> false
+  end
+
+  defp valid_manifest_member_shape?(member) do
+    with true <- exact?(member, ~w[path role sha256 size mime cache source_map]),
+         true <- relative?(member["path"]),
+         {:ok, mime, cache} <- member_metadata(member["role"], member["path"]),
+         true <- member["mime"] == mime and member["cache"] == cache,
+         true <- digest?(member["sha256"]) and nonnegative?(member["size"]),
+         true <- is_nil(member["source_map"]) or relative?(member["source_map"]) do
+      true
+    else
+      _ -> false
+    end
   end
 
   defp manifest_digest(manifest, terminal) do
@@ -340,13 +497,23 @@ defmodule Rekindle.Toolchain.Web do
   defp manifest_members(root, manifest) do
     members = manifest["members"]
     paths = Enum.map(members, & &1["path"])
+    folded_paths = Enum.map(paths, &case_fold/1)
+    roles = Map.new(members, &{&1["path"], &1["role"]})
 
     cond do
-      paths != Enum.sort(paths) or length(paths) != MapSet.size(MapSet.new(paths)) ->
+      paths != Enum.sort(paths) or length(paths) != MapSet.size(MapSet.new(paths)) or
+          length(folded_paths) != MapSet.size(MapSet.new(folded_paths)) ->
         {:error, :member_order}
 
       not Enum.all?(members, &valid_manifest_member?(root, &1)) ->
         {:error, :member_changed}
+
+      Enum.count(members, &(&1["role"] == "bootstrap")) != 1 or
+          roles[manifest["entry"]] != "bootstrap" ->
+        {:error, :member_entry}
+
+      not Enum.all?(manifest["hot_styles"], &(roles[&1] == "css")) ->
+        {:error, :hot_style_member}
 
       true ->
         :ok
@@ -354,10 +521,7 @@ defmodule Rekindle.Toolchain.Web do
   end
 
   defp valid_manifest_member?(root, member) do
-    with true <-
-           exact?(member, ~w[path role sha256 size mime cache source_map]) and
-             member["role"] in ~w[bootstrap javascript wasm css asset source_map] and
-             member["cache"] in ~w[no_cache immutable] and digest?(member["sha256"]),
+    with true <- valid_manifest_member_shape?(member),
          {:ok, descriptor} <- file(root, "members/" <> member["path"]),
          true <- descriptor["sha256"] == member["sha256"],
          true <- descriptor["size"] == member["size"] do
@@ -1165,7 +1329,8 @@ defmodule Rekindle.Toolchain.Web do
          files?(body["public_files"]) and
          public_files_belong_to_root?(body["public_files"], body["public_root"]) and
          exact?(body["bootstrap_template"], ~w[id sha256]) and write_root?(body["output_root"]) and
-         is_map(body["manifest_base"]) and limits?(body["limits"]),
+         valid_manifest_base?(body["manifest_base"], ["canonical_web"]) and
+         limits?(body["limits"]),
        do: :ok,
        else: {:error, :invalid_operation}
   end
@@ -1282,9 +1447,11 @@ defmodule Rekindle.Toolchain.Web do
   defp relative_path(value) when is_binary(value) do
     segments = String.split(value, "/")
 
-    if value != "" and Path.type(value) != :absolute and String.valid?(value) and
+    if value != "" and byte_size(value) <= @max_path_bytes and Path.type(value) != :absolute and
+         String.valid?(value) and
          String.normalize(value, :nfc) == value and
          not String.contains?(value, ["\\", <<0>>]) and
+         not String.match?(value, ~r/[\x00-\x1F\x7F]/u) and
          Enum.all?(segments, &(&1 not in ["", ".", ".."])), do: :ok, else: {:error, :path}
   end
 

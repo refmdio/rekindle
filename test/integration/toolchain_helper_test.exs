@@ -564,6 +564,137 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
     assert :ok = Web.revalidate_manifest(output_root, terminal)
 
+    assert {:ok, artifact_root} = Web.root(output, :read, id: output_root["id"])
+
+    schema_mutations = [
+      {"unknown root field", &Map.put(&1, "unknown", true)},
+      {"contract version", &Map.put(&1, "contract_version", 2)},
+      {"Rekindle semver", &Map.put(&1, "rekindle_version", "01.0.0")},
+      {"application identity", &Map.put(&1, "application_id", "cafe\u0301")},
+      {"target", &Map.put(&1, "target", "desktop")},
+      {"artifact digest", &Map.put(&1, "artifact_id", "invalid")},
+      {"build key", &put_in(&1, ["build", "build_key"], "invalid")},
+      {"build profile", &put_in(&1, ["build", "profile"], "")},
+      {"build package", &put_in(&1, ["build", "package"], "bad\npackage")},
+      {"build binary", &put_in(&1, ["build", "binary"], "cafe\u0301")},
+      {"build features", &put_in(&1, ["build", "features"], ["web", "alpha"])},
+      {"build extra field", &update_in(&1["build"], fn build -> Map.put(build, "extra", 1) end)},
+      {"producer kind", &put_in(&1, ["producer", "kind"], "canonical_desktop")},
+      {"producer rustc", &put_in(&1, ["producer", "rustc"], "")},
+      {"producer cargo", &put_in(&1, ["producer", "cargo"], "bad\ncargo")},
+      {"producer target", &put_in(&1, ["producer", "rust_target"], "")},
+      {"producer wasm-bindgen", &put_in(&1, ["producer", "wasm_bindgen"], "0.02.1")},
+      {"producer GPUI revision", &put_in(&1, ["producer", "gpui_revision"], "")},
+      {"producer helper version", &put_in(&1, ["producer", "helper_version"], "v0.1.0")},
+      {"producer helper protocol", &put_in(&1, ["producer", "helper_protocol"], 2)},
+      {"producer tuple", &put_in(&1, ["producer", "compatibility_tuple_id"], "")},
+      {"producer extra field",
+       &update_in(&1["producer"], fn producer -> Map.put(producer, "extra", 1) end)},
+      {"secure-context requirement", &put_in(&1, ["host_requirements", "secure_context"], false)},
+      {"WebGPU requirement", &put_in(&1, ["host_requirements", "webgpu"], false)},
+      {"host-requirement extra field",
+       &update_in(&1["host_requirements"], fn host -> Map.put(host, "extra", true) end)},
+      {"entry path", &Map.put(&1, "entry", "../entry.js")},
+      {"hot-style order", &Map.put(&1, "hot_styles", ["styles/theme.css", "styles/app.css"])},
+      {"member unknown field",
+       &update_in(&1["members"], fn [member | rest] -> [Map.put(member, "extra", 1) | rest] end)},
+      {"member non-NFC path",
+       fn value ->
+         update_in(value["members"], fn [member | rest] ->
+           [%{member | "path" => "cafe\u0301.js"} | rest]
+           |> Enum.sort_by(fn candidate -> candidate["path"] end)
+         end)
+       end},
+      {"member path bound",
+       fn value ->
+         update_in(value["members"], fn [member | rest] ->
+           [%{member | "path" => String.duplicate("a", 4_097)} | rest]
+           |> Enum.sort_by(fn candidate -> candidate["path"] end)
+         end)
+       end}
+    ]
+
+    metadata_mutations =
+      for member <- manifest["members"], field <- ~w[mime cache] do
+        {"#{member["role"]} #{field}",
+         fn value ->
+           update_in(value["members"], fn members ->
+             Enum.map(members, fn candidate ->
+               if candidate["path"] == member["path"],
+                 do: Map.put(candidate, field, "invalid"),
+                 else: candidate
+             end)
+           end)
+         end}
+      end
+
+    Enum.each(schema_mutations ++ metadata_mutations, fn {label, mutate} ->
+      assert_web_manifest_rejected(helper, artifact_root, output, mutate.(manifest), label)
+    end)
+
+    case_collision =
+      update_in(manifest["members"], fn members ->
+        duplicate =
+          members
+          |> Enum.find(&(&1["path"] == "app.js"))
+          |> Map.put("path", "APP.JS")
+
+        Enum.sort_by([duplicate | members], & &1["path"])
+      end)
+      |> with_web_artifact_id()
+
+    assert_web_manifest_rejected(
+      helper,
+      artifact_root,
+      output,
+      case_collision,
+      "case-fold collision"
+    )
+
+    extension_manifest =
+      manifest
+      |> Map.put("producer", %{
+        "kind" => "extension",
+        "backend_id" => "example.backend",
+        "backend_version" => "1",
+        "options_digest" => String.duplicate("c", 64)
+      })
+      |> with_web_manifest_digest()
+
+    File.write!(
+      Path.join(output, "rekindle-web-manifest-v1.json"),
+      CanonicalValue.encode!(extension_manifest)
+    )
+
+    assert :ok =
+             Web.revalidate_manifest(output_root, %{
+               "artifact_id" => extension_manifest["artifact_id"],
+               "manifest_digest" => extension_manifest["manifest_digest"]
+             })
+
+    assert {:ok, extension_descriptor} =
+             Web.file(artifact_root, "rekindle-web-manifest-v1.json")
+
+    assert {:ok, extension_request, extension_state} =
+             Web.operation(
+               "verify_web",
+               %{
+                 artifact_root: artifact_root,
+                 manifest: extension_descriptor,
+                 expected_manifest_digest: extension_manifest["manifest_digest"],
+                 limits: limits()
+               },
+               request_id: @request
+             )
+
+    assert {:ok, %{"type" => "operation_ok", "op" => "verify_web"}, []} =
+             Helper.run_web(helper, extension_request, extension_state)
+
+    File.write!(
+      Path.join(output, "rekindle-web-manifest-v1.json"),
+      CanonicalValue.encode!(manifest)
+    )
+
     forged = update_in(manifest["edges"], &tl/1)
     forged = put_in(forged["manifest_digest"], web_manifest_digest(forged))
 
@@ -657,6 +788,131 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
       assert {:ok, %{"type" => "operation_error", "code" => "unsupported_import"}, []} =
                Helper.run_web(helper, request, state)
+    end
+  end
+
+  test "web-v1 emits the normative MIME and cache table and rejects role-extension aliases", %{
+    helper: helper
+  } do
+    root = temp_root("web-metadata")
+    bindgen = Path.join(root, "bindgen")
+    public = Path.join(root, "public")
+    output = Path.join(root, "output")
+    Enum.each([bindgen, public, output], &File.mkdir_p!/1)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    write_tree(bindgen, %{
+      "app.js" => "export default async function init() {}\n//# sourceMappingURL=app.js.map",
+      "app.js.map" => ~s({"version":3}),
+      "app_bg.wasm" => wasm_module()
+    })
+
+    asset_mimes = %{
+      "assets/a.png" => "image/png",
+      "assets/a.jpg" => "image/jpeg",
+      "assets/a.jpeg" => "image/jpeg",
+      "assets/a.gif" => "image/gif",
+      "assets/a.webp" => "image/webp",
+      "assets/a.avif" => "image/avif",
+      "assets/a.svg" => "image/svg+xml",
+      "assets/a.ico" => "image/x-icon",
+      "assets/a.woff" => "font/woff",
+      "assets/a.woff2" => "font/woff2",
+      "assets/a.ttf" => "font/ttf",
+      "assets/a.otf" => "font/otf",
+      "assets/a.txt" => "text/plain; charset=utf-8",
+      "assets/a.json" => "application/json; charset=utf-8",
+      "assets/a.bin" => "application/octet-stream",
+      "assets/case.PNG" => "image/png"
+    }
+
+    public_files =
+      asset_mimes
+      |> Map.keys()
+      |> Map.new(&{&1, "asset"})
+      |> Map.put("styles/app.css", "body {}")
+
+    write_tree(public, public_files)
+
+    assert {:ok, bindgen_root} = Web.root(bindgen, :read, id: id(300))
+    assert {:ok, public_root} = Web.root(public, :read, id: id(301))
+    assert {:ok, output_root} = Web.prepare_output_root(output, id: id(302))
+
+    assert {:ok, request, state} =
+             package_operation(
+               bindgen_root,
+               web_files(bindgen_root, Map.keys(read_tree(bindgen))),
+               public_root,
+               web_files(public_root, Map.keys(read_tree(public))),
+               output_root,
+               hot_styles: ["styles/app.css"]
+             )
+
+    assert {:ok, %{"type" => "operation_ok"}, []} = Helper.run_web(helper, request, state)
+
+    members =
+      output
+      |> Path.join("rekindle-web-manifest-v1.json")
+      |> File.read!()
+      |> Jason.decode!()
+      |> Map.fetch!("members")
+      |> Map.new(&{&1["path"], &1})
+
+    assert members["entry.js"] |> Map.take(~w[role mime cache]) == %{
+             "role" => "bootstrap",
+             "mime" => "text/javascript; charset=utf-8",
+             "cache" => "no_cache"
+           }
+
+    assert members["app.js"] |> Map.take(~w[role mime cache]) == %{
+             "role" => "javascript",
+             "mime" => "text/javascript; charset=utf-8",
+             "cache" => "immutable"
+           }
+
+    assert members["app_bg.wasm"] |> Map.take(~w[role mime cache]) == %{
+             "role" => "wasm",
+             "mime" => "application/wasm",
+             "cache" => "immutable"
+           }
+
+    assert members["app.js.map"] |> Map.take(~w[role mime cache]) == %{
+             "role" => "source_map",
+             "mime" => "application/json; charset=utf-8",
+             "cache" => "immutable"
+           }
+
+    assert members["styles/app.css"] |> Map.take(~w[role mime cache]) == %{
+             "role" => "css",
+             "mime" => "text/css; charset=utf-8",
+             "cache" => "immutable"
+           }
+
+    Enum.each(asset_mimes, fn {path, mime} ->
+      assert members[path]["role"] == "asset"
+      assert members[path]["mime"] == mime
+      assert members[path]["cache"] == "immutable"
+    end)
+
+    for forbidden <- ["bad.JS", "bad.WASM", "bad.CSS", "bad.MAP"] do
+      rejected_output = Path.join(root, "rejected-#{forbidden}")
+      File.mkdir_p!(rejected_output)
+      File.write!(Path.join(public, forbidden), "forbidden")
+      assert {:ok, rejected_root} = Web.prepare_output_root(rejected_output, id: id(400))
+
+      assert {:ok, rejected_request, rejected_state} =
+               package_operation(
+                 bindgen_root,
+                 web_files(bindgen_root, Map.keys(read_tree(bindgen))),
+                 public_root,
+                 web_files(public_root, Map.keys(read_tree(public))),
+                 rejected_root
+               )
+
+      assert {:ok, %{"type" => "operation_error", "code" => "unsupported_import"}, []} =
+               Helper.run_web(helper, rejected_request, rejected_state)
+
+      File.rm!(Path.join(public, forbidden))
     end
   end
 
@@ -1047,6 +1303,53 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       ]
     )
     |> Base.encode16(case: :lower)
+  end
+
+  defp with_web_manifest_digest(manifest),
+    do: Map.put(manifest, "manifest_digest", web_manifest_digest(manifest))
+
+  defp with_web_artifact_id(manifest) do
+    identity = %{
+      "v" => 1,
+      "build_key" => manifest["build"]["build_key"],
+      "members" => Enum.map(manifest["members"], &Map.take(&1, ~w[path role sha256 size]))
+    }
+
+    artifact_id =
+      :crypto.hash(:sha256, ["rekindle-web-artifact-v1\0", CanonicalValue.encode!(identity)])
+      |> Base.encode16(case: :lower)
+
+    Map.put(manifest, "artifact_id", artifact_id)
+  end
+
+  defp assert_web_manifest_rejected(helper, root, output, manifest, label) do
+    manifest = with_web_manifest_digest(manifest)
+    path = Path.join(output, "rekindle-web-manifest-v1.json")
+    File.write!(path, CanonicalValue.encode!(manifest))
+    assert {:ok, descriptor} = Web.file(root, "rekindle-web-manifest-v1.json"), label
+
+    assert {:ok, request, state} =
+             Web.operation(
+               "verify_web",
+               %{
+                 artifact_root: root,
+                 manifest: descriptor,
+                 expected_manifest_digest: manifest["manifest_digest"],
+                 limits: limits()
+               },
+               request_id: @request
+             ),
+           label
+
+    assert {:ok, %{"type" => "operation_error"}, []} = Helper.run_web(helper, request, state),
+           label
+
+    assert {:error, :manifest_changed} =
+             Web.revalidate_manifest(root, %{
+               "artifact_id" => manifest["artifact_id"],
+               "manifest_digest" => manifest["manifest_digest"]
+             }),
+           label
   end
 
   defp id(number),

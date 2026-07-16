@@ -1,4 +1,5 @@
 use crate::{WASM_BINDGEN_SCHEMA, frame};
+use semver::Version;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,10 +9,13 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 use tree_sitter::{Node, Parser};
+use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
 const MARKER: &str = ".rekindle-attempt";
 const MANIFEST: &str = "rekindle-web-manifest-v1.json";
+const MAX_PATH_BYTES: usize = 4_096;
+const MAX_MANIFEST_STRING_BYTES: usize = 4_096;
 const BOOTSTRAP_TEMPLATE: &str = r#"export async function start(context) {
   if (!context || context.v !== 1) throw new Error("invalid Rekindle context");
   const styles = __REKINDLE_HOT_STYLES__;
@@ -700,7 +704,7 @@ fn package(request: &Value) -> OpResult<Value> {
             "bootstrap template mismatch",
         ));
     }
-    validate_manifest_base(&request["manifest_base"])?;
+    validate_manifest_base(&request["manifest_base"], false)?;
     let started = Instant::now();
     let members_root = output.path.join("members");
     fs::create_dir(&members_root).map_err(io_error)?;
@@ -789,10 +793,15 @@ fn package(request: &Value) -> OpResult<Value> {
         } else {
             "asset"
         };
+        let (mime, cache) = member_metadata(role, &relative_path).ok_or_else(|| {
+            OpError::new(
+                "unsupported_import",
+                format!("invalid role/extension pair: {relative_path}"),
+            )
+        })?;
         members.push(json!({
             "path": relative_path, "role": role, "sha256": sha256(&bytes),
-            "size": bytes.len(), "mime": mime(entry.path()),
-            "cache": if role == "bootstrap" { "no_cache" } else { "immutable" },
+            "size": bytes.len(), "mime": mime, "cache": cache,
             "source_map": Value::Null
         }));
     }
@@ -1131,7 +1140,7 @@ fn describe_tree(root: &Root, allow_marker: bool) -> OpResult<Vec<Value>> {
     Ok(files)
 }
 
-fn validate_manifest_base(value: &Value) -> OpResult<()> {
+fn validate_manifest_base(value: &Value, allow_extension: bool) -> OpResult<()> {
     const KEYS: &[&str] = &[
         "rekindle_version",
         "application_id",
@@ -1141,74 +1150,81 @@ fn validate_manifest_base(value: &Value) -> OpResult<()> {
         "host_requirements",
         "hot_styles",
     ];
-    let build = &value["build"];
-    let producer = &value["producer"];
-    let hot_styles = value["hot_styles"].as_array();
     if frame::exact_keys(value, KEYS)
         && value["target"] == "web"
-        && value["rekindle_version"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
+        && value["rekindle_version"].as_str().is_some_and(valid_semver)
         && value["application_id"]
             .as_str()
-            .is_some_and(|value| !value.is_empty())
-        && frame::exact_keys(
-            build,
-            &["build_key", "profile", "package", "binary", "features"],
-        )
-        && digest(build["build_key"].as_str())
-        && build["profile"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
-        && build["package"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
-        && build["binary"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
+            .is_some_and(valid_manifest_string)
+        && valid_build(&value["build"])
+        && (valid_canonical_web_producer(&value["producer"])
+            || (allow_extension && valid_extension_producer(&value["producer"])))
+        && value["host_requirements"] == json!({"secure_context": true, "webgpu": true})
+        && relative_strings_sorted_unique(&value["hot_styles"])
+    {
+        Ok(())
+    } else {
+        Err(OpError::new("invalid_request", "invalid manifest base"))
+    }
+}
+
+fn valid_build(build: &Value) -> bool {
+    frame::exact_keys(
+        build,
+        &["build_key", "profile", "package", "binary", "features"],
+    ) && digest(build["build_key"].as_str())
+        && ["profile", "package", "binary"]
+            .iter()
+            .all(|key| build[*key].as_str().is_some_and(valid_manifest_string))
         && build["features"]
             .as_array()
             .is_some_and(|values| !values.is_empty())
-        && strings_sorted_unique(&build["features"])
-        && frame::exact_keys(
-            producer,
-            &[
-                "kind",
-                "rustc",
-                "cargo",
-                "rust_target",
-                "wasm_bindgen",
-                "gpui_revision",
-                "helper_version",
-                "helper_protocol",
-                "compatibility_tuple_id",
-            ],
-        )
-        && producer["kind"] == "canonical_web"
-        && producer["helper_protocol"] == 1
-        && [
+        && normalized_strings_sorted_unique(&build["features"])
+}
+
+fn valid_canonical_web_producer(producer: &Value) -> bool {
+    frame::exact_keys(
+        producer,
+        &[
+            "kind",
             "rustc",
             "cargo",
             "rust_target",
             "wasm_bindgen",
             "gpui_revision",
             "helper_version",
+            "helper_protocol",
+            "compatibility_tuple_id",
+        ],
+    ) && producer["kind"] == "canonical_web"
+        && producer["helper_protocol"] == 1
+        && [
+            "rustc",
+            "cargo",
+            "rust_target",
+            "gpui_revision",
             "compatibility_tuple_id",
         ]
         .iter()
-        .all(|key| {
-            producer[*key]
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
-        })
-        && value["host_requirements"] == json!({"secure_context": true, "webgpu": true})
-        && hot_styles.is_some()
-        && string_values_sorted_unique(hot_styles.unwrap())
-    {
-        Ok(())
-    } else {
-        Err(OpError::new("invalid_request", "invalid manifest base"))
-    }
+        .all(|key| producer[*key].as_str().is_some_and(valid_manifest_string))
+        && producer["wasm_bindgen"].as_str().is_some_and(valid_semver)
+        && producer["helper_version"]
+            .as_str()
+            .is_some_and(valid_semver)
+}
+
+fn valid_extension_producer(producer: &Value) -> bool {
+    frame::exact_keys(
+        producer,
+        &["kind", "backend_id", "backend_version", "options_digest"],
+    ) && producer["kind"] == "extension"
+        && producer["backend_id"]
+            .as_str()
+            .is_some_and(valid_manifest_string)
+        && producer["backend_version"]
+            .as_str()
+            .is_some_and(valid_manifest_string)
+        && digest(producer["options_digest"].as_str())
 }
 
 fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usize, u64)> {
@@ -1243,7 +1259,7 @@ fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usi
         "host_requirements": manifest["host_requirements"],
         "hot_styles": manifest["hot_styles"]
     });
-    validate_manifest_base(&base)?;
+    validate_manifest_base(&base, true)?;
     let members = manifest["members"]
         .as_array()
         .ok_or_else(|| OpError::new("invalid_request", "invalid members"))?;
@@ -1264,18 +1280,21 @@ fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usi
             "source_map",
         ];
         let path = member["path"].as_str().unwrap_or_default();
+        let role = member["role"].as_str().unwrap_or_default();
+        let expected_metadata = member_metadata(role, path);
         if !frame::exact_keys(member, MEMBER_KEYS)
             || !relative(path)
             || previous.is_some_and(|prior: &str| prior >= path)
-            || !folded.insert(path.to_lowercase())
+            || !folded.insert(case_fold_path(path))
             || !matches!(
-                member["role"].as_str(),
-                Some("bootstrap" | "javascript" | "wasm" | "css" | "asset" | "source_map")
+                role,
+                "bootstrap" | "javascript" | "wasm" | "css" | "asset" | "source_map"
             )
             || !digest(member["sha256"].as_str())
             || member["size"].as_u64().is_none()
-            || member["mime"].as_str().is_none()
-            || !matches!(member["cache"].as_str(), Some("no_cache" | "immutable"))
+            || expected_metadata.is_none()
+            || expected_metadata
+                .is_some_and(|(mime, cache)| member["mime"] != mime || member["cache"] != cache)
             || !(member["source_map"].is_null()
                 || member["source_map"].as_str().is_some_and(relative))
         {
@@ -1531,6 +1550,9 @@ fn normalized_relative(path: &Path, root: &Path) -> OpResult<String> {
 
 fn relative(value: &str) -> bool {
     !value.is_empty()
+        && value.len() <= MAX_PATH_BYTES
+        && value.nfc().eq(value.chars())
+        && !value.chars().any(char::is_control)
         && !Path::new(value).is_absolute()
         && !value.contains('\\')
         && !value.as_bytes().contains(&0)
@@ -1548,13 +1570,34 @@ fn digest(value: Option<&str>) -> bool {
     })
 }
 
-fn strings_sorted_unique(value: &Value) -> bool {
-    value
-        .as_array()
-        .is_some_and(|values| string_values_sorted_unique(values))
+fn valid_manifest_string(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_MANIFEST_STRING_BYTES
+        && value.nfc().eq(value.chars())
+        && !value.chars().any(char::is_control)
 }
 
-fn string_values_sorted_unique(values: &[Value]) -> bool {
+fn valid_semver(value: &str) -> bool {
+    valid_manifest_string(value) && Version::parse(value).is_ok()
+}
+
+fn relative_strings_sorted_unique(value: &Value) -> bool {
+    value.as_array().is_some_and(|values| {
+        values.windows(2).all(|pair| {
+            pair[0]
+                .as_str()
+                .zip(pair[1].as_str())
+                .is_some_and(|(left, right)| left < right)
+        }) && values
+            .iter()
+            .all(|value| value.as_str().is_some_and(relative))
+    })
+}
+
+fn normalized_strings_sorted_unique(value: &Value) -> bool {
+    let Some(values) = value.as_array() else {
+        return false;
+    };
     values.windows(2).all(|pair| {
         pair[0]
             .as_str()
@@ -1562,7 +1605,11 @@ fn string_values_sorted_unique(values: &[Value]) -> bool {
             .is_some_and(|(left, right)| left < right)
     }) && values
         .iter()
-        .all(|value| value.as_str().is_some_and(relative))
+        .all(|value| value.as_str().is_some_and(valid_manifest_string))
+}
+
+fn case_fold_path(value: &str) -> String {
+    value.chars().flat_map(char::to_lowercase).collect()
 }
 
 fn no_symlink_components(path: &Path) -> bool {
@@ -1605,14 +1652,46 @@ fn sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn mime(path: &Path) -> &'static str {
-    match path.extension().and_then(|extension| extension.to_str()) {
-        Some("js") => "text/javascript",
-        Some("wasm") => "application/wasm",
-        Some("css") => "text/css",
-        Some("json") | Some("map") => "application/json",
-        Some("svg") => "image/svg+xml",
+fn member_metadata(role: &str, path: &str) -> Option<(&'static str, &'static str)> {
+    let folded = case_fold_path(path);
+    let extension = Path::new(&folded)
+        .extension()
+        .and_then(|extension| extension.to_str());
+
+    match role {
+        "bootstrap" if extension == Some("js") => {
+            Some(("text/javascript; charset=utf-8", "no_cache"))
+        }
+        "javascript" if extension == Some("js") => {
+            Some(("text/javascript; charset=utf-8", "immutable"))
+        }
+        "wasm" if extension == Some("wasm") => Some(("application/wasm", "immutable")),
+        "css" if extension == Some("css") => Some(("text/css; charset=utf-8", "immutable")),
+        "source_map" if extension == Some("map") => {
+            Some(("application/json; charset=utf-8", "immutable"))
+        }
+        "asset" if !matches!(extension, Some("js" | "wasm" | "css" | "map")) => {
+            Some((asset_mime(extension), "immutable"))
+        }
+        _ => None,
+    }
+}
+
+fn asset_mime(extension: Option<&str>) -> &'static str {
+    match extension {
         Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
         _ => "application/octet-stream",
     }
 }

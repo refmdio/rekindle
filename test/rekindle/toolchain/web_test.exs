@@ -63,7 +63,7 @@ defmodule Rekindle.Toolchain.WebTest do
       public_files: [],
       bootstrap_template: %{id: "v1", sha256: String.duplicate("a", 64)},
       output_root: output_root,
-      manifest_base: %{rekindle_version: "0.1.0"},
+      manifest_base: manifest_base(),
       limits: limits
     }
 
@@ -123,6 +123,59 @@ defmodule Rekindle.Toolchain.WebTest do
 
     assert CanonicalValue.encode!(request) ==
              ~s({"debug":true,"expected_wasm_bindgen":"0.2.121","input_root":{"device":7,"id":"11111111111111111111111111111111","mode":"read","path":"/input"},"input_wasm":{"mode":"data","path":"app.wasm","root_id":"11111111111111111111111111111111","sha256":"#{digest}","size":8},"limits":{"deadline_ms":1000,"max_files":10,"max_input_bytes":100,"max_output_bytes":200},"op":"bindgen_web","output_root":{"device":7,"id":"22222222222222222222222222222222","mode":"write_empty","path":"/output"},"output_stem":"app","payload_len":0,"request_id":"#{@request}","source_maps":"external","type":"operation","v":1})
+  end
+
+  test "admits only the exact canonical Web manifest base before helper execution", roots do
+    assert {:ok, input_root} = Web.root(roots.input, :read, id: String.duplicate("1", 32))
+    assert {:ok, wasm} = Web.file(input_root, "app.wasm")
+
+    assert {:ok, output_root} =
+             Web.prepare_output_root(roots.output, id: String.duplicate("2", 32))
+
+    assert {:ok, limits} =
+             Web.limits(
+               max_files: 10,
+               max_input_bytes: 100,
+               max_output_bytes: 200,
+               deadline_ms: 1_000
+             )
+
+    body = %{
+      bindgen_root: input_root,
+      bindgen_files: [wasm],
+      public_root: nil,
+      public_files: [],
+      bootstrap_template: Web.bootstrap_template(),
+      output_root: output_root,
+      manifest_base: manifest_base(),
+      limits: limits
+    }
+
+    assert {:ok, _, %Web{op: "package_web"}} = Web.operation("package_web", body)
+
+    invalid_bases = [
+      Map.put(manifest_base(), :unknown, true),
+      Map.put(manifest_base(), :rekindle_version, "01.0.0"),
+      Map.put(manifest_base(), :application_id, "bad\napp"),
+      Map.put(manifest_base(), :target, "desktop"),
+      put_in(manifest_base(), [:build, :build_key], "invalid"),
+      put_in(manifest_base(), [:build, :features], ["web", "alpha"]),
+      update_in(manifest_base()[:build], &Map.put(&1, :extra, true)),
+      put_in(manifest_base(), [:producer, :kind], "extension"),
+      put_in(manifest_base(), [:producer, :wasm_bindgen], "0.02.1"),
+      put_in(manifest_base(), [:producer, :helper_protocol], 2),
+      update_in(manifest_base()[:producer], &Map.put(&1, :extra, true)),
+      put_in(manifest_base(), [:host_requirements, :secure_context], false),
+      update_in(manifest_base()[:host_requirements], &Map.put(&1, :extra, true)),
+      Map.put(manifest_base(), :hot_styles, ["z.css", "a.css"]),
+      Map.put(manifest_base(), :hot_styles, ["cafe\u0301.css"]),
+      Map.put(manifest_base(), :hot_styles, [String.duplicate("a", 4_097)])
+    ]
+
+    Enum.each(invalid_bases, fn base ->
+      assert {:error, :invalid_operation} =
+               Web.operation("package_web", %{body | manifest_base: base})
+    end)
   end
 
   test "rejects missing or mismatched Root authority for input Files", roots do
@@ -290,5 +343,33 @@ defmodule Rekindle.Toolchain.WebTest do
       assert {:terminal, %{"code" => ^code}, _} =
                Web.accept(state, %{error | "code" => code})
     end
+  end
+
+  defp manifest_base do
+    %{
+      rekindle_version: "0.1.0",
+      application_id: "sample_app",
+      target: "web",
+      build: %{
+        build_key: String.duplicate("a", 64),
+        profile: "dev",
+        package: "sample_app_ui",
+        binary: "sample_app-web",
+        features: ["web"]
+      },
+      producer: %{
+        kind: "canonical_web",
+        rustc: "1.95.0",
+        cargo: "1.95.0",
+        rust_target: "wasm32-unknown-unknown",
+        wasm_bindgen: "0.2.121",
+        gpui_revision: String.duplicate("b", 40),
+        helper_version: "0.1.0",
+        helper_protocol: 1,
+        compatibility_tuple_id: "test-linux-x86_64"
+      },
+      host_requirements: %{secure_context: true, webgpu: true},
+      hot_styles: []
+    }
   end
 end
