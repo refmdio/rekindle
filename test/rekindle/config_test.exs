@@ -151,6 +151,45 @@ defmodule Rekindle.ConfigTest do
     assert_error(Config.normalize(:demo_app, output_overlap, web_dev()), :path_overlap)
   end
 
+  test "project root admission always returns a typed result" do
+    root =
+      Path.join(System.tmp_dir!(), "rekindle-project-root-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(Path.join(root, "lib"))
+    File.mkdir_p!(Path.join(root, "test"))
+    file = root <> "-file"
+    File.write!(file, "not a directory")
+    missing = root <> "-missing"
+
+    on_exit(fn ->
+      File.rm_rf!(root)
+      File.rm(file)
+    end)
+
+    for invalid <- [
+          123,
+          nil,
+          <<255>>,
+          "bad\0root",
+          "bad\nroot",
+          "cafe\u0301",
+          String.duplicate("a", 4_097),
+          missing,
+          file,
+          "/"
+        ] do
+      assert_error(
+        Config.normalize(:demo_app, web_build(), web_dev(), project_root: invalid),
+        :path_invalid
+      )
+    end
+
+    assert {:ok, project} =
+             Config.normalize(:demo_app, web_build(), web_dev(), project_root: root)
+
+    assert project.project_root == Path.expand(root)
+  end
+
   test "rejects incompatible runtime and development combinations" do
     invalid_runtime =
       desktop_build()

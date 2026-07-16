@@ -75,9 +75,8 @@ defmodule Rekindle.Config do
 
   def normalize(otp_app, build, dev, options)
       when is_atom(otp_app) and is_list(options) do
-    project_root = Keyword.get(options, :project_root, File.cwd!())
-
-    with {:ok, application_id} <- application_id(otp_app),
+    with {:ok, project_root} <- project_root(options),
+         {:ok, application_id} <- application_id(otp_app),
          {:ok, build} <- normalize_build(build),
          {:ok, dev} <- normalize_dev(dev, build, otp_app),
          :ok <- validate_path_ownership(build, project_root) do
@@ -85,7 +84,7 @@ defmodule Rekindle.Config do
        %Project{
          otp_app: otp_app,
          application_id: application_id,
-         project_root: Path.expand(project_root),
+         project_root: project_root,
          build: build,
          dev: dev
        }}
@@ -97,6 +96,40 @@ defmodule Rekindle.Config do
 
   def normalize(_otp_app, _build, _dev, _options),
     do: errors([], :config_invalid, "invalid configuration input")
+
+  defp project_root(options) do
+    case Keyword.fetch(options, :project_root) do
+      {:ok, value} -> normalize_project_root(value)
+      :error -> File.cwd() |> normalize_cwd()
+    end
+  rescue
+    _ -> error([:project_root], :path_invalid, "project root is invalid")
+  end
+
+  defp normalize_cwd({:ok, value}), do: normalize_project_root(value)
+
+  defp normalize_cwd({:error, _reason}),
+    do: error([:project_root], :path_invalid, "project root is unavailable")
+
+  defp normalize_project_root(value) when is_binary(value) do
+    if value != "" and byte_size(value) <= 4_096 and String.valid?(value) and
+         String.normalize(value, :nfc) == value and not String.contains?(value, <<0>>) and
+         not Regex.match?(~r/[\x00-\x1F\x7F]/, value) do
+      expanded = Path.expand(value)
+
+      if byte_size(expanded) <= 4_096 and Path.dirname(expanded) != expanded and
+           match?({:ok, %{type: :directory}}, File.lstat(expanded)) do
+        {:ok, expanded}
+      else
+        error([:project_root], :path_invalid, "project root must be an existing safe directory")
+      end
+    else
+      error([:project_root], :path_invalid, "project root is invalid")
+    end
+  end
+
+  defp normalize_project_root(_value),
+    do: error([:project_root], :path_invalid, "project root is invalid")
 
   defp normalize_build(nil),
     do: error([:rekindle_build], :config_missing, "rekindle_build is required")
