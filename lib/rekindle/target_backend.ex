@@ -16,6 +16,9 @@ defmodule Rekindle.TargetBackend do
   }
 
   @id_pattern ~r/\A[a-z][a-z0-9_.-]{0,127}\z/
+  @max_plan_entries 1_024
+  @max_plan_bytes 1_048_576
+  @max_plan_path_bytes 4_096
   @required_callbacks [backend_id: 0, backend_version: 0, validate: 2, plan: 2, finalize: 3]
 
   @callback backend_id() :: String.t()
@@ -81,10 +84,10 @@ defmodule Rekindle.TargetBackend do
           {:ok, ExternalPlan.t()} | {:error, ConfigError.t() | Rekindle.Failure.t()}
   def validate_plan_result({:ok, %ExternalPlan{contract_version: 1} = plan}) do
     cond do
-      not (is_binary(plan.executable) and Path.type(plan.executable) == :absolute) ->
+      not valid_absolute_path?(plan.executable) ->
         {:error, error([:backend, :plan, :executable], "plan executable must be absolute")}
 
-      not (is_list(plan.argv) and Enum.all?(plan.argv, &is_binary/1)) ->
+      not valid_argv?(plan.argv) ->
         {:error, error([:backend, :plan, :argv], "plan argv is invalid")}
 
       plan.env_mode != :replace or not valid_env_set?(plan.env_set) ->
@@ -95,7 +98,7 @@ defmodule Rekindle.TargetBackend do
           not (is_integer(plan.timeout_ms) and plan.timeout_ms > 0) ->
         {:error, error([:backend, :plan], "plan diagnostic mode or timeout is invalid")}
 
-      not valid_cwd?(plan.cwd) or not is_binary(plan.expected_manifest) ->
+      not valid_cwd?(plan.cwd) or not relative_path?(plan.expected_manifest) ->
         {:error, error([:backend, :plan], "plan cwd or expected manifest is invalid")}
 
       true ->
@@ -243,20 +246,25 @@ defmodule Rekindle.TargetBackend do
   defp callback_arity(:plan), do: 2
   defp callback_arity(:finalize), do: 3
 
-  defp valid_cwd?(%{root: root, path: path}) when root in [:project, :client, :staging],
-    do: is_binary(path) and relative_path?(path)
+  defp valid_cwd?(%{root: root, path: path} = cwd) when root in [:project, :client, :staging],
+    do: Map.keys(cwd) |> Enum.sort() == [:path, :root] and (path == "." or relative_path?(path))
 
   defp valid_cwd?(_cwd), do: false
 
   defp valid_env_set?(entries) when is_list(entries) do
-    Enum.all?(entries, fn
-      %{name: name, value: value, secret: secret?} ->
-        is_binary(name) and Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]{0,127}\z/, name) and
-          is_binary(value) and is_boolean(secret?)
+    length(entries) <= @max_plan_entries and
+      Enum.all?(entries, fn
+        %{name: name, value: value, secret: secret?} = entry ->
+          Map.keys(entry) |> Enum.sort() == [:name, :secret, :value] and
+            is_binary(name) and Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]{0,127}\z/, name) and
+            valid_plan_string?(value) and is_boolean(secret?)
 
-      _ ->
-        false
-    end) and
+        _ ->
+          false
+      end) and
+      aggregate_bytes(entries, fn entry ->
+        byte_size(entry.name) + byte_size(entry.value)
+      end) <= @max_plan_bytes and
       entries == Enum.sort_by(entries, & &1.name) and
       Enum.uniq_by(entries, & &1.name) == entries
   end
@@ -264,7 +272,35 @@ defmodule Rekindle.TargetBackend do
   defp valid_env_set?(_entries), do: false
 
   defp relative_path?(path) do
-    path != "" and Path.type(path) != :absolute and
+    is_binary(path) and path != "" and byte_size(path) <= @max_plan_path_bytes and
+      String.valid?(path) and String.normalize(path, :nfc) == path and
+      Path.type(path) != :absolute and not String.contains?(path, ["\\", <<0>>]) and
+      not Regex.match?(~r/[\x00-\x1F\x7F]/, path) and
       Enum.all?(String.split(path, "/"), &(&1 not in ["", ".", ".."]))
+  end
+
+  defp valid_absolute_path?(path) do
+    is_binary(path) and byte_size(path) <= @max_plan_path_bytes and String.valid?(path) and
+      Path.type(path) == :absolute and not String.contains?(path, <<0>>) and
+      not Regex.match?(~r/[\x00-\x1F\x7F]/, path)
+  end
+
+  defp valid_argv?(argv) when is_list(argv) do
+    length(argv) <= @max_plan_entries and Enum.all?(argv, &valid_plan_string?/1) and
+      aggregate_bytes(argv, &byte_size/1) <= @max_plan_bytes
+  end
+
+  defp valid_argv?(_argv), do: false
+
+  defp valid_plan_string?(value) do
+    is_binary(value) and byte_size(value) <= @max_plan_bytes and String.valid?(value) and
+      not String.contains?(value, <<0>>)
+  end
+
+  defp aggregate_bytes(values, size) do
+    Enum.reduce_while(values, 0, fn value, total ->
+      next = total + size.(value)
+      if next <= @max_plan_bytes, do: {:cont, next}, else: {:halt, next}
+    end)
   end
 end

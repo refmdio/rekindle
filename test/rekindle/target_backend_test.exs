@@ -125,7 +125,7 @@ defmodule Rekindle.TargetBackendTest do
     plan = %ExternalPlan{
       executable: "/usr/bin/cargo",
       argv: ["build"],
-      cwd: %{root: :client, path: "workspace"},
+      cwd: %{root: :client, path: "."},
       env_mode: :replace,
       env_set: [%{name: "PATH", value: "/usr/bin", secret: false}],
       diagnostic_mode: :cargo_json,
@@ -134,6 +134,11 @@ defmodule Rekindle.TargetBackendTest do
     }
 
     assert {:ok, ^plan} = TargetBackend.validate_plan_result({:ok, plan})
+
+    for root <- [:project, :client, :staging] do
+      assert {:ok, _} =
+               TargetBackend.validate_plan_result({:ok, %{plan | cwd: %{root: root, path: "."}}})
+    end
 
     assert {:error, %ConfigError{}} =
              TargetBackend.validate_plan_result({:ok, %{plan | env_mode: :inherit}})
@@ -144,6 +149,50 @@ defmodule Rekindle.TargetBackendTest do
 
     assert {:error, %ConfigError{}} =
              TargetBackend.validate_plan_result({:ok, %{plan | contract_version: 2}})
+
+    for manifest <- [
+          "",
+          ".",
+          "/absolute.json",
+          "../escape.json",
+          "a/../escape.json",
+          "a\\b",
+          "a\0b"
+        ] do
+      assert {:error, %ConfigError{}} =
+               TargetBackend.validate_plan_result({:ok, %{plan | expected_manifest: manifest}})
+    end
+
+    for cwd <- [
+          %{root: :client, path: ""},
+          %{root: :client, path: "../escape"},
+          %{root: :client, path: "/absolute"},
+          %{root: :unknown, path: "."},
+          %{root: :client, path: ".", extra: true}
+        ] do
+      assert {:error, %ConfigError{}} =
+               TargetBackend.validate_plan_result({:ok, %{plan | cwd: cwd}})
+    end
+
+    invalid_utf8 = <<255>>
+    oversized = String.duplicate("x", 1_048_577)
+
+    for argv <- [["ok\0bad"], [invalid_utf8], [oversized], List.duplicate("xx", 524_289)] do
+      assert {:error, %ConfigError{}} =
+               TargetBackend.validate_plan_result({:ok, %{plan | argv: argv}})
+    end
+
+    for env_set <- [
+          [%{name: "A", value: "bad\0value", secret: false}],
+          [%{name: "A", value: invalid_utf8, secret: false}],
+          [%{name: "A", value: oversized, secret: false}],
+          [%{name: "B", value: "b", secret: false}, %{name: "A", value: "a", secret: false}],
+          [%{name: "A", value: "a", secret: false}, %{name: "A", value: "b", secret: true}],
+          [%{name: "A", value: "a", secret: false, extra: true}]
+        ] do
+      assert {:error, %ConfigError{}} =
+               TargetBackend.validate_plan_result({:ok, %{plan | env_set: env_set}})
+    end
 
     failure =
       Failure.new!(target: :web, stage: :internal, code: :internal, message: "backend failed")
