@@ -1,7 +1,7 @@
 defmodule Rekindle.Toolchain.Release do
   @moduledoc false
 
-  alias Rekindle.Toolchain.{CompatibilityManifest, Executable, Helper, Installer, Rustup}
+  alias Rekindle.Toolchain.{CompatibilityManifest, Executable, Installer, Rustup}
 
   @rust_toolchain "1.95.0"
 
@@ -27,24 +27,17 @@ defmodule Rekindle.Toolchain.Release do
   end
 
   defp install_source_build(options) do
-    bytes = invoke_source_builder(options)
-    host = Installer.host()
-
-    asset = %{
-      "os" => host.os,
-      "arch" => host.arch,
-      "url" => nil,
-      "size" => byte_size(bytes),
-      "sha256" => sha256(bytes)
-    }
-
-    Installer.ensure(asset,
-      cache_root: Keyword.get_lazy(options, :cache_root, &cache_root/0),
-      rekindle_version: Helper.compatibility()["helper_version"],
-      source_build: true,
-      offline: Keyword.get(options, :offline, false),
-      source_builder: fn ^asset -> bytes end
-    )
+    with :ok <- reject_source_override(options),
+         {:ok, release} <- CompatibilityManifest.load(options),
+         {:ok, asset} <- CompatibilityManifest.host_asset(release) do
+      Installer.ensure(asset,
+        cache_root: Keyword.get_lazy(options, :cache_root, &cache_root/0),
+        rekindle_version: release.rekindle_version,
+        source_build: true,
+        offline: Keyword.get(options, :offline, false),
+        source_builder: fn ^asset -> source_bytes!() end
+      )
+    end
   rescue
     error ->
       {:error,
@@ -56,15 +49,26 @@ defmodule Rekindle.Toolchain.Release do
        )}
   end
 
-  defp invoke_source_builder(options) do
-    case Keyword.get(options, :source_builder) do
-      function when is_function(function, 0) -> function.()
-      nil -> build_source!(Keyword.get(options, :source_root))
+  defp reject_source_override(options) do
+    if Keyword.has_key?(options, :source_root) or Keyword.has_key?(options, :source_builder) do
+      {:error,
+       Rekindle.Failure.new!(
+         target: nil,
+         stage: :compatibility,
+         code: :helper_missing,
+         message: "helper source and builder are package-owned and cannot be overridden"
+       )}
+    else
+      :ok
     end
   end
 
-  defp build_source!(override) do
-    root = override || source_root!()
+  defp source_bytes! do
+    root = packaged_source_root!()
+    build_source!(root)
+  end
+
+  defp build_source!(root) do
     manifest = Path.join(root, "Cargo.toml")
     rustup = Rustup.resolve!()
 
@@ -92,22 +96,72 @@ defmodule Rekindle.Toolchain.Release do
     end
   end
 
-  defp source_root! do
-    candidates =
-      [Path.expand("crates/rekindle-toolchain"), dependency_source_root()]
-      |> Enum.reject(&is_nil/1)
+  defp packaged_source_root! do
+    root =
+      if current_project?() do
+        Mix.Project.project_file() |> Path.dirname()
+      else
+        dependency_root!()
+      end
 
-    Enum.find(candidates, &File.regular?(Path.join(&1, "Cargo.toml"))) ||
-      raise "packaged rekindle-toolchain source is unavailable"
+    source = Path.join(root, "crates/rekindle-toolchain")
+    qualify_source!(source)
+    source
   end
 
-  defp dependency_source_root do
-    if Code.ensure_loaded?(Mix.Project) do
-      case Mix.Project.deps_paths()[:rekindle] do
-        nil -> nil
-        path -> Path.join(path, "crates/rekindle-toolchain")
-      end
+  defp current_project? do
+    Code.ensure_loaded?(Mix.Project) and not is_nil(Mix.Project.get()) and
+      Mix.Project.config()[:app] == :rekindle
+  end
+
+  defp dependency_root! do
+    if Code.ensure_loaded?(Mix.Project) and not is_nil(Mix.Project.get()) do
+      Mix.Project.deps_paths()[:rekindle] ||
+        raise "packaged rekindle-toolchain source is unavailable"
+    else
+      raise "packaged rekindle-toolchain source requires Mix project context"
     end
+  end
+
+  defp qualify_source!(root) do
+    required = ~w[Cargo.toml Cargo.lock rust-toolchain.toml]
+
+    with {:ok, %{type: :directory}} <- Executable.stat(root),
+         {:ok, %{type: :directory}} <- Executable.stat(Path.join(root, "src")),
+         true <- Enum.all?(required, &qualified_source_file?(Path.join(root, &1))),
+         [_ | _] = source_files <- source_files!(Path.join(root, "src")),
+         true <- Enum.all?(source_files, &qualified_source_file?/1),
+         true <- pinned_toolchain?(Path.join(root, "rust-toolchain.toml")) do
+      :ok
+    else
+      _ -> raise "packaged rekindle-toolchain source is unavailable or unqualified"
+    end
+  end
+
+  defp source_files!(directory) do
+    directory
+    |> File.ls!()
+    |> Enum.sort()
+    |> Enum.flat_map(fn entry ->
+      path = Path.join(directory, entry)
+
+      case Executable.stat(path) do
+        {:ok, %{type: :regular}} -> [path]
+        {:ok, %{type: :directory}} -> source_files!(path)
+        _ -> raise "packaged helper source contains an unqualified node"
+      end
+    end)
+  end
+
+  defp qualified_source_file?(path) do
+    match?({:ok, _authority}, Executable.qualify(path, executable: false))
+  end
+
+  defp pinned_toolchain?(path) do
+    path
+    |> File.read!()
+    |> then(&Regex.run(~r/^channel = "([^"]+)"$/m, &1, capture: :all_but_first))
+    |> Kernel.==([@rust_toolchain])
   end
 
   defp fetch!(url, io, maximum) do
@@ -183,6 +237,4 @@ defmodule Rekindle.Toolchain.Release do
       root -> Path.join(root, "rekindle/helpers")
     end
   end
-
-  defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
 end

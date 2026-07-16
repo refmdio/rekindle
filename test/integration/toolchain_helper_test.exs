@@ -9,10 +9,28 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
   setup_all do
     cache = temp_root("installed")
     source = Path.expand("crates/rekindle-toolchain")
+    File.mkdir_p!(cache)
+    bytes = build_helper_bytes!(source)
+    host = Installer.host()
+    manifest = Path.join(cache, "compatibility.json")
+
+    asset = %{
+      "os" => host.os,
+      "arch" => host.arch,
+      "url" => "https://release.example/rekindle_toolchain",
+      "size" => byte_size(bytes),
+      "sha256" => sha256(bytes)
+    }
+
+    File.write!(manifest, Rekindle.CompatibilityFixture.encode(asset))
     on_exit(fn -> File.rm_rf!(cache) end)
 
     assert {:ok, helper} =
-             Release.ensure(true, cache_root: cache, source_root: source, offline: true)
+             Release.ensure(true,
+               cache_root: Path.join(cache, "helpers"),
+               manifest_path: manifest,
+               offline: true
+             )
 
     refute String.contains?(helper, "/target/")
     assert File.regular?(helper)
@@ -1821,6 +1839,32 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     true = byte_size(prefix) <= size
     prefix <> String.duplicate("x", size - byte_size(prefix))
   end
+
+  defp build_helper_bytes!(source) do
+    rustup = System.find_executable("rustup") || raise "rustup is required"
+    manifest = Path.join(source, "Cargo.toml")
+
+    assert {_output, 0} =
+             System.cmd(
+               rustup,
+               [
+                 "run",
+                 "1.95.0",
+                 "cargo",
+                 "build",
+                 "--release",
+                 "--locked",
+                 "--manifest-path",
+                 manifest
+               ],
+               stderr_to_stdout: true
+             )
+
+    File.read!(Path.join(source, "target/release/rekindle_toolchain"))
+  end
+
+  defp sha256(bytes),
+    do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defp temp_root(label) do
     Path.join(

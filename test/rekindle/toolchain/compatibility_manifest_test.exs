@@ -1,5 +1,5 @@
 defmodule Rekindle.Toolchain.CompatibilityManifestTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Rekindle.Toolchain.{CompatibilityManifest, Helper, Installer, Release}
 
@@ -84,28 +84,100 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
     end
   end
 
-  test "explicit source build derives its descriptor from built bytes without a URL" do
+  test "explicit source build is authorized by the release descriptor and packaged source" do
     root = temp_root()
-    bytes = "locally reproduced helper"
+    cache = Path.join(root, "cache")
+    shadow = Path.join(root, "shadow")
+    manifest_path = Path.join(root, "compatibility.json")
+    host = Installer.host()
+    source = Path.expand("crates/rekindle-toolchain")
+    bytes = build_helper_bytes!(source)
     on_exit(fn -> File.rm_rf!(root) end)
+    File.mkdir_p!(Path.join(shadow, "crates/rekindle-toolchain"))
 
-    assert {:ok, path} =
-             Release.ensure(true,
-               cache_root: root,
-               offline: true,
-               source_builder: fn -> bytes end
-             )
+    asset = %{
+      "os" => host.os,
+      "arch" => host.arch,
+      "url" => "https://release.example/rekindle_toolchain",
+      "size" => byte_size(bytes),
+      "sha256" => sha256(bytes)
+    }
+
+    File.write!(manifest_path, Rekindle.CompatibilityFixture.encode(asset))
+
+    result =
+      File.cd!(shadow, fn ->
+        Release.ensure(true,
+          manifest_path: manifest_path,
+          cache_root: cache,
+          offline: true
+        )
+      end)
+
+    assert {:ok, path} = result
 
     assert File.read!(path) == bytes
-    assert String.contains?(path, sha256(bytes))
+
+    assert String.contains?(
+             path,
+             Path.join(["0.1.0", "#{host.os}-#{host.arch}", asset["sha256"]])
+           )
+
+    mismatch = bytes <> "mismatch"
+    mismatch_asset = %{asset | "size" => byte_size(mismatch), "sha256" => sha256(mismatch)}
+    mismatch_manifest = Path.join(root, "mismatch.json")
+    File.write!(mismatch_manifest, Rekindle.CompatibilityFixture.encode(mismatch_asset))
+
+    assert {:error, %{code: :helper_checksum_mismatch}} =
+             Release.ensure(true,
+               manifest_path: mismatch_manifest,
+               cache_root: Path.join(root, "mismatch")
+             )
+
+    for override <- [
+          [source_root: Path.join(shadow, "crates/rekindle-toolchain")],
+          [source_builder: fn _ -> bytes end]
+        ] do
+      assert {:error, %{code: :helper_missing}} =
+               Release.ensure(
+                 true,
+                 [manifest_path: manifest_path, cache_root: Path.join(root, "override")] ++
+                   override
+               )
+    end
   end
 
   test "normal acquisition fails closed without the release-generated manifest" do
     assert {:error, %{code: :helper_missing}} =
              Release.ensure(false, manifest_path: "/definitely/missing/compatibility.json")
+
+    assert {:error, %{code: :helper_missing}} =
+             Release.ensure(true, manifest_path: "/definitely/missing/compatibility.json")
   end
 
   defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+
+  defp build_helper_bytes!(source) do
+    rustup = System.find_executable("rustup") || raise "rustup is required"
+
+    assert {_output, 0} =
+             System.cmd(
+               rustup,
+               [
+                 "run",
+                 "1.95.0",
+                 "cargo",
+                 "build",
+                 "--release",
+                 "--locked",
+                 "--manifest-path",
+                 Path.join(source, "Cargo.toml")
+               ],
+               stderr_to_stdout: true
+             )
+
+    File.read!(Path.join(source, "target/release/rekindle_toolchain"))
+  end
 
   defp temp_root do
     Path.join(System.tmp_dir!(), "rekindle-compat-#{System.unique_integer([:positive])}")
