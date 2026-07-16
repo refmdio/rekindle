@@ -21,7 +21,7 @@ defmodule Rekindle.Toolchain.Release do
         cache_root: Keyword.get_lazy(options, :cache_root, &cache_root/0),
         rekindle_version: release.rekindle_version,
         offline: Keyword.get(options, :offline, false),
-        fetcher: Keyword.get(options, :fetcher, &fetch!/1)
+        fetcher: Keyword.get(options, :fetcher, &fetch!/3)
       )
     end
   end
@@ -108,19 +108,70 @@ defmodule Rekindle.Toolchain.Release do
     end
   end
 
-  defp fetch!(url) do
+  defp fetch!(url, io, maximum) do
     Application.ensure_all_started(:inets)
     Application.ensure_all_started(:ssl)
 
-    case :httpc.request(:get, {String.to_charlist(url), []}, [], body_format: :binary) do
-      {:ok, {{_version, 200, _reason}, _headers, body}} ->
-        body
+    case :httpc.request(
+           :get,
+           {String.to_charlist(url), []},
+           [],
+           sync: false,
+           stream: :self
+         ) do
+      {:ok, request} -> stream_response(request, io, maximum, 0)
+      {:error, reason} -> raise "helper download failed: #{inspect(reason)}"
+    end
+  end
 
-      {:ok, {{_version, status, _reason}, _headers, _body}} ->
+  defp stream_response(request, io, maximum, received) do
+    receive do
+      {:http, {^request, :stream_start, headers}} ->
+        if Enum.any?(headers, fn {name, _value} ->
+             name |> List.to_string() |> String.downcase() == "content-range"
+           end) do
+          :httpc.cancel_request(request)
+          raise "partial helper responses are not accepted"
+        end
+
+        case Enum.find(headers, fn {name, _value} ->
+               name |> List.to_string() |> String.downcase() == "content-length"
+             end) do
+          {_name, value} ->
+            if value |> List.to_string() |> String.to_integer() > maximum do
+              :httpc.cancel_request(request)
+              raise "helper download exceeded its declared size"
+            end
+
+          nil ->
+            :ok
+        end
+
+        stream_response(request, io, maximum, received)
+
+      {:http, {^request, :stream, chunk}} ->
+        next = received + IO.iodata_length(chunk)
+
+        if next > maximum do
+          :httpc.cancel_request(request)
+          raise "helper download exceeded its declared size"
+        end
+
+        IO.binwrite(io, chunk)
+        stream_response(request, io, maximum, next)
+
+      {:http, {^request, :stream_end, _headers}} ->
+        :ok
+
+      {:http, {^request, {{_version, status, _reason}, _headers, _body}}} ->
         raise "helper download failed (#{status})"
 
-      {:error, reason} ->
+      {:http, {^request, {:error, reason}}} ->
         raise "helper download failed: #{inspect(reason)}"
+    after
+      30_000 ->
+        :httpc.cancel_request(request)
+        raise "helper download timed out"
     end
   end
 

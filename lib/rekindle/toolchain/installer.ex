@@ -30,49 +30,78 @@ defmodule Rekindle.Toolchain.Installer do
     cond do
       source_build? -> install_bytes(destination, asset, invoke!(options, :source_builder, asset))
       offline? -> {:error, :helper_missing, "verified helper is unavailable offline"}
-      true -> install_bytes(destination, asset, invoke!(options, :fetcher, asset["url"]))
+      true -> install_download(destination, asset, options)
     end
   rescue
     error -> {:error, :helper_missing, Exception.message(error)}
   end
 
-  defp acquire({:corrupt, path}, destination, asset, source_build?, offline?, options) do
+  defp acquire({:corrupt, path}, _destination, _asset, _source_build?, _offline?, _options) do
     quarantine = path <> ".quarantine-" <> Integer.to_string(System.unique_integer([:positive]))
-    File.rename(path, quarantine)
-    acquire(:missing, destination, asset, source_build?, offline?, options)
+
+    case File.rename(path, quarantine) do
+      :ok ->
+        {:error, :helper_checksum_mismatch,
+         "cached helper failed integrity or owner-only mode validation and was quarantined"}
+
+      {:error, reason} ->
+        {:error, :io_failed, "helper quarantine failed: #{reason}"}
+    end
   end
 
   defp install_bytes(destination, asset, bytes) when is_binary(bytes) do
     with :ok <- validate_bytes(bytes, asset) do
-      File.mkdir_p!(Path.dirname(destination))
-      temporary = destination <> ".tmp-" <> Integer.to_string(System.unique_integer([:positive]))
-
-      File.open!(temporary, [:write, :binary, :exclusive], fn io ->
+      with_temporary(destination, fn temporary, io ->
         IO.binwrite(io, bytes)
         :ok = :file.sync(io)
+        finalize_install(temporary, destination, asset)
       end)
+    end
+  end
 
-      File.chmod!(temporary, 0o700)
-
-      case File.ln(temporary, destination) do
-        :ok ->
-          File.rm!(temporary)
-          {:ok, destination}
-
-        {:error, :eexist} ->
-          File.rm(temporary)
-          validate_cached(destination, asset)
-
-        {:error, reason} ->
-          File.rm(temporary)
-          {:error, :io_failed, "helper installation failed: #{reason}"}
+  defp install_download(destination, asset, options) do
+    with_temporary(destination, fn temporary, io ->
+      with :ok <- invoke_fetcher(options, asset["url"], io, asset["size"], temporary),
+           :ok <- :file.sync(io),
+           :ok <- validate_file(temporary, asset) do
+        finalize_install(temporary, destination, asset)
       end
+    end)
+  end
+
+  defp with_temporary(destination, function) do
+    parent = Path.dirname(destination)
+    File.mkdir_p!(parent)
+    File.chmod!(parent, 0o700)
+    temporary = destination <> ".tmp-" <> Integer.to_string(System.unique_integer([:positive]))
+
+    try do
+      File.open!(temporary, [:write, :binary, :exclusive], fn io ->
+        File.chmod!(temporary, 0o600)
+        function.(temporary, io)
+      end)
+    after
+      if File.exists?(temporary), do: File.rm(temporary)
+    end
+  end
+
+  defp finalize_install(temporary, destination, asset) do
+    File.chmod!(temporary, 0o700)
+
+    File.open!(temporary, [:read, :binary], fn io ->
+      :ok = :file.sync(io)
+    end)
+
+    case File.ln(temporary, destination) do
+      :ok -> {:ok, destination}
+      {:error, :eexist} -> validate_cached(destination, asset)
+      {:error, reason} -> {:error, :io_failed, "helper installation failed: #{reason}"}
     end
   end
 
   defp validate_cached(path, asset) do
     with {:ok, stat} <- File.lstat(path) do
-      if stat.type == :regular and Bitwise.band(stat.mode, 0o100) != 0 do
+      if stat.type == :regular and Bitwise.band(stat.mode, 0o777) == 0o700 do
         with {:ok, bytes} <- File.read(path),
              :ok <- validate_bytes(bytes, asset) do
           {:ok, path}
@@ -85,6 +114,18 @@ defmodule Rekindle.Toolchain.Installer do
     else
       {:error, :enoent} -> :missing
       {:error, reason} -> {:error, :io_failed, "helper cache read failed: #{reason}"}
+    end
+  end
+
+  defp validate_file(path, asset) do
+    with {:ok, stat} <- File.stat(path),
+         true <- stat.size == asset["size"],
+         {:ok, bytes} <- File.read(path) do
+      validate_bytes(bytes, asset)
+    else
+      _ ->
+        {:error, :helper_checksum_mismatch,
+         "helper byte size does not match compatibility manifest"}
     end
   end
 
@@ -151,6 +192,29 @@ defmodule Rekindle.Toolchain.Installer do
     case Keyword.fetch(options, key) do
       {:ok, function} when is_function(function, 1) -> function.(argument)
       _ -> raise ArgumentError, "#{key} callback is required"
+    end
+  end
+
+  defp invoke_fetcher(options, url, io, maximum, temporary) do
+    case Keyword.fetch(options, :fetcher) do
+      {:ok, function} when is_function(function, 4) ->
+        function.(url, io, maximum, temporary)
+
+      {:ok, function} when is_function(function, 3) ->
+        function.(url, io, maximum)
+
+      {:ok, function} when is_function(function, 1) ->
+        bytes = function.(url)
+
+        if is_binary(bytes) and byte_size(bytes) <= maximum do
+          IO.binwrite(io, bytes)
+          :ok
+        else
+          {:error, :helper_checksum_mismatch, "helper download exceeded its declared size"}
+        end
+
+      _ ->
+        raise ArgumentError, "fetcher callback is required"
     end
   end
 
