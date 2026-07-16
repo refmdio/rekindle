@@ -61,6 +61,8 @@ defmodule Rekindle.Config do
     snapshot_timeout_ms: 1_000,
     restore_timeout_ms: 1_000
   ]
+  @max_collection_items 128
+  @max_configuration_depth 32
 
   @spec load(atom(), keyword()) :: {:ok, Project.t()} | {:error, [ConfigError.t()]}
   def load(otp_app, options \\ []) when is_atom(otp_app) do
@@ -75,7 +77,10 @@ defmodule Rekindle.Config do
 
   def normalize(otp_app, build, dev, options)
       when is_atom(otp_app) and is_list(options) do
-    with {:ok, project_root} <- project_root(options),
+    with :ok <- admitted_configuration_term(build, [:rekindle_build]),
+         :ok <- admitted_configuration_term(dev, [:rekindle_dev]),
+         :ok <- admitted_configuration_term(options, [:options]),
+         {:ok, project_root} <- project_root(options),
          {:ok, application_id} <- application_id(otp_app),
          {:ok, build} <- normalize_build(build),
          {:ok, dev} <- normalize_dev(dev, build, otp_app),
@@ -89,8 +94,13 @@ defmodule Rekindle.Config do
          dev: dev
        }}
     else
-      {:error, %ConfigError{} = error} -> {:error, [error]}
-      {:error, errors} when is_list(errors) -> {:error, errors}
+      {:error, %ConfigError{} = error} ->
+        {:error, [error]}
+
+      {:error, errors} when is_list(errors) ->
+        if bounded_proper_list?(errors) and Enum.all?(errors, &match?(%ConfigError{}, &1)),
+          do: {:error, errors},
+          else: errors([], :config_invalid, "invalid configuration error result")
     end
   end
 
@@ -225,7 +235,14 @@ defmodule Rekindle.Config do
       {:ok, {:external, admission}}
     else
       {:error, errors} when is_list(errors) ->
-        {:error, errors}
+        if bounded_proper_list?(errors) and Enum.all?(errors, &match?(%ConfigError{}, &1)),
+          do: {:error, errors},
+          else:
+            error(
+              path ++ [:backend],
+              :config_invalid,
+              "backend validation returned invalid errors"
+            )
 
       _ ->
         error(
@@ -331,27 +348,31 @@ defmodule Rekindle.Config do
   end
 
   defp normalize_env_set(value, path) when is_list(value) do
-    Enum.reduce_while(value, {:ok, []}, fn
-      {name, {origin, source}}, {:ok, acc}
-      when origin in [:literal, :host] and is_binary(source) ->
-        with {:ok, name} <- env_name(name, path ++ [:environment, :set]),
-             :ok <- safe_string(source, path ++ [:environment, :set, name]) do
-          {:cont, {:ok, [{name, {origin, source}} | acc]}}
-        else
-          {:error, _} = error -> {:halt, error}
-        end
+    if bounded_proper_list?(value) do
+      Enum.reduce_while(value, {:ok, []}, fn
+        {name, {origin, source}}, {:ok, acc}
+        when origin in [:literal, :host] and is_binary(source) ->
+          with {:ok, name} <- env_name(name, path ++ [:environment, :set]),
+               :ok <- safe_string(source, path ++ [:environment, :set, name]) do
+            {:cont, {:ok, [{name, {origin, source}} | acc]}}
+          else
+            {:error, _} = error -> {:halt, error}
+          end
 
-      _, _ ->
-        {:halt,
-         error(path ++ [:environment, :set], :config_invalid, "invalid environment set entry")}
-    end)
-    |> then(fn
-      {:ok, entries} ->
-        unique_sorted(Enum.reverse(entries), &elem(&1, 0), path ++ [:environment, :set])
+        _, _ ->
+          {:halt,
+           error(path ++ [:environment, :set], :config_invalid, "invalid environment set entry")}
+      end)
+      |> then(fn
+        {:ok, entries} ->
+          unique_sorted(Enum.reverse(entries), &elem(&1, 0), path ++ [:environment, :set])
 
-      error ->
-        error
-    end)
+        error ->
+          error
+      end)
+    else
+      error(path ++ [:environment, :set], :config_invalid, "environment set must be a list")
+    end
   end
 
   defp normalize_env_set(_value, path),
@@ -608,7 +629,7 @@ defmodule Rekindle.Config do
     do: {:ok, if(:web in targets, do: :endpoint, else: nil)}
 
   defp origins(value, targets, endpoint, otp_app, path) when is_list(value) do
-    if :web in targets do
+    if :web in targets and bounded_proper_list?(value) do
       with :ok <- nonempty(value, path ++ [:accepted_origins]),
            {:ok, normalized} <- normalize_origins(value, path),
            :ok <- intersects_endpoint_policy(normalized, otp_app, endpoint, path) do
@@ -669,13 +690,26 @@ defmodule Rekindle.Config do
   defp normalize_origin(_), do: :error
 
   defp intersects_endpoint_policy(origins, otp_app, endpoint, path) do
-    policy = Application.get_env(otp_app, endpoint, []) |> Keyword.get(:check_origin)
+    endpoint_config = Application.get_env(otp_app, endpoint, [])
 
+    if is_list(endpoint_config) and bounded_proper_list?(endpoint_config) and
+         Keyword.keyword?(endpoint_config) do
+      intersects_policy(origins, Keyword.get(endpoint_config, :check_origin), path)
+    else
+      error(
+        path ++ [:accepted_origins],
+        :config_invalid,
+        "endpoint origin policy is invalid"
+      )
+    end
+  end
+
+  defp intersects_policy(origins, policy, path) do
     cond do
       policy == false ->
         :ok
 
-      is_list(policy) ->
+      is_list(policy) and bounded_proper_list?(policy) ->
         if Enum.any?(origins, fn origin -> Enum.any?(policy, &policy_allows?(&1, origin)) end),
           do: :ok,
           else:
@@ -897,7 +931,7 @@ defmodule Rekindle.Config do
   end
 
   defp closed_keyword(value, allowed, path) when is_list(value) do
-    if Keyword.keyword?(value) do
+    if bounded_proper_list?(value, length(allowed)) and Keyword.keyword?(value) do
       keys = Keyword.keys(value)
 
       cond do
@@ -931,7 +965,14 @@ defmodule Rekindle.Config do
   defp exact(_value, _expected, path),
     do: error(path, :config_invalid, "configuration value is invalid")
 
-  defp nonempty(value, _path) when is_list(value) and value != [], do: :ok
+  defp nonempty(value, path) when is_list(value) do
+    cond do
+      value == [] -> error(path, :config_invalid, "value must be nonempty")
+      bounded_proper_list?(value) -> :ok
+      true -> error(path, :config_invalid, "value must be a bounded proper list")
+    end
+  end
+
   defp nonempty(_value, path), do: error(path, :config_invalid, "value must be nonempty")
 
   defp boolean(value, _path) when is_boolean(value), do: {:ok, value}
@@ -971,7 +1012,7 @@ defmodule Rekindle.Config do
   defp optional_identifier(value, path), do: identifier(value, path)
 
   defp identifiers(value, path) when is_list(value) do
-    with true <- length(value) <= 128,
+    with true <- bounded_proper_list?(value),
          true <- Enum.all?(value, &match?({:ok, _}, identifier(&1, path))) do
       unique_sorted(value, & &1, path)
     else
@@ -982,7 +1023,8 @@ defmodule Rekindle.Config do
   defp identifiers(_value, path), do: error(path, :config_invalid, "identifier list is invalid")
 
   defp env_names(value, path) when is_list(value) do
-    with true <- Enum.all?(value, &match?({:ok, _}, env_name(&1, path))) do
+    with true <- bounded_proper_list?(value),
+         true <- Enum.all?(value, &match?({:ok, _}, env_name(&1, path))) do
       unique_sorted(value, & &1, path)
     else
       _ -> error(path, :config_invalid, "environment name list is invalid")
@@ -1002,16 +1044,20 @@ defmodule Rekindle.Config do
   end
 
   defp normalized_paths(value, path) when is_list(value) do
-    Enum.reduce_while(value, {:ok, []}, fn item, {:ok, acc} ->
-      case relative_path(item, path) do
-        {:ok, item} -> {:cont, {:ok, [item | acc]}}
-        error -> {:halt, error}
-      end
-    end)
-    |> then(fn
-      {:ok, values} -> unique_sorted(Enum.reverse(values), & &1, path)
-      error -> error
-    end)
+    if bounded_proper_list?(value) do
+      Enum.reduce_while(value, {:ok, []}, fn item, {:ok, acc} ->
+        case relative_path(item, path) do
+          {:ok, item} -> {:cont, {:ok, [item | acc]}}
+          error -> {:halt, error}
+        end
+      end)
+      |> then(fn
+        {:ok, values} -> unique_sorted(Enum.reverse(values), & &1, path)
+        error -> error
+      end)
+    else
+      error(path, :path_invalid, "path list is invalid")
+    end
   end
 
   defp normalized_paths(_value, path), do: error(path, :path_invalid, "path list is invalid")
@@ -1057,12 +1103,16 @@ defmodule Rekindle.Config do
   defp safe_string(_value, path), do: error(path, :config_invalid, "string value is invalid")
 
   defp unique_sorted(value, key_fun, path) when is_list(value) do
-    keys = Enum.map(value, key_fun)
+    if bounded_proper_list?(value) do
+      keys = Enum.map(value, key_fun)
 
-    if length(keys) == MapSet.size(MapSet.new(keys)) do
-      {:ok, Enum.sort_by(value, key_fun)}
+      if length(keys) == MapSet.size(MapSet.new(keys)) do
+        {:ok, Enum.sort_by(value, key_fun)}
+      else
+        error(path, :config_invalid, "values must be unique")
+      end
     else
-      error(path, :config_invalid, "values must be unique")
+      error(path, :config_invalid, "value must be a bounded proper list")
     end
   end
 
@@ -1070,6 +1120,76 @@ defmodule Rekindle.Config do
     do: error(path, :config_invalid, "value must be a list")
 
   defp ascii?(value), do: Enum.all?(:binary.bin_to_list(value), &(&1 <= 0x7F))
+
+  defp admitted_configuration_term(value, path),
+    do: admitted_configuration_term(value, path, 0)
+
+  defp admitted_configuration_term(_value, path, depth)
+       when depth > @max_configuration_depth,
+       do: error(path, :config_invalid, "configuration nesting is too deep")
+
+  defp admitted_configuration_term([], _path, _depth), do: :ok
+
+  defp admitted_configuration_term([head | tail], path, depth),
+    do: admitted_configuration_list(head, tail, path, depth, 1)
+
+  defp admitted_configuration_term(value, path, depth) when is_tuple(value) do
+    if tuple_size(value) <= 16 do
+      value
+      |> Tuple.to_list()
+      |> admitted_configuration_sequence(path, depth + 1)
+    else
+      error(path, :config_invalid, "configuration tuple is too large")
+    end
+  end
+
+  defp admitted_configuration_term(value, path, depth) when is_map(value) do
+    if map_size(value) <= @max_collection_items do
+      value
+      |> Map.to_list()
+      |> admitted_configuration_sequence(path, depth + 1)
+    else
+      error(path, :config_invalid, "configuration map is too large")
+    end
+  end
+
+  defp admitted_configuration_term(_value, _path, _depth), do: :ok
+
+  defp admitted_configuration_list(_head, _tail, path, _depth, count)
+       when count > @max_collection_items,
+       do: error(path, :config_invalid, "configuration list is too large")
+
+  defp admitted_configuration_list(head, tail, path, depth, count) do
+    with :ok <- admitted_configuration_term(head, path, depth + 1) do
+      case tail do
+        [] -> :ok
+        [next | rest] -> admitted_configuration_list(next, rest, path, depth, count + 1)
+        _ -> error(path, :config_invalid, "configuration list must be proper")
+      end
+    end
+  end
+
+  defp admitted_configuration_sequence(values, path, depth) do
+    Enum.reduce_while(values, :ok, fn value, :ok ->
+      case admitted_configuration_term(value, path, depth) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp bounded_proper_list?(value, limit \\ @max_collection_items)
+
+  defp bounded_proper_list?(value, limit)
+       when is_integer(limit) and limit >= 0,
+       do: bounded_proper_list?(value, limit, 0)
+
+  defp bounded_proper_list?([], _limit, _count), do: true
+
+  defp bounded_proper_list?([_head | tail], limit, count) when count < limit,
+    do: bounded_proper_list?(tail, limit, count + 1)
+
+  defp bounded_proper_list?(_value, _limit, _count), do: false
 
   defp error(path, code, message), do: {:error, ConfigError.new(path, code, message)}
   defp errors(path, code, message), do: {:error, [ConfigError.new(path, code, message)]}

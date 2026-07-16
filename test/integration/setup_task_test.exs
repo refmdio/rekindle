@@ -112,6 +112,26 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     end
   end
 
+  test "the public setup adapter closes improper nested configuration lists before effects",
+       context do
+    improper =
+      build_config()
+      |> Keyword.update!(:targets, fn targets ->
+        Keyword.update!(targets, :web, fn target ->
+          Keyword.put(target, :environment, unset: ["UNUSED" | :improper_tail])
+        end)
+      end)
+
+    Application.put_env(:rekindle, :rekindle_build, improper)
+    outcome = Mix.Tasks.Rekindle.Setup.run_outcome([])
+
+    assert outcome.exit_status == 1
+    assert outcome.stdout == ""
+    assert outcome.stderr =~ "config_invalid"
+    refute outcome.stderr =~ "** ("
+    refute File.exists?(context.rustup_log)
+  end
+
   test "the public Mix task preserves semantic nonzero statuses through subprocess exit" do
     mix = System.find_executable("mix") || raise "mix executable is required"
 

@@ -123,6 +123,110 @@ defmodule Rekindle.ConfigTest do
     end
   end
 
+  test "every public configuration collection rejects improper and oversized lists without raising" do
+    improper = ["value" | :improper_tail]
+
+    external_target = [
+      package: "demo_app_ui",
+      binary: "demo-app-web",
+      features: ["web"],
+      backend: [module: Backend, options: %{"nested" => improper}],
+      projection: [mode: :phoenix_static, root: "priv/static/rekindle"]
+    ]
+
+    cases = [
+      {:build_record, [{:schema, 1} | :improper_tail], web_dev(), []},
+      {:targets, Keyword.put(web_build(), :targets, [{:web, web_target()} | :improper_tail]),
+       web_dev(), []},
+      {:target_record,
+       put_web_target(web_build(), fn _ -> [{:package, "demo_app_ui"} | :bad] end), web_dev(),
+       []},
+      {:features, put_web_target(web_build(), &Keyword.put(&1, :features, improper)), web_dev(),
+       []},
+      {:hot_styles, put_web_target(web_build(), &Keyword.put(&1, :hot_styles, improper)),
+       web_dev(), []},
+      {:toolchain,
+       put_web_target(web_build(), &Keyword.put(&1, :toolchain, [{:kind, :rustup} | :bad])),
+       web_dev(), []},
+      {:profiles,
+       put_web_target(web_build(), &Keyword.put(&1, :profiles, [{:dev, "dev"} | :bad])),
+       web_dev(), []},
+      {:environment_record,
+       put_web_target(web_build(), &Keyword.put(&1, :environment, [{:inherit, :none} | :bad])),
+       web_dev(), []},
+      {:environment_set,
+       put_web_target(
+         web_build(),
+         &Keyword.put(&1, :environment, set: [{"A", {:literal, "1"}} | :bad])
+       ), web_dev(), []},
+      {:environment_unset,
+       put_web_target(web_build(), &Keyword.put(&1, :environment, unset: improper)), web_dev(),
+       []},
+      {:environment_build_inputs,
+       put_web_target(web_build(), &Keyword.put(&1, :environment, build_inputs: improper)),
+       web_dev(), []},
+      {:environment_redact,
+       put_web_target(web_build(), &Keyword.put(&1, :environment, redact: improper)), web_dev(),
+       []},
+      {:projection,
+       put_web_target(
+         web_build(),
+         &Keyword.put(&1, :projection, [{:mode, :phoenix_static} | :bad])
+       ), web_dev(), []},
+      {:cache, Keyword.put(web_build(), :cache, [{:root, ".rekindle/cache"} | :bad]), web_dev(),
+       []},
+      {:process, Keyword.put(web_build(), :process, [{:max_cargo_builds, 2} | :bad]), web_dev(),
+       []},
+      {:backend_options, Keyword.put(web_build(), :targets, web: external_target), web_dev(), []},
+      {:runtime,
+       put_desktop_target(
+         desktop_build(),
+         &Keyword.put(&1, :runtime, [{:readiness, :ipc_v1} | :bad])
+       ), [], []},
+      {:dev_record, web_build(), [{:schema, 1} | :bad], []},
+      {:dev_targets, web_build(), Keyword.put(web_dev(), :targets, [:web | :bad]), []},
+      {:accepted_origins, web_build(),
+       Keyword.put(web_dev(), :accepted_origins, ["https://example.com" | :bad]), []},
+      {:options, web_build(), web_dev(), [{:project_root, File.cwd!()} | :bad]},
+      {:oversized,
+       put_web_target(web_build(), &Keyword.put(&1, :features, List.duplicate("web", 129))),
+       web_dev(), []}
+    ]
+
+    for {_label, build, dev, options} <- cases do
+      assert_error(Config.normalize(:demo_app, build, dev, options), :config_invalid)
+    end
+
+    previous = Application.get_env(:demo_app, Endpoint)
+    Application.put_env(:demo_app, Endpoint, check_origin: ["https://example.com" | :bad])
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:demo_app, Endpoint, previous),
+        else: Application.delete_env(:demo_app, Endpoint)
+    end)
+
+    assert_error(
+      Config.normalize(
+        :demo_app,
+        web_build(),
+        Keyword.put(web_dev(), :accepted_origins, ["https://example.com"])
+      ),
+      :config_invalid
+    )
+
+    Application.put_env(:demo_app, Endpoint, [{:check_origin, false} | :bad])
+
+    assert_error(
+      Config.normalize(
+        :demo_app,
+        web_build(),
+        Keyword.put(web_dev(), :accepted_origins, ["https://example.com"])
+      ),
+      :config_invalid
+    )
+  end
+
   test "rejects missing fields, unsafe paths, and output overlap" do
     assert_error(Config.normalize(:demo_app, nil, []), :config_missing)
 
@@ -504,6 +608,14 @@ defmodule Rekindle.ConfigTest do
         ]
       ]
     ]
+  end
+
+  defp put_web_target(build, function) do
+    Keyword.update!(build, :targets, &Keyword.update!(&1, :web, function))
+  end
+
+  defp put_desktop_target(build, function) do
+    Keyword.update!(build, :targets, &Keyword.update!(&1, :desktop, function))
   end
 
   defp web_dev do
