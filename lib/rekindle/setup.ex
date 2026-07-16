@@ -11,7 +11,7 @@ defmodule Rekindle.Setup do
       with {:ok, selected} <- selected_target(invocation.options[:target]),
            {:ok, project} <- invoke(adapters, :load_project, []),
            {:ok, targets} <- declared_targets(project, selected),
-           {:ok, target_results, progress} <- install_targets(adapters, targets),
+           {:ok, target_results, progress} <- install_targets(adapters, project, targets),
            {:ok, helper_result} <-
              invoke(adapters, :ensure_helper, [invocation.options[:source_build_helper] || false]) do
         {:ok,
@@ -56,9 +56,11 @@ defmodule Rekindle.Setup do
     end
   end
 
-  defp install_targets(adapters, targets) do
+  defp install_targets(adapters, project, targets) do
     Enum.reduce_while(targets, {:ok, [], []}, fn target, {:ok, results, progress} ->
-      case invoke(adapters, :ensure_target, [target]) do
+      config = Map.fetch!(project.build.targets, target)
+
+      case invoke(adapters, :ensure_target, [target, config]) do
         {:ok, result} ->
           {:cont,
            {:ok, results ++ [%{target: target, status: result}],

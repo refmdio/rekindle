@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Rekindle.Setup do
   use Mix.Task
 
   alias Rekindle.{Config, Failure, Setup}
-  alias Rekindle.Toolchain.Release
+  alias Rekindle.Toolchain.{Release, TargetInstaller}
 
   @impl Mix.Task
   def run(argv) do
@@ -20,7 +20,7 @@ defmodule Mix.Tasks.Rekindle.Setup do
 
     adapters = [
       load_project: fn -> Config.load(otp_app) |> map_config_error() end,
-      ensure_target: &ensure_target/1,
+      ensure_target: &ensure_target/2,
       ensure_helper: &ensure_helper/1
     ]
 
@@ -39,15 +39,7 @@ defmodule Mix.Tasks.Rekindle.Setup do
      )}
   end
 
-  defp ensure_target(target) do
-    {:error,
-     Failure.new!(
-       target: target,
-       stage: :compatibility,
-       code: :tool_missing,
-       message: "no qualified rustup execution adapter is active"
-     )}
-  end
+  defp ensure_target(target, config), do: TargetInstaller.ensure(target, config)
 
   defp ensure_helper(source_build?), do: Release.ensure(source_build?)
 end

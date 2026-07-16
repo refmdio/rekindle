@@ -9,8 +9,9 @@ defmodule Rekindle.SetupTest do
     outcome =
       Setup.run([],
         load_project: fn -> {:ok, project([:web, :desktop])} end,
-        ensure_target: fn target ->
+        ensure_target: fn target, config ->
           send(parent, {:target, target})
+          assert config == project([:web, :desktop]).build.targets[target]
           {:ok, :installed}
         end,
         ensure_helper: fn source? ->
@@ -34,7 +35,7 @@ defmodule Rekindle.SetupTest do
       outcome =
         Setup.run(["--target", value, "--source-build-helper"],
           load_project: fn -> {:ok, project([:web, :desktop])} end,
-          ensure_target: fn target ->
+          ensure_target: fn target, _config ->
             send(parent, {:target, target})
             {:ok, :present}
           end,
@@ -63,7 +64,7 @@ defmodule Rekindle.SetupTest do
         send(parent, :loaded)
         {:ok, project([:web])}
       end,
-      ensure_target: fn _ -> {:ok, :present} end,
+      ensure_target: fn _, _ -> {:ok, :present} end,
       ensure_helper: fn _ -> {:ok, :present} end
     ]
 
@@ -88,7 +89,7 @@ defmodule Rekindle.SetupTest do
     target_outcome =
       Setup.run(["--target", "web"],
         load_project: fn -> {:ok, project([:web])} end,
-        ensure_target: fn :web -> {:error, target_failure} end,
+        ensure_target: fn :web, _config -> {:error, target_failure} end,
         ensure_helper: fn _ ->
           send(parent, :helper)
           {:ok, :present}
@@ -109,7 +110,7 @@ defmodule Rekindle.SetupTest do
     helper_outcome =
       Setup.run([],
         load_project: fn -> {:ok, project([:web])} end,
-        ensure_target: fn :web -> {:ok, :present} end,
+        ensure_target: fn :web, _config -> {:ok, :present} end,
         ensure_helper: fn false -> {:error, helper_failure} end
       )
 
@@ -123,7 +124,7 @@ defmodule Rekindle.SetupTest do
 
     adapters = [
       load_project: fn -> {:ok, project([:desktop])} end,
-      ensure_target: fn :desktop ->
+      ensure_target: fn :desktop, _config ->
         :counters.add(counter, 1, 1)
         {:ok, :present}
       end,

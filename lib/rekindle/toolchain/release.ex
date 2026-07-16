@@ -1,7 +1,7 @@
 defmodule Rekindle.Toolchain.Release do
   @moduledoc false
 
-  alias Rekindle.Toolchain.{CompatibilityManifest, Helper, Installer}
+  alias Rekindle.Toolchain.{CompatibilityManifest, Helper, Installer, Rustup}
 
   @rust_toolchain "1.95.0"
 
@@ -66,7 +66,7 @@ defmodule Rekindle.Toolchain.Release do
   defp build_source!(override) do
     root = override || source_root!()
     manifest = Path.join(root, "Cargo.toml")
-    rustup = rustup!()
+    rustup = Rustup.resolve!()
 
     case System.cmd(
            rustup,
@@ -106,16 +106,6 @@ defmodule Rekindle.Toolchain.Release do
         path -> Path.join(path, "crates/rekindle-toolchain")
       end
     end
-  end
-
-  defp rustup! do
-    candidates = [
-      System.get_env("REKINDLE_RUSTUP"),
-      Path.join(System.user_home!(), ".cargo/bin/rustup")
-    ]
-
-    Enum.find(candidates, &(is_binary(&1) and Path.type(&1) == :absolute and File.regular?(&1))) ||
-      raise "qualified rustup executable is unavailable"
   end
 
   defp fetch!(url) do
