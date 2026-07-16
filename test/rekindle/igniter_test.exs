@@ -3,6 +3,7 @@ defmodule Rekindle.IgniterTest do
 
   import Igniter.Test
 
+  alias Rekindle.ClientGenerator
   alias Rekindle.Igniter, as: RekindleIgniter
 
   test "production alias preserves its prefix and replaces one terminal digest" do
@@ -125,6 +126,30 @@ defmodule Rekindle.IgniterTest do
     ignore_lines = String.split(source(reinstalled, ".gitignore"), "\n")
     assert Enum.count(ignore_lines, &(&1 == "/.rekindle/")) == 1
     assert Enum.count(ignore_lines, &(&1 == "/client/.rekindle/")) == 1
+  end
+
+  test "documented manual installation is semantically equivalent on every owned surface" do
+    automatic =
+      project(deps: ~s([{:rekindle, "~> 0.1"}]))
+      |> RekindleIgniter.install(
+        client_path: "client",
+        targets: [:web, :desktop],
+        endpoint: SampleAppWeb.Endpoint
+      )
+
+    manual = manual_project()
+
+    assert automatic.issues == []
+    assert manual.issues == []
+    assert installation_snapshot(manual) == installation_snapshot(automatic)
+
+    snapshot = installation_snapshot(manual)
+    assert snapshot.layout =~ "host-owned"
+    assert snapshot.layout =~ "Rekindle.Phoenix.Components.gpui_page"
+    assert "/_build/" in snapshot.ignores
+    assert :rekindle in snapshot.mix_dependencies
+    assert snapshot.application_children =~ "SampleApp.HostChild"
+    assert snapshot.application_children =~ "Rekindle"
   end
 
   test "client path admission is project-relative and precedes every proposal mutation" do
@@ -498,65 +523,236 @@ defmodule Rekindle.IgniterTest do
     refute source(installed, "lib/sample_app_web/endpoint.ex") =~ "Rekindle"
   end
 
+  defp manual_project do
+    client_files =
+      ClientGenerator.render(
+        application_id: "sample_app",
+        package: "sample_app_ui",
+        web_binary: "sample_app-web",
+        desktop_binary: "sample_app",
+        targets: [:web, :desktop]
+      )
+      |> Map.new(fn {path, contents} -> {Path.join("client", path), contents} end)
+
+    config_files = %{
+      "config/config.exs" => """
+      import Config
+
+      config :sample_app,
+        rekindle_build: [
+          schema: 1,
+          client: "client",
+          targets: [
+            web: [
+              package: "sample_app_ui",
+              binary: "sample_app-web",
+              toolchain: [kind: :rustup, name: "nightly-2026-04-01"],
+              rust_target: "wasm32-unknown-unknown",
+              features: ["web"],
+              default_features: false,
+              profiles: [dev: "dev", release: "release"],
+              environment: [inherit: :toolchain, set: [], unset: [], build_inputs: [], redact: []],
+              public: "client/public",
+              hot_styles: [],
+              projection: [mode: :phoenix_static, root: "priv/static/rekindle"]
+            ],
+            desktop: [
+              package: "sample_app_ui",
+              binary: "sample_app",
+              toolchain: [kind: :rustup, name: "1.95.0"],
+              features: ["desktop"],
+              default_features: false,
+              profiles: [dev: "dev", release: "release"],
+              environment: [inherit: :toolchain, set: [], unset: [], build_inputs: [], redact: []],
+              runtime: [
+                readiness: :ipc_v1,
+                startup_timeout_ms: 10_000,
+                shutdown_timeout_ms: 3_000,
+                replacement: :overlap,
+                handoff: :enabled
+              ],
+              projection: [mode: :directory, root: "dist/rekindle/desktop"]
+            ]
+          ]
+        ]
+
+      import_config "\#{config_env()}.exs"
+      """,
+      "config/dev.exs" => """
+      import Config
+
+      config :sample_app,
+        rekindle_dev: [
+          schema: 1,
+          enabled: true,
+          targets: [:web],
+          endpoint: SampleAppWeb.Endpoint,
+          accepted_origins: :endpoint
+        ]
+      """
+    }
+
+    endpoint = """
+    if code_reloading? do
+      socket "/_rekindle/socket", Rekindle.Phoenix.Socket,
+        websocket: true,
+        longpoll: false
+
+      plug Rekindle.Phoenix.DevPlug, otp_app: :sample_app
+    end
+    """
+
+    children = """
+    [SampleApp.HostChild] ++
+      if Code.ensure_loaded?(Mix) and Mix.env() != :prod do
+        [{Rekindle, otp_app: :sample_app, name: SampleApp.Rekindle}]
+      else
+        []
+      end
+    """
+
+    layout = """
+    <!doctype html>
+    <html><body><p>host-owned</p>  <Rekindle.Phoenix.Components.gpui_page otp_app={:sample_app} endpoint={SampleAppWeb.Endpoint} />
+    </body></html>
+    """
+
+    project(
+      deps: ~s([{:rekindle, "~> 0.1"}]),
+      children: children,
+      static_paths: ~s(["assets", "images", "favicon.ico", "rekindle"]),
+      endpoint_extra: endpoint,
+      assets_build: ~s(["cmd host.build", "rekindle.build web"]),
+      assets_deploy: ~s(["cmd host.deploy", "rekindle.phoenix.deploy"]),
+      layout: layout,
+      gitignore:
+        "/_build/\n/.rekindle/\n/priv/static/rekindle/\n/dist/rekindle/desktop/\n/client/.rekindle/\n",
+      extra_files: Map.merge(client_files, config_files)
+    )
+  end
+
+  defp installation_snapshot(igniter) do
+    elixir_paths = [
+      "mix.exs",
+      "config/config.exs",
+      "config/dev.exs",
+      "lib/sample_app/application.ex",
+      "lib/sample_app_web.ex",
+      "lib/sample_app_web/endpoint.ex"
+    ]
+
+    %{
+      elixir:
+        Map.new(elixir_paths, fn path ->
+          {path, igniter |> virtual_file(path) |> normalized_ast()}
+        end),
+      layout:
+        igniter
+        |> virtual_file("lib/sample_app_web/components/layouts/root.html.heex")
+        |> String.replace(~r/\s+/, " ")
+        |> String.trim(),
+      ignores:
+        igniter
+        |> virtual_file(".gitignore")
+        |> String.split("\n", trim: true)
+        |> Enum.sort(),
+      client:
+        Map.new(client_paths(), fn path ->
+          {path, virtual_file(igniter, Path.join("client", path))}
+        end),
+      mix_dependencies:
+        if(String.contains?(virtual_file(igniter, "mix.exs"), "{:rekindle,"),
+          do: [:rekindle],
+          else: []
+        ),
+      application_children:
+        igniter
+        |> virtual_file("lib/sample_app/application.ex")
+        |> Code.string_to_quoted!()
+        |> Macro.to_string()
+    }
+  end
+
+  defp normalized_ast(source) do
+    source
+    |> Code.string_to_quoted!()
+    |> Macro.prewalk(fn
+      {form, metadata, arguments} when is_list(metadata) -> {form, [], arguments}
+      node -> node
+    end)
+  end
+
   defp project(options \\ []) do
     endpoint_extra = Keyword.get(options, :endpoint_extra, "")
     static_paths = Keyword.get(options, :static_paths, "~w(assets images favicon.ico)")
     children = Keyword.get(options, :children, "[SampleApp.HostChild]")
+    deps = Keyword.get(options, :deps, "[]")
     assets_build = Keyword.get(options, :assets_build, ~s(["cmd host.build"]))
+
+    layout =
+      Keyword.get(
+        options,
+        :layout,
+        "<!doctype html>\n<html><body><p>host-owned</p></body></html>\n"
+      )
+
+    gitignore = Keyword.get(options, :gitignore, "/_build/\n")
+    extra_files = Keyword.get(options, :extra_files, %{})
 
     assets_deploy =
       Keyword.get(options, :assets_deploy, ~s(["cmd host.deploy", "phx.digest"]))
 
     test_project(
       app_name: :sample_app,
-      files: %{
-        "mix.exs" => """
-        defmodule SampleApp.MixProject do
-          use Mix.Project
+      files:
+        Map.merge(
+          %{
+            "mix.exs" => """
+            defmodule SampleApp.MixProject do
+              use Mix.Project
 
-          def project do
-            [app: :sample_app, version: "0.1.0", elixir: "~> 1.17", deps: deps(), aliases: aliases()]
-          end
+              def project do
+                [app: :sample_app, version: "0.1.0", elixir: "~> 1.17", deps: deps(), aliases: aliases()]
+              end
 
-          def application, do: [extra_applications: [:logger], mod: {SampleApp.Application, []}]
-          defp deps, do: []
+              def application, do: [extra_applications: [:logger], mod: {SampleApp.Application, []}]
+              defp deps, do: #{deps}
 
-          defp aliases do
-            [
-              unrelated: ["cmd keep"],
-              "assets.build": #{assets_build},
-              "assets.deploy": #{assets_deploy}
-            ]
-          end
-        end
-        """,
-        "lib/sample_app/application.ex" => """
-        defmodule SampleApp.Application do
-          use Application
-          def start(_type, _args) do
-            children = #{children}
-            Supervisor.start_link(children, strategy: :one_for_one)
-          end
-        end
-        """,
-        "lib/sample_app_web.ex" => """
-        defmodule SampleAppWeb do
-          def static_paths, do: #{static_paths}
-        end
-        """,
-        "lib/sample_app_web/endpoint.ex" => """
-        defmodule SampleAppWeb.Endpoint do
-          use Phoenix.Endpoint, otp_app: :sample_app
-          #{endpoint_extra}
-          plug SampleAppWeb.Router
-        end
-        """,
-        "lib/sample_app_web/components/layouts/root.html.heex" => """
-        <!doctype html>
-        <html><body><p>host-owned</p></body></html>
-        """,
-        ".gitignore" => "/_build/\n"
-      }
+              defp aliases do
+                [
+                  unrelated: ["cmd keep"],
+                  "assets.build": #{assets_build},
+                  "assets.deploy": #{assets_deploy}
+                ]
+              end
+            end
+            """,
+            "lib/sample_app/application.ex" => """
+            defmodule SampleApp.Application do
+              use Application
+              def start(_type, _args) do
+                children = #{children}
+                Supervisor.start_link(children, strategy: :one_for_one)
+              end
+            end
+            """,
+            "lib/sample_app_web.ex" => """
+            defmodule SampleAppWeb do
+              def static_paths, do: #{static_paths}
+            end
+            """,
+            "lib/sample_app_web/endpoint.ex" => """
+            defmodule SampleAppWeb.Endpoint do
+              use Phoenix.Endpoint, otp_app: :sample_app
+              #{endpoint_extra}
+              plug SampleAppWeb.Router
+            end
+            """,
+            "lib/sample_app_web/components/layouts/root.html.heex" => layout,
+            ".gitignore" => gitignore
+          },
+          extra_files
+        )
     )
   end
 
