@@ -76,7 +76,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     refute process_exists?(descendant)
   end
 
-  test "BEAM fallback removes the descendant group when the helper dies after started", %{
+  test "guardian removes the descendant group when the helper dies after started", %{
     helper: helper
   } do
     root = temp_root("helper-death")
@@ -112,7 +112,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     assert wait_process_absent(descendant, 2_000)
   end
 
-  test "parent-death protection closes the ownership race before started is admitted", %{
+  test "guardian closes the ownership race before started is admitted", %{
     helper: helper
   } do
     root = temp_root("pre-start")

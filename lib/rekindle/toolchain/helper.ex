@@ -145,7 +145,6 @@ defmodule Rekindle.Toolchain.Helper do
             end)
 
           {:error, reason} ->
-            fallback_cleanup(state, cleanup_timeout)
             close(port)
             {:error, reason}
         end
@@ -167,13 +166,11 @@ defmodule Rekindle.Toolchain.Helper do
           )
         else
           _ ->
-            fallback_cleanup(state, cleanup_timeout)
             close(port)
             {:error, :helper_protocol}
         end
 
       _other ->
-        fallback_cleanup(state, cleanup_timeout)
         close(port)
         {:error, :helper_protocol}
     end
@@ -274,59 +271,5 @@ defmodule Rekindle.Toolchain.Helper do
     :ok
   rescue
     _ -> :ok
-  end
-
-  defp fallback_cleanup(%Exec{process_group: group}, timeout) when is_integer(group) do
-    with {pkill, pgrep} <- process_group_tools() do
-      signal_group(pkill, group, "TERM")
-      deadline = monotonic_ms() + timeout
-
-      unless wait_group_absent(pgrep, group, deadline) do
-        signal_group(pkill, group, "KILL")
-        wait_group_absent(pgrep, group, deadline)
-      end
-    end
-
-    :ok
-  end
-
-  defp fallback_cleanup(_state, _timeout), do: :ok
-
-  defp wait_group_absent(pgrep, group, deadline) do
-    cond do
-      group_absent?(pgrep, group) ->
-        true
-
-      monotonic_ms() >= deadline ->
-        false
-
-      true ->
-        Process.sleep(10)
-        wait_group_absent(pgrep, group, deadline)
-    end
-  end
-
-  defp group_absent?(pgrep, group) do
-    case System.cmd(pgrep, ["-g", Integer.to_string(group)], stderr_to_stdout: true) do
-      {_output, 1} -> true
-      {_output, _status} -> false
-    end
-  end
-
-  defp signal_group(pkill, group, signal) do
-    System.cmd(
-      pkill,
-      ["-#{signal}", "-g", Integer.to_string(group)],
-      stderr_to_stdout: true
-    )
-
-    :ok
-  end
-
-  defp process_group_tools do
-    pkill = Enum.find(["/usr/bin/pkill", "/bin/pkill"], &File.regular?/1)
-    pgrep = Enum.find(["/usr/bin/pgrep", "/bin/pgrep"], &File.regular?/1)
-
-    if pkill && pgrep, do: {pkill, pgrep}, else: nil
   end
 end

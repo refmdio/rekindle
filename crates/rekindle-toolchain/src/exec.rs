@@ -1,12 +1,11 @@
-use crate::frame;
+use crate::{frame, guardian};
 use serde_json::{Map, Value, json};
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 enum StreamEvent {
     Data(&'static str, Vec<u8>),
@@ -40,7 +39,6 @@ struct ExitReport<'a> {
 const MAX_STREAM_BYTES: u64 = 1_048_576;
 
 pub fn run<R: Read>(mut input: R) -> Result<(), String> {
-    enable_subreaper()?;
     let spawn = frame::read(&mut input)?.ok_or_else(|| "missing spawn request".to_string())?;
     if !spawn.payload.is_empty() {
         return Err("spawn payload must be empty".into());
@@ -58,9 +56,7 @@ pub fn run<R: Read>(mut input: R) -> Result<(), String> {
                 .map(|v| v.as_str().unwrap()),
         )
         .current_dir(request["cwd"].as_str().unwrap())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdin(Stdio::null());
     if request["env_mode"] == "replace" {
         command.env_clear();
     }
@@ -71,31 +67,11 @@ pub fn run<R: Read>(mut input: R) -> Result<(), String> {
         let pair = pair.as_array().unwrap();
         command.env(pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
     }
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::getppid() == 1 {
-                    return Err(std::io::Error::other(
-                        "helper parent died before child ownership transfer",
-                    ));
-                }
-            }
-
-            Ok(())
-        });
-    }
-
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(_) => {
+    let terminate_grace = Duration::from_millis(request["terminate_grace_ms"].as_u64().unwrap());
+    let kill_grace = Duration::from_millis(request["kill_grace_ms"].as_u64().unwrap());
+    let mut process = match guardian::spawn(command, terminate_grace, kill_grace)? {
+        guardian::SpawnResult::Started(process) => process,
+        guardian::SpawnResult::Failed => {
             write_exit(
                 &request_id,
                 &ExitReport {
@@ -112,19 +88,32 @@ pub fn run<R: Read>(mut input: R) -> Result<(), String> {
             return Ok(());
         }
     };
-    let pgid = child.id() as i32;
     frame::write(
         &mut std::io::stdout().lock(),
         &json!({
             "v": 1, "type": "started", "request_id": request_id,
-            "payload_len": 0, "pid": child.id(), "process_group": child.id()
+            "payload_len": 0, "pid": process.pid, "process_group": process.pid
         }),
         &[],
     )?;
 
     let (sender, receiver) = mpsc::channel();
-    stream_thread(child.stdout.take().unwrap(), "stdout", sender.clone());
-    stream_thread(child.stderr.take().unwrap(), "stderr", sender);
+    stream_thread(
+        process
+            .stdout
+            .try_clone()
+            .map_err(|error| error.to_string())?,
+        "stdout",
+        sender.clone(),
+    );
+    stream_thread(
+        process
+            .stderr
+            .try_clone()
+            .map_err(|error| error.to_string())?,
+        "stderr",
+        sender,
+    );
     let mut streams = StreamState {
         stdout_sequence: 0,
         stderr_sequence: 0,
@@ -135,23 +124,15 @@ pub fn run<R: Read>(mut input: R) -> Result<(), String> {
         stdout_eof: false,
         stderr_eof: false,
     };
-    let terminate_grace = Duration::from_millis(request["terminate_grace_ms"].as_u64().unwrap());
-    let kill_grace = Duration::from_millis(request["kill_grace_ms"].as_u64().unwrap());
-    let mut status = None;
+    let mut exit = None;
     let mut cancelled = false;
-    let mut cleanup = "confirmed";
 
     loop {
         drain_streams(&receiver, &request_id, &mut streams)?;
-        if status.is_none() {
-            status = child
-                .try_wait()
-                .map_err(|error| format!("wait failed: {error}"))?;
-            if status.is_some() {
-                cleanup = cleanup_group(pgid, terminate_grace, kill_grace);
-            }
+        if exit.is_none() {
+            exit = process.try_exit()?;
         }
-        if status.is_some() && streams.stdout_eof && streams.stderr_eof {
+        if exit.is_some() && streams.stdout_eof && streams.stderr_eof {
             break;
         }
 
@@ -159,13 +140,11 @@ pub fn run<R: Read>(mut input: R) -> Result<(), String> {
             match frame::read(&mut input)? {
                 Some(cancel) => {
                     validate_cancel(&cancel, &request_id)?;
-                    cleanup = terminate(&mut child, pgid, terminate_grace, kill_grace);
-                    status = child.try_wait().map_err(|error| error.to_string())?;
+                    process.cancel()?;
                     cancelled = true;
                 }
                 None => {
-                    cleanup = terminate(&mut child, pgid, terminate_grace, kill_grace);
-                    status = child.try_wait().map_err(|error| error.to_string())?;
+                    process.cancel()?;
                     cancelled = true;
                 }
             }
@@ -173,20 +152,14 @@ pub fn run<R: Read>(mut input: R) -> Result<(), String> {
         thread::sleep(Duration::from_millis(5));
     }
 
-    let status = match status {
-        Some(status) => status,
-        None => child
-            .wait()
-            .map_err(|error| format!("wait failed: {error}"))?,
-    };
-    let (outcome, code, signal) = classify_status(status);
+    let exit = exit.ok_or_else(|| "guardian terminal report missing".to_string())?;
     write_exit(
         &request_id,
         &ExitReport {
-            outcome,
-            code,
-            signal,
-            cleanup,
+            outcome: exit.outcome,
+            code: exit.code,
+            signal: exit.signal,
+            cleanup: exit.cleanup,
             stdout_bytes: streams.stdout_bytes,
             stderr_bytes: streams.stderr_bytes,
             discarded_stdout: streams.discarded_stdout,
@@ -354,102 +327,6 @@ fn write_stream(
     Ok(())
 }
 
-fn terminate(child: &mut Child, pgid: i32, term: Duration, kill: Duration) -> &'static str {
-    signal_group(pgid, libc::SIGTERM);
-    if wait_child(child, term) {
-        return cleanup_group(pgid, Duration::ZERO, kill);
-    }
-    signal_group(pgid, libc::SIGKILL);
-    let reaped = wait_child(child, kill);
-    if reaped && group_absent(pgid) {
-        "confirmed"
-    } else {
-        "uncertain"
-    }
-}
-
-fn cleanup_group(pgid: i32, term: Duration, kill: Duration) -> &'static str {
-    if group_absent(pgid) {
-        return "confirmed";
-    }
-    signal_group(pgid, libc::SIGTERM);
-    if wait_group_absent(pgid, term) {
-        return "confirmed";
-    }
-    signal_group(pgid, libc::SIGKILL);
-    if wait_group_absent(pgid, kill) {
-        "confirmed"
-    } else {
-        "uncertain"
-    }
-}
-
-fn wait_child(child: &mut Child, duration: Duration) -> bool {
-    let deadline = Instant::now() + duration;
-    loop {
-        if child.try_wait().ok().flatten().is_some() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-}
-
-fn wait_group_absent(pgid: i32, duration: Duration) -> bool {
-    let deadline = Instant::now() + duration;
-    loop {
-        reap_descendants();
-        if group_absent(pgid) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn enable_subreaper() -> Result<(), String> {
-    let result = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "failed to enable descendant reaping: {}",
-            std::io::Error::last_os_error()
-        ))
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn enable_subreaper() -> Result<(), String> {
-    Ok(())
-}
-
-fn reap_descendants() {
-    loop {
-        let mut status = 0;
-        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if pid <= 0 {
-            break;
-        }
-    }
-}
-
-fn signal_group(pgid: i32, signal: i32) {
-    unsafe {
-        libc::kill(-pgid, signal);
-    }
-}
-
-fn group_absent(pgid: i32) -> bool {
-    let result = unsafe { libc::kill(-pgid, 0) };
-    result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-}
-
 fn stdin_ready() -> Result<bool, String> {
     let mut descriptor = libc::pollfd {
         fd: 0,
@@ -461,14 +338,6 @@ fn stdin_ready() -> Result<bool, String> {
         Err(std::io::Error::last_os_error().to_string())
     } else {
         Ok(result > 0 && descriptor.revents != 0)
-    }
-}
-
-fn classify_status(status: ExitStatus) -> (&'static str, Option<i32>, Option<i32>) {
-    if let Some(code) = status.code() {
-        ("exited", Some(code), None)
-    } else {
-        ("signaled", None, status.signal())
     }
 }
 
