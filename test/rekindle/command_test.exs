@@ -172,8 +172,8 @@ defmodule Rekindle.CommandTest do
       end)
 
     assert failed.exit_status == 1
-    assert failed.stdout == "building\n"
-    assert failed.stderr == "[web] cargo_failed: Cargo failed\n"
+    assert failed.stdout == ""
+    assert failed.stderr == "building\n[web] cargo_failed: Cargo failed\n"
   end
 
   test "JSON mode emits one canonical object and exactly one terminal union arm" do
@@ -336,6 +336,11 @@ defmodule Rekindle.CommandTest do
 
       assert_correlated_internal(outcome, log, "typed internal context")
       refute outcome.stdout <> outcome.stderr =~ "must not emit"
+
+      if argv == ["web"] do
+        assert outcome.stdout == ""
+        assert outcome.stderr =~ "contract_violation"
+      end
     end
   end
 

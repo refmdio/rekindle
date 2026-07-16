@@ -334,8 +334,8 @@ defmodule Rekindle.Command do
   defp failure_outcome(_command, false, failure, progress, exit_status) do
     %Outcome{
       exit_status: exit_status,
-      stdout: lines(progress),
-      stderr: Failure.render(failure) <> "\n",
+      stdout: "",
+      stderr: lines(progress ++ [Failure.render(failure)]),
       value: {:error, failure}
     }
   end

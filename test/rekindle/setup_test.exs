@@ -114,6 +114,8 @@ defmodule Rekindle.SetupTest do
       )
 
     assert target_outcome.exit_status == 1
+    assert target_outcome.stdout == ""
+    assert target_outcome.stderr =~ "tool_missing"
     refute_received :helper
 
     helper_failure =
@@ -132,6 +134,7 @@ defmodule Rekindle.SetupTest do
       )
 
     assert helper_outcome.exit_status == 1
+    assert helper_outcome.stdout == ""
     assert helper_outcome.stderr =~ "helper_checksum_mismatch"
   end
 
