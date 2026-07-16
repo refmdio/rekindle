@@ -426,7 +426,11 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       export const interpolated = `${import("./modules/interpolated.js")}`;
       export const nested = `${`raw ${import("./modules/nested-template.js")}`}`;
       export const templateMatcher = `${/}/.test("}")}`;
-      export default async function init() { return [lazy, wasm, matcher, template, interpolated, nested, templateMatcher]; }
+      const objectKey = { export: { from: "./missing-key.js" } };
+      const obj = { export(value) { return value; } };
+      obj.export({ from: "./missing-member.js" });
+      const property = obj.export;
+      export default async function init() { return [lazy, wasm, matcher, template, interpolated, nested, templateMatcher, objectKey, property]; }
       //# sourceMappingURL=app.js.map
       """,
       "app.js.map" => ~s({"version":3}),

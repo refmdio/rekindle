@@ -571,12 +571,13 @@ defmodule Rekindle.Toolchain.Web do
     end
   end
 
-  defp javascript_token_references([{:id, "export"} | rest], _previous, references) do
-    with {:ok, specifier} <- static_module_specifier(rest, :export) do
+  defp javascript_token_references([{:id, "export"}, form | rest], previous, references)
+       when previous != "." and form in ["{", "*"] do
+    with {:ok, specifier} <- static_module_specifier([form | rest], :export) do
       references =
         if is_nil(specifier), do: references, else: [{specifier, "esm_import", true} | references]
 
-      javascript_token_references(rest, {:id, "export"}, references)
+      javascript_token_references([form | rest], {:id, "export"}, references)
     end
   end
 
