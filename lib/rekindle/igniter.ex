@@ -86,22 +86,23 @@ if Code.ensure_loaded?(Igniter) do
 
     defp install_client(igniter, client_path, application_id, targets, options) do
       if Keyword.get(options, :no_client, false) do
-        validate_adopted_client(igniter, client_path, application_id)
+        validate_adopted_client(igniter, client_path, application_id, targets)
       else
         generate_client(igniter, client_path, application_id, targets)
       end
     end
 
-    defp validate_adopted_client(igniter, client_path, application_id) do
+    defp validate_adopted_client(igniter, client_path, application_id, targets) do
       marker = Path.join(client_path, ".rekindle-client.json")
 
-      if Igniter.exists?(igniter, marker) and adoptable_marker?(igniter, marker, application_id),
-        do: igniter,
-        else:
-          Igniter.add_issue(
-            igniter,
-            "--no-client requires a structurally adoptable #{marker} for #{application_id}"
-          )
+      if Igniter.exists?(igniter, marker) and
+           adoptable_marker?(igniter, client_path, marker, application_id, targets),
+         do: igniter,
+         else:
+           Igniter.add_issue(
+             igniter,
+             "--no-client requires a structurally adoptable #{marker} for #{application_id}"
+           )
     end
 
     defp generate_client(igniter, client_path, application_id, targets) do
@@ -311,7 +312,15 @@ if Code.ensure_loaded?(Igniter) do
                   "the selected endpoint contains a conflicting Rekindle development registration"}
 
                true ->
-                 {:ok, Common.add_code(zipper, block)}
+                 case Function.move_to_function_call_in_current_scope(
+                        zipper,
+                        :plug,
+                        [1, 2],
+                        &router_plug?/1
+                      ) do
+                   {:ok, router} -> {:ok, Common.add_code(router, block, placement: :before)}
+                   :error -> {:ok, Common.add_code(zipper, block)}
+                 end
              end
            end) do
         {:ok, igniter} ->
@@ -367,6 +376,14 @@ if Code.ensure_loaded?(Igniter) do
         String.contains?(source, "Rekindle.Phoenix.DevPlug") or
         String.contains?(source, "/_rekindle/")
     end
+
+    defp router_plug?(%{node: {:plug, _, [module | _]}}) do
+      module
+      |> Macro.to_string()
+      |> String.ends_with?("Router")
+    end
+
+    defp router_plug?(_zipper), do: false
 
     defp install_static_allowlist(igniter, _endpoint, false), do: igniter
     defp install_static_allowlist(igniter, nil, true), do: igniter
@@ -484,9 +501,11 @@ if Code.ensure_loaded?(Igniter) do
       end)
     end
 
-    defp install_aliases(igniter, web?) do
+    defp install_aliases(igniter, false), do: igniter
+
+    defp install_aliases(igniter, true) do
       igniter
-      |> maybe_append_web_build(web?)
+      |> append_web_build()
       |> TaskAliases.modify_existing_alias(:"assets.deploy", fn zipper ->
         with {:ok, value} <- Common.expand_literal(zipper),
              {:ok, updated} <- transform_assets_deploy(value) do
@@ -498,9 +517,7 @@ if Code.ensure_loaded?(Igniter) do
       end)
     end
 
-    defp maybe_append_web_build(igniter, false), do: igniter
-
-    defp maybe_append_web_build(igniter, true) do
+    defp append_web_build(igniter) do
       TaskAliases.modify_existing_alias(igniter, :"assets.build", fn zipper ->
         case Common.expand_literal(zipper) do
           {:ok, value} when is_list(value) ->
@@ -585,29 +602,76 @@ if Code.ensure_loaded?(Igniter) do
       %{igniter | rewrite: Rewrite.put!(igniter.rewrite, source)}
     end
 
-    defp adoptable_marker?(igniter, path, application_id) do
-      contents =
-        case Rewrite.source(igniter.rewrite, path) do
-          {:ok, source} ->
-            Rewrite.Source.get(source, :content)
+    defp adoptable_marker?(igniter, client_path, path, application_id, targets) do
+      contents = read_file(igniter, path)
+      target_names = Enum.map(targets, &Atom.to_string/1)
 
-          {:error, _} when is_map_key(igniter.assigns, :test_files) ->
-            igniter.assigns.test_files[path]
-
-          _ ->
-            File.read!(path)
-        end
-
-      case Jason.decode(contents) do
-        {:ok, %{"schema" => 1, "application_id" => ^application_id, "package" => package}}
-        when is_binary(package) ->
-          true
-
-        _ ->
-          false
+      with {:ok,
+            %{
+              "schema" => 1,
+              "application_id" => ^application_id,
+              "package" => package,
+              "web_binary" => web_binary,
+              "desktop_binary" => desktop_binary,
+              "targets" => ^target_names,
+              "owned_files" => owned_files
+            }}
+           when is_binary(package) and is_binary(web_binary) and is_binary(desktop_binary) and
+                  is_list(owned_files) <- Jason.decode(contents),
+           expected <-
+             ClientGenerator.render(
+               application_id: application_id,
+               package: package,
+               web_binary: web_binary,
+               desktop_binary: desktop_binary,
+               targets: targets
+             ),
+           true <- Map.fetch!(expected, ".rekindle-client.json") == contents,
+           true <- owned_files_valid?(igniter, client_path, owned_files),
+           app when is_binary(app) <- read_file(igniter, Path.join(client_path, "src/app.rs")),
+           true <- String.trim(app) != "" do
+        true
+      else
+        _ -> false
       end
     rescue
       _ -> false
+    end
+
+    defp owned_files_valid?(igniter, client_path, entries) do
+      entries != [] and
+        Enum.all?(entries, fn
+          %{"path" => ".rekindle-client.json", "template_sha256" => digest} ->
+            valid_sha256?(digest)
+
+          %{"path" => relative, "template_sha256" => digest}
+          when is_binary(relative) and is_binary(digest) ->
+            path = Path.join(client_path, relative)
+
+            valid_sha256?(digest) and Igniter.exists?(igniter, path) and
+              sha256(read_file(igniter, path)) == digest
+
+          _ ->
+            false
+        end)
+    end
+
+    defp valid_sha256?(value),
+      do: is_binary(value) and byte_size(value) == 64 and value =~ ~r/\A[0-9a-f]{64}\z/
+
+    defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+
+    defp read_file(igniter, path) do
+      case Rewrite.source(igniter.rewrite, path) do
+        {:ok, source} ->
+          Rewrite.Source.get(source, :content)
+
+        {:error, _} when is_map_key(igniter.assigns, :test_files) ->
+          Map.fetch!(igniter.assigns.test_files, path)
+
+        _ ->
+          File.read!(path)
+      end
     end
 
     defp count(value, pattern),

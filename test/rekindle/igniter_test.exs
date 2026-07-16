@@ -58,6 +58,7 @@ defmodule Rekindle.IgniterTest do
     assert endpoint =~ "if code_reloading? do"
     assert endpoint =~ ~s(socket("/_rekindle/socket", Rekindle.Phoenix.Socket)
     assert endpoint =~ "plug(Rekindle.Phoenix.DevPlug, otp_app: :sample_app)"
+    assert index(endpoint, "Rekindle.Phoenix.DevPlug") < index(endpoint, "SampleAppWeb.Router")
     assert source(installed, "lib/sample_app_web.ex") =~ ~s("rekindle")
 
     application = source(installed, "lib/sample_app/application.ex")
@@ -135,16 +136,17 @@ defmodule Rekindle.IgniterTest do
   end
 
   test "propagates explicit accepted origins and validates no-client adoption" do
-    marker =
+    client =
       Rekindle.ClientGenerator.render(
         application_id: "sample_app",
         package: "sample_app_ui",
         targets: [:web]
-      )[".rekindle-client.json"]
+      )
 
     adopted =
-      project()
-      |> Igniter.create_new_file("client/.rekindle-client.json", marker)
+      Enum.reduce(client, project(), fn {path, contents}, igniter ->
+        Igniter.create_new_file(igniter, Path.join("client", path), contents)
+      end)
       |> apply_igniter!()
       |> RekindleIgniter.install(
         client_path: "client",
@@ -157,8 +159,10 @@ defmodule Rekindle.IgniterTest do
     assert adopted.issues == []
     assert source(adopted, "config/dev.exs") =~ "https://example.test"
 
-    rejected =
+    marker_only =
       project()
+      |> Igniter.create_new_file("client/.rekindle-client.json", client[".rekindle-client.json"])
+      |> apply_igniter!()
       |> RekindleIgniter.install(
         client_path: "client",
         targets: [:web],
@@ -166,7 +170,25 @@ defmodule Rekindle.IgniterTest do
         no_client: true
       )
 
-    assert Enum.any?(rejected.issues, &String.contains?(to_string(&1), "structurally adoptable"))
+    assert Enum.any?(
+             marker_only.issues,
+             &String.contains?(to_string(&1), "structurally adoptable")
+           )
+
+    tampered =
+      adopted
+      |> Igniter.update_file("client/src/bin/web.rs", fn source ->
+        Rewrite.Source.update(source, :content, fn _ -> "fn main() {}\n" end)
+      end)
+      |> apply_igniter!()
+      |> RekindleIgniter.install(
+        client_path: "client",
+        targets: [:web],
+        endpoint: SampleAppWeb.Endpoint,
+        no_client: true
+      )
+
+    assert Enum.any?(tampered.issues, &String.contains?(to_string(&1), "structurally adoptable"))
   end
 
   test "selects the only project endpoint and matches an explicit module string" do
@@ -218,6 +240,20 @@ defmodule Rekindle.IgniterTest do
     assert Enum.any?(dynamic.issues, &String.contains?(to_string(&1), "literal top-level"))
   end
 
+  test "desktop-only installation preserves all host asset aliases" do
+    installed =
+      project()
+      |> RekindleIgniter.install(targets: [:desktop])
+      |> apply_igniter!()
+
+    mix = source(installed, "mix.exs")
+    assert mix =~ ~s("assets.build": ["cmd host.build"])
+    assert mix =~ ~s("assets.deploy": ["cmd host.deploy", "phx.digest"])
+    refute mix =~ "rekindle.build web"
+    refute mix =~ "rekindle.phoenix.deploy"
+    refute source(installed, "lib/sample_app_web/endpoint.ex") =~ "Rekindle"
+  end
+
   defp project(options \\ []) do
     endpoint_extra = Keyword.get(options, :endpoint_extra, "")
     static_paths = Keyword.get(options, :static_paths, "~w(assets images favicon.ico)")
@@ -263,6 +299,7 @@ defmodule Rekindle.IgniterTest do
         defmodule SampleAppWeb.Endpoint do
           use Phoenix.Endpoint, otp_app: :sample_app
           #{endpoint_extra}
+          plug SampleAppWeb.Router
         end
         """,
         "lib/sample_app_web/components/layouts/root.html.heex" => """
@@ -281,4 +318,5 @@ defmodule Rekindle.IgniterTest do
   end
 
   defp count(value, pattern), do: value |> String.split(pattern) |> length() |> Kernel.-(1)
+  defp index(value, pattern), do: :binary.match(value, pattern) |> elem(0)
 end
