@@ -20,8 +20,9 @@ defmodule Rekindle.Toolchain.Web do
       link.onerror = reject;
       document.head.appendChild(link);
     })));
-    const module = await import("./__REKINDLE_ENTRY__");
-    await module.default();
+    const module = await import(__REKINDLE_ENTRY__);
+    const wasm = new URL(__REKINDLE_WASM__, import.meta.url);
+    await module.default(wasm);
   }
   """
 
@@ -193,7 +194,7 @@ defmodule Rekindle.Toolchain.Web do
          :ok <- manifest_digest(manifest, terminal),
          :ok <- artifact_identity(manifest, terminal),
          :ok <- manifest_members(root, manifest),
-         :ok <- manifest_edges(manifest) do
+         :ok <- manifest_edges(root, manifest) do
       :ok
     else
       _ -> {:error, :manifest_changed}
@@ -286,18 +287,500 @@ defmodule Rekindle.Toolchain.Web do
     end
   end
 
-  defp manifest_edges(manifest) do
-    member_paths = MapSet.new(manifest["members"], & &1["path"])
+  defp manifest_edges(root, manifest) do
+    roles = Map.new(manifest["members"], &{&1["path"], &1["role"]})
 
-    valid? =
-      Enum.all?(manifest["edges"], fn edge ->
-        exact?(edge, ~w[from to kind]) and MapSet.member?(member_paths, edge["from"]) and
-          MapSet.member?(member_paths, edge["to"]) and
-          edge["kind"] in ~w[esm_import dynamic_import wasm_url source_map css_url asset_url]
+    with {:ok, expected_edges, source_maps} <- derive_graph(root, manifest, roles),
+         true <- manifest["edges"] == expected_edges,
+         true <-
+           Enum.all?(manifest["members"], fn member ->
+             member["source_map"] == Map.get(source_maps, member["path"])
+           end),
+         [javascript] <-
+           Enum.filter(expected_edges, fn edge ->
+             edge["from"] == manifest["entry"] and edge["kind"] == "dynamic_import"
+           end),
+         true <- roles[javascript["to"]] == "javascript",
+         true <- required_graph_members?(roles, expected_edges) do
+      :ok
+    else
+      _ -> {:error, :invalid_edges}
+    end
+  end
+
+  defp derive_graph(root, manifest, roles) do
+    initial =
+      Enum.reduce(manifest["hot_styles"], MapSet.new(), fn path, edges ->
+        MapSet.put(edges, {manifest["entry"], path, "css_url"})
       end)
 
-    if valid?, do: :ok, else: {:error, :invalid_edges}
+    Enum.reduce_while(roles, {:ok, initial, %{}}, fn {path, role}, {:ok, edges, maps} ->
+      parser =
+        case role do
+          role when role in ["javascript", "bootstrap"] -> &javascript_references/1
+          "css" -> &css_references/1
+          _ -> fn _ -> {:ok, []} end
+        end
+
+      with {:ok, bytes} <- File.read(Path.join([root["path"], "members", path])),
+           {:ok, references} <- parser.(bytes),
+           {:ok, next_edges, next_maps} <-
+             resolve_graph_references(path, references, roles, edges, maps) do
+        {:cont, {:ok, next_edges, next_maps}}
+      else
+        _ -> {:halt, {:error, :invalid_graph}}
+      end
+    end)
+    |> case do
+      {:ok, edges, maps} ->
+        edges =
+          edges
+          |> MapSet.to_list()
+          |> Enum.sort()
+          |> Enum.map(fn {from, to, kind} -> %{"from" => from, "to" => to, "kind" => kind} end)
+
+        if Enum.all?(edges, &valid_graph_edge?(&1, roles)),
+          do: {:ok, edges, maps},
+          else: {:error, :invalid_graph}
+
+      error ->
+        error
+    end
   end
+
+  defp resolve_graph_references(path, references, roles, edges, maps) do
+    Enum.reduce_while(references, {:ok, edges, maps}, fn {specifier, kind, module?},
+                                                         {:ok, edges, maps} ->
+      with {:ok, target} <- resolve_reference(path, specifier, module?),
+           true <- String.starts_with?(target, "https://") or Map.has_key?(roles, target),
+           {:ok, maps} <- put_source_map(maps, path, target, kind) do
+        {:cont, {:ok, MapSet.put(edges, {path, target, kind}), maps}}
+      else
+        _ -> {:halt, {:error, :invalid_graph}}
+      end
+    end)
+  end
+
+  defp put_source_map(maps, _path, _target, kind) when kind != "source_map", do: {:ok, maps}
+
+  defp put_source_map(maps, path, target, "source_map") do
+    case Map.fetch(maps, path) do
+      :error -> {:ok, Map.put(maps, path, target)}
+      {:ok, ^target} -> {:ok, maps}
+      {:ok, _other} -> {:error, :multiple_source_maps}
+    end
+  end
+
+  defp valid_graph_edge?(edge, roles) do
+    exact?(edge, ~w[from to kind]) and Map.has_key?(roles, edge["from"]) and
+      (Map.has_key?(roles, edge["to"]) or valid_https_url?(edge["to"])) and
+      edge["kind"] in ~w[esm_import dynamic_import wasm_url source_map css_url asset_url]
+  end
+
+  defp required_graph_members?(roles, edges) do
+    Enum.all?(roles, fn {path, role} ->
+      required =
+        if role == "wasm", do: "wasm_url", else: if(role == "source_map", do: "source_map")
+
+      is_nil(required) or Enum.any?(edges, &(&1["to"] == path and &1["kind"] == required))
+    end)
+  end
+
+  defp resolve_reference(from, specifier, module?) do
+    cond do
+      valid_https_url?(specifier) ->
+        {:ok, specifier}
+
+      not is_binary(specifier) or specifier == "" or
+        String.starts_with?(specifier, ["https:", "//", "/"]) or
+        String.contains?(specifier, [":", "\\", <<0>>, "?", "#", "%"]) or
+          String.match?(specifier, ~r/\s/u) ->
+        {:error, :forbidden_reference}
+
+      module? and not String.starts_with?(specifier, "./") ->
+        {:error, :bare_import}
+
+      true ->
+        relative =
+          if String.starts_with?(specifier, "./"),
+            do: binary_part(specifier, 2, byte_size(specifier) - 2),
+            else: specifier
+
+        segments = String.split(relative, "/")
+
+        if relative == "" or Enum.any?(segments, &(&1 in ["", ".", ".."])) do
+          {:error, :invalid_reference}
+        else
+          parent = Path.dirname(from)
+          {:ok, if(parent == ".", do: relative, else: parent <> "/" <> relative)}
+        end
+    end
+  end
+
+  defp valid_https_url?(value) when is_binary(value) do
+    case String.split(value, "/", parts: 4) do
+      ["https:", "", authority | _] when authority != "" ->
+        not String.contains?(value, ["\\", <<0>>, "\"", "'", "<", ">"]) and
+          not String.match?(value, ~r/\s/u)
+
+      _ ->
+        false
+    end
+  end
+
+  defp valid_https_url?(_value), do: false
+
+  defp javascript_references(bytes) when is_binary(bytes) do
+    with true <- String.valid?(bytes),
+         {:ok, tokens, comments} <- javascript_tokens(bytes),
+         {:ok, references} <- javascript_token_references(tokens, nil, []) do
+      comment_references =
+        Enum.flat_map(comments, fn comment ->
+          case source_map_reference(comment) do
+            nil -> []
+            specifier -> [{specifier, "source_map", false}]
+          end
+        end)
+
+      {:ok, references ++ comment_references}
+    else
+      _ -> {:error, :invalid_javascript}
+    end
+  end
+
+  defp javascript_tokens(bytes), do: javascript_tokens(bytes, [], [])
+
+  defp javascript_tokens(<<>>, tokens, comments),
+    do: {:ok, Enum.reverse(tokens), Enum.reverse(comments)}
+
+  defp javascript_tokens(<<byte, rest::binary>>, tokens, comments)
+       when byte in [9, 10, 12, 13, 32],
+       do: javascript_tokens(rest, tokens, comments)
+
+  defp javascript_tokens(<<"//", rest::binary>>, tokens, comments) do
+    {comment, rest} = take_until_line_end(rest)
+    javascript_tokens(rest, tokens, ["//" <> comment | comments])
+  end
+
+  defp javascript_tokens(<<"/*", rest::binary>>, tokens, comments) do
+    case take_until_marker(rest, "*/") do
+      {:ok, comment, rest} ->
+        javascript_tokens(rest, tokens, ["/*" <> comment <> "*/" | comments])
+
+      :error ->
+        {:error, :unterminated_comment}
+    end
+  end
+
+  defp javascript_tokens(<<quote, rest::binary>>, tokens, comments) when quote in [?", ?'] do
+    case take_quoted(rest, quote, [], false) do
+      {:ok, value, escaped?, rest} ->
+        token = {:string, if(escaped?, do: :escaped, else: value)}
+        javascript_tokens(rest, [token | tokens], comments)
+
+      :error ->
+        {:error, :unterminated_string}
+    end
+  end
+
+  defp javascript_tokens(<<?`, rest::binary>>, tokens, comments) do
+    case take_quoted(rest, ?`, [], false) do
+      {:ok, _value, _escaped?, rest} -> javascript_tokens(rest, [:template | tokens], comments)
+      :error -> {:error, :unterminated_template}
+    end
+  end
+
+  defp javascript_tokens(<<byte, _rest::binary>> = bytes, tokens, comments)
+       when byte in ?A..?Z or byte in ?a..?z or byte in [?_, ?$] do
+    {identifier, rest} = take_identifier(bytes, [])
+    javascript_tokens(rest, [{:id, identifier} | tokens], comments)
+  end
+
+  defp javascript_tokens(<<codepoint::utf8, rest::binary>>, tokens, comments),
+    do: javascript_tokens(rest, [<<codepoint::utf8>> | tokens], comments)
+
+  defp javascript_token_references([], _previous, references),
+    do: {:ok, Enum.reverse(references)}
+
+  defp javascript_token_references(
+         [
+           {:id, "new"},
+           {:id, "URL"},
+           "(",
+           {:string, specifier},
+           ",",
+           {:id, "import"},
+           ".",
+           {:id, "meta"},
+           ".",
+           {:id, "url"},
+           ")" | rest
+         ],
+         _previous,
+         references
+       ) do
+    with {:ok, specifier} <- literal_specifier(specifier) do
+      kind =
+        if reference_path(specifier) |> String.ends_with?(".wasm"),
+          do: "wasm_url",
+          else: "asset_url"
+
+      javascript_token_references(rest, ")", [{specifier, kind, false} | references])
+    end
+  end
+
+  defp javascript_token_references(
+         [{:id, "import"}, "(", {:string, specifier}, ")" | rest],
+         previous,
+         references
+       )
+       when previous != "." do
+    with {:ok, specifier} <- literal_specifier(specifier) do
+      javascript_token_references(
+        rest,
+        ")",
+        [{specifier, "dynamic_import", true} | references]
+      )
+    end
+  end
+
+  defp javascript_token_references([{:id, "import"}, "(" | _rest], previous, _references)
+       when previous != ".",
+       do: {:error, :nonliteral_dynamic_import}
+
+  defp javascript_token_references([{:id, "import"} | rest], previous, references)
+       when previous != "." do
+    with {:ok, specifier} <- static_module_specifier(rest, :import) do
+      references =
+        if is_nil(specifier), do: references, else: [{specifier, "esm_import", true} | references]
+
+      javascript_token_references(rest, {:id, "import"}, references)
+    end
+  end
+
+  defp javascript_token_references([{:id, "export"} | rest], _previous, references) do
+    with {:ok, specifier} <- static_module_specifier(rest, :export) do
+      references =
+        if is_nil(specifier), do: references, else: [{specifier, "esm_import", true} | references]
+
+      javascript_token_references(rest, {:id, "export"}, references)
+    end
+  end
+
+  defp javascript_token_references([token | rest], _previous, references),
+    do: javascript_token_references(rest, token, references)
+
+  defp static_module_specifier([{:string, specifier} | _rest], :import),
+    do: literal_specifier(specifier)
+
+  defp static_module_specifier(tokens, _kind), do: find_from_specifier(tokens)
+
+  defp find_from_specifier([]), do: {:ok, nil}
+  defp find_from_specifier([";" | _rest]), do: {:ok, nil}
+
+  defp find_from_specifier([{:id, "from"}, {:string, specifier} | _rest]),
+    do: literal_specifier(specifier)
+
+  defp find_from_specifier([{:id, "from"} | _rest]), do: {:error, :nonliteral_import}
+  defp find_from_specifier([_token | rest]), do: find_from_specifier(rest)
+
+  defp literal_specifier(value) when is_binary(value), do: {:ok, value}
+  defp literal_specifier(_value), do: {:error, :escaped_reference}
+
+  defp css_references(bytes) when is_binary(bytes) do
+    if String.valid?(bytes), do: css_references(bytes, false, []), else: {:error, :invalid_css}
+  end
+
+  defp css_references(_bytes), do: {:error, :invalid_css}
+
+  defp css_references(<<>>, _previous_name?, references), do: {:ok, Enum.reverse(references)}
+
+  defp css_references(<<"/*", rest::binary>>, _previous_name?, references) do
+    case take_until_marker(rest, "*/") do
+      {:ok, comment, rest} ->
+        references =
+          case source_map_reference("/*" <> comment <> "*/") do
+            nil -> references
+            specifier -> [{specifier, "source_map", false} | references]
+          end
+
+        css_references(rest, false, references)
+
+      :error ->
+        {:error, :unterminated_comment}
+    end
+  end
+
+  defp css_references(<<quote, rest::binary>>, _previous_name?, references)
+       when quote in [?", ?'] do
+    case take_quoted(rest, quote, [], false) do
+      {:ok, _value, _escaped?, rest} -> css_references(rest, false, references)
+      :error -> {:error, :unterminated_string}
+    end
+  end
+
+  defp css_references(bytes, false, references) do
+    cond do
+      css_keyword?(bytes, "@import") ->
+        rest = bytes |> binary_part(7, byte_size(bytes) - 7) |> trim_ascii_space()
+
+        with {:ok, specifier, rest} <- css_import_value(rest) do
+          css_references(rest, false, [{specifier, "css_url", false} | references])
+        end
+
+      css_keyword?(bytes, "url") ->
+        rest = bytes |> binary_part(3, byte_size(bytes) - 3) |> trim_ascii_space()
+
+        with {:ok, specifier, rest} <- css_url_value(rest) do
+          css_references(rest, false, [{specifier, "asset_url", false} | references])
+        end
+
+      true ->
+        css_advance(bytes, references)
+    end
+  end
+
+  defp css_references(bytes, _previous_name?, references), do: css_advance(bytes, references)
+
+  defp css_advance(<<byte, rest::binary>>, references) when byte < 128,
+    do: css_references(rest, css_name_byte?(byte), references)
+
+  defp css_advance(<<_codepoint::utf8, rest::binary>>, references),
+    do: css_references(rest, true, references)
+
+  defp css_import_value(<<quote, rest::binary>>) when quote in [?", ?'] do
+    case take_quoted(rest, quote, [], false) do
+      {:ok, value, false, rest} -> {:ok, value, rest}
+      _ -> {:error, :invalid_css_import}
+    end
+  end
+
+  defp css_import_value(bytes) do
+    if css_keyword?(bytes, "url") do
+      bytes
+      |> binary_part(3, byte_size(bytes) - 3)
+      |> trim_ascii_space()
+      |> css_url_value()
+    else
+      {:error, :invalid_css_import}
+    end
+  end
+
+  defp css_url_value(<<?(, rest::binary>>) do
+    rest = trim_ascii_space(rest)
+
+    case rest do
+      <<quote, quoted::binary>> when quote in [?", ?'] ->
+        with {:ok, value, false, rest} <- take_quoted(quoted, quote, [], false),
+             rest <- trim_ascii_space(rest),
+             <<?), rest::binary>> <- rest do
+          {:ok, value, rest}
+        else
+          _ -> {:error, :invalid_css_url}
+        end
+
+      _ ->
+        case :binary.match(rest, ")") do
+          {position, 1} ->
+            value = rest |> binary_part(0, position) |> String.trim()
+            tail = binary_part(rest, position + 1, byte_size(rest) - position - 1)
+
+            if value != "" and not String.contains?(value, ["\\", "'", "\"", "("]),
+              do: {:ok, value, tail},
+              else: {:error, :invalid_css_url}
+
+          :nomatch ->
+            {:error, :invalid_css_url}
+        end
+    end
+  end
+
+  defp css_url_value(_bytes), do: {:error, :invalid_css_url}
+
+  defp css_keyword?(bytes, keyword) when byte_size(bytes) >= byte_size(keyword) do
+    prefix = binary_part(bytes, 0, byte_size(keyword))
+    suffix = binary_part(bytes, byte_size(keyword), byte_size(bytes) - byte_size(keyword))
+
+    String.downcase(prefix, :ascii) == keyword and
+      case suffix do
+        <<byte, _rest::binary>> -> not css_name_byte?(byte)
+        <<>> -> true
+      end
+  end
+
+  defp css_keyword?(_bytes, _keyword), do: false
+
+  defp css_name_byte?(byte),
+    do: byte in ?A..?Z or byte in ?a..?z or byte in ?0..?9 or byte in [?_, ?-]
+
+  defp take_identifier(<<byte, rest::binary>>, bytes)
+       when byte in ?A..?Z or byte in ?a..?z or byte in ?0..?9 or byte in [?_, ?$],
+       do: take_identifier(rest, [byte | bytes])
+
+  defp take_identifier(rest, bytes),
+    do: {bytes |> Enum.reverse() |> :erlang.list_to_binary(), rest}
+
+  defp take_quoted(<<>>, _quote, _bytes, _escaped?), do: :error
+
+  defp take_quoted(<<?\\, byte, rest::binary>>, quote, bytes, _escaped?),
+    do: take_quoted(rest, quote, [byte, ?\\ | bytes], true)
+
+  defp take_quoted(<<quote, rest::binary>>, quote, bytes, escaped?),
+    do: {:ok, bytes |> Enum.reverse() |> :erlang.list_to_binary(), escaped?, rest}
+
+  defp take_quoted(<<byte, rest::binary>>, quote, bytes, escaped?),
+    do: take_quoted(rest, quote, [byte | bytes], escaped?)
+
+  defp take_until_line_end(bytes) do
+    case :binary.match(bytes, ["\n", "\r"]) do
+      {position, 1} ->
+        {binary_part(bytes, 0, position),
+         binary_part(bytes, position + 1, byte_size(bytes) - position - 1)}
+
+      :nomatch ->
+        {bytes, <<>>}
+    end
+  end
+
+  defp take_until_marker(bytes, marker) do
+    case :binary.match(bytes, marker) do
+      {position, size} ->
+        {:ok, binary_part(bytes, 0, position),
+         binary_part(bytes, position + size, byte_size(bytes) - position - size)}
+
+      :nomatch ->
+        :error
+    end
+  end
+
+  defp source_map_reference(comment) do
+    content =
+      comment
+      |> String.trim_leading("//")
+      |> String.trim_leading("/*")
+      |> String.trim_trailing("*/")
+      |> String.trim()
+
+    case content do
+      "# sourceMappingURL=" <> value -> nonempty_trim(value)
+      "@ sourceMappingURL=" <> value -> nonempty_trim(value)
+      _ -> nil
+    end
+  end
+
+  defp nonempty_trim(value) do
+    case String.trim(value) do
+      "" -> nil
+      value -> value
+    end
+  end
+
+  defp reference_path(value), do: value |> String.split(["?", "#"], parts: 2) |> hd()
+
+  defp trim_ascii_space(<<byte, rest::binary>>) when byte in [9, 10, 12, 13, 32],
+    do: trim_ascii_space(rest)
+
+  defp trim_ascii_space(bytes), do: bytes
 
   defp domain_digest(domain, value),
     do:

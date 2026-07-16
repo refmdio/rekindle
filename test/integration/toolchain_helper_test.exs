@@ -405,6 +405,187 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
              Helper.run_web(internal_helper, request, state)
   end
 
+  test "web-v1 derives the exact transitive JavaScript and CSS graph from member bytes", %{
+    helper: helper
+  } do
+    root = temp_root("web-graph")
+    bindgen = Path.join(root, "bindgen")
+    public = Path.join(root, "public")
+    output = Path.join(root, "output")
+    Enum.each([bindgen, public, output], &File.mkdir_p!/1)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    write_tree(bindgen, %{
+      "app.js" => """
+      import "./modules/static.js";
+      export { value } from "./modules/exported.js";
+      const lazy = import("./modules/lazy.js");
+      const wasm = new URL("./app_bg.wasm", import.meta.url);
+      export default async function init() { return [lazy, wasm]; }
+      //# sourceMappingURL=app.js.map
+      """,
+      "app.js.map" => ~s({"version":3}),
+      "app_bg.wasm" => wasm_module()
+    })
+
+    write_tree(public, %{
+      "modules/static.js" => ~s(import "./nested.js"; export const value = 1;),
+      "modules/exported.js" => "export const value = 2;",
+      "modules/lazy.js" => "export const value = 3;",
+      "modules/nested.js" => "export const value = 4;",
+      "styles/app.css" => """
+      @import "./theme.css";
+      .hero { background: url("./image.png"); mask: url("https://cdn.example/mask.svg"); }
+      /*# sourceMappingURL=app.css.map */
+      """,
+      "styles/theme.css" => ~s|@import url("https://cdn.example/theme.css");|,
+      "styles/image.png" => <<1, 2, 3>>,
+      "styles/app.css.map" => ~s({"version":3})
+    })
+
+    assert {:ok, bindgen_root} = Web.root(bindgen, :read, id: id(70))
+    assert {:ok, public_root} = Web.root(public, :read, id: id(71))
+    bindgen_files = web_files(bindgen_root, Map.keys(read_tree(bindgen)))
+    public_files = web_files(public_root, Map.keys(read_tree(public)))
+    assert {:ok, output_root} = Web.prepare_output_root(output, id: id(72))
+
+    assert {:ok, request, state} =
+             package_operation(
+               bindgen_root,
+               bindgen_files,
+               public_root,
+               public_files,
+               output_root,
+               hot_styles: ["styles/app.css"]
+             )
+
+    assert {:ok, %{"type" => "operation_ok"} = terminal, []} =
+             Helper.run_web(helper, request, state)
+
+    manifest =
+      output
+      |> Path.join("rekindle-web-manifest-v1.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    expected = [
+      {"app.js", "app.js.map", "source_map"},
+      {"app.js", "app_bg.wasm", "wasm_url"},
+      {"app.js", "modules/exported.js", "esm_import"},
+      {"app.js", "modules/lazy.js", "dynamic_import"},
+      {"app.js", "modules/static.js", "esm_import"},
+      {"entry.js", "app.js", "dynamic_import"},
+      {"entry.js", "app_bg.wasm", "wasm_url"},
+      {"entry.js", "styles/app.css", "css_url"},
+      {"modules/static.js", "modules/nested.js", "esm_import"},
+      {"styles/app.css", "https://cdn.example/mask.svg", "asset_url"},
+      {"styles/app.css", "styles/app.css.map", "source_map"},
+      {"styles/app.css", "styles/image.png", "asset_url"},
+      {"styles/app.css", "styles/theme.css", "css_url"},
+      {"styles/theme.css", "https://cdn.example/theme.css", "css_url"}
+    ]
+
+    assert Enum.map(manifest["edges"], &{&1["from"], &1["to"], &1["kind"]}) ==
+             Enum.sort(expected)
+
+    assert :ok = Web.revalidate_manifest(output_root, terminal)
+
+    forged = update_in(manifest["edges"], &tl/1)
+    forged = put_in(forged["manifest_digest"], web_manifest_digest(forged))
+
+    File.write!(
+      Path.join(output, "rekindle-web-manifest-v1.json"),
+      CanonicalValue.encode!(forged)
+    )
+
+    assert {:error, :manifest_changed} =
+             Web.revalidate_manifest(output_root, %{
+               "artifact_id" => terminal["artifact_id"],
+               "manifest_digest" => forged["manifest_digest"]
+             })
+  end
+
+  test "web-v1 rejects forbidden and unresolved JavaScript and CSS references", %{
+    helper: helper
+  } do
+    root = temp_root("web-forbidden-graph")
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    cases = [
+      {"bare", ~s(import "react";)},
+      {"npm", ~s(import "npm:react";)},
+      {"parent", ~s(import "../outside.js";)},
+      {"data", ~s|new URL("data:text/plain,x", import.meta.url);|},
+      {"javascript", ~s|new URL("javascript:alert(1)", import.meta.url);|},
+      {"filesystem", ~s|new URL("file:///tmp/member", import.meta.url);|},
+      {"absolute", ~s(import "/absolute.js";)},
+      {"unresolved", ~s(import "./missing.js";)},
+      {"dynamic", "const path = './missing.js'; import(path);"}
+    ]
+
+    for {{label, reference}, number} <- Enum.with_index(cases, 80) do
+      bindgen = Path.join(root, "#{label}-bindgen")
+      output = Path.join(root, "#{label}-output")
+      Enum.each([bindgen, output], &File.mkdir_p!/1)
+
+      write_tree(bindgen, %{
+        "app.js" => reference <> "\nexport default async function init() {}\n",
+        "app_bg.wasm" => wasm_module()
+      })
+
+      assert {:ok, bindgen_root} = Web.root(bindgen, :read, id: id(number))
+      bindgen_files = web_files(bindgen_root, ["app.js", "app_bg.wasm"])
+      assert {:ok, output_root} = Web.prepare_output_root(output, id: id(number + 100))
+
+      assert {:ok, request, state} =
+               package_operation(bindgen_root, bindgen_files, nil, [], output_root)
+
+      assert {:ok, %{"type" => "operation_error", "code" => "unsupported_import"}, []} =
+               Helper.run_web(helper, request, state)
+    end
+
+    bindgen = Path.join(root, "css-bindgen")
+    public = Path.join(root, "css-public")
+
+    write_tree(bindgen, %{
+      "app.js" => "export default async function init() {}",
+      "app_bg.wasm" => wasm_module()
+    })
+
+    for {reference, number} <-
+          Enum.with_index(
+            [
+              ~s(@import "../outside.css";),
+              ~s|body { background: url("data:image/png,x"); }|,
+              ~s|body { background: url("javascript:alert(1)"); }|,
+              ~s|body { background: url("file:///tmp/member"); }|,
+              ~s|body { background: url("./missing.png"); }|
+            ],
+            200
+          ) do
+      output = Path.join(root, "css-output-#{number}")
+      File.rm_rf!(public)
+      File.mkdir_p!(output)
+      write_tree(public, %{"styles/app.css" => reference})
+      assert {:ok, bindgen_root} = Web.root(bindgen, :read, id: id(number))
+      assert {:ok, public_root} = Web.root(public, :read, id: id(number + 100))
+      assert {:ok, output_root} = Web.prepare_output_root(output, id: id(number + 200))
+
+      assert {:ok, request, state} =
+               package_operation(
+                 bindgen_root,
+                 web_files(bindgen_root, ["app.js", "app_bg.wasm"]),
+                 public_root,
+                 web_files(public_root, ["styles/app.css"]),
+                 output_root,
+                 hot_styles: ["styles/app.css"]
+               )
+
+      assert {:ok, %{"type" => "operation_error", "code" => "unsupported_import"}, []} =
+               Helper.run_web(helper, request, state)
+    end
+  end
+
   test "web-v1 performs bindgen, package, verify, and detects post-package tampering", %{
     helper: helper
   } do
@@ -550,7 +731,14 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     )
   end
 
-  defp package_operation(bindgen_root, bindgen_files, public_root, public_files, output_root) do
+  defp package_operation(
+         bindgen_root,
+         bindgen_files,
+         public_root,
+         public_files,
+         output_root,
+         options \\ []
+       ) do
     Web.operation(
       "package_web",
       %{
@@ -560,7 +748,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
         public_files: public_files,
         bootstrap_template: Web.bootstrap_template(),
         output_root: output_root,
-        manifest_base: manifest_base(),
+        manifest_base: manifest_base(Keyword.get(options, :hot_styles, [])),
         limits: limits()
       },
       request_id: @request
@@ -635,7 +823,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
   defp wasm_module, do: <<0, 97, 115, 109, 1, 0, 0, 0>>
 
-  defp manifest_base do
+  defp manifest_base(hot_styles \\ []) do
     %{
       rekindle_version: "0.1.0",
       application_id: "sample_app",
@@ -659,8 +847,44 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
         compatibility_tuple_id: "test-linux-x86_64"
       },
       host_requirements: %{secure_context: true, webgpu: true},
-      hot_styles: []
+      hot_styles: hot_styles
     }
+  end
+
+  defp write_tree(root, files) do
+    Enum.each(files, fn {path, bytes} ->
+      destination = Path.join(root, path)
+      File.mkdir_p!(Path.dirname(destination))
+      File.write!(destination, bytes)
+    end)
+  end
+
+  defp read_tree(root) do
+    root
+    |> Path.join("**/*")
+    |> Path.wildcard()
+    |> Enum.reject(&File.dir?/1)
+    |> Map.new(&{Path.relative_to(&1, root), File.read!(&1)})
+  end
+
+  defp web_files(root, paths) do
+    paths
+    |> Enum.sort()
+    |> Enum.map(fn path ->
+      {:ok, descriptor} = Web.file(root, path)
+      descriptor
+    end)
+  end
+
+  defp web_manifest_digest(manifest) do
+    :crypto.hash(
+      :sha256,
+      [
+        "rekindle-web-manifest-v1\0",
+        manifest |> Map.delete("manifest_digest") |> CanonicalValue.encode!()
+      ]
+    )
+    |> Base.encode16(case: :lower)
   end
 
   defp id(number),

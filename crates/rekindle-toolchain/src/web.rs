@@ -7,6 +7,7 @@ use std::io::Read;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
+use tree_sitter::{Node, Parser};
 use walkdir::WalkDir;
 
 const MARKER: &str = ".rekindle-attempt";
@@ -20,10 +21,23 @@ const BOOTSTRAP_TEMPLATE: &str = r#"export async function start(context) {
     link.onerror = reject;
     document.head.appendChild(link);
   })));
-  const module = await import("./__REKINDLE_ENTRY__");
-  await module.default();
+  const module = await import(__REKINDLE_ENTRY__);
+  const wasm = new URL(__REKINDLE_WASM__, import.meta.url);
+  await module.default(wasm);
 }
 "#;
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct GraphEdge {
+    from: String,
+    to: String,
+    kind: &'static str,
+}
+
+struct DerivedGraph {
+    edges: BTreeSet<GraphEdge>,
+    source_maps: BTreeMap<String, String>,
+}
 
 pub fn run<R: Read>(mut input: R) -> Result<(), String> {
     let operation = frame::read(&mut input)?.ok_or_else(|| "missing web operation".to_string())?;
@@ -75,6 +89,7 @@ fn stdin_has_extra() -> Result<bool, String> {
     }
 }
 
+#[derive(Debug)]
 struct OpError {
     code: &'static str,
     message: String,
@@ -233,6 +248,399 @@ fn identity_mappings(source: &str) -> String {
         .join(";")
 }
 
+fn derive_graph(
+    members_root: &Path,
+    member_roles: &BTreeMap<String, String>,
+    entry: &str,
+    hot_styles: &[Value],
+) -> OpResult<DerivedGraph> {
+    let mut graph = DerivedGraph {
+        edges: BTreeSet::new(),
+        source_maps: BTreeMap::new(),
+    };
+    for style in hot_styles {
+        let style = style
+            .as_str()
+            .ok_or_else(|| OpError::new("invalid_request", "invalid hot style"))?;
+        add_edge(&mut graph, member_roles, entry, style, "css_url")?;
+    }
+
+    for (path, role) in member_roles {
+        let bytes = fs::read(members_root.join(path)).map_err(io_error)?;
+        let references = match role.as_str() {
+            "javascript" | "bootstrap" => javascript_references(&bytes)?,
+            "css" => css_references(&bytes)?,
+            _ => Vec::new(),
+        };
+        for (specifier, kind, module_import) in references {
+            let target = resolve_reference(path, &specifier, module_import)?;
+            add_edge(&mut graph, member_roles, path, &target, kind)?;
+            if kind == "source_map"
+                && graph
+                    .source_maps
+                    .insert(path.clone(), target.clone())
+                    .is_some_and(|existing| existing != target)
+            {
+                return Err(OpError::new(
+                    "unsupported_import",
+                    "multiple source maps for one member",
+                ));
+            }
+        }
+    }
+    Ok(graph)
+}
+
+fn add_edge(
+    graph: &mut DerivedGraph,
+    member_roles: &BTreeMap<String, String>,
+    from: &str,
+    to: &str,
+    kind: &'static str,
+) -> OpResult<()> {
+    if !member_roles.contains_key(from) {
+        return Err(OpError::new("unsupported_import", "edge source is missing"));
+    }
+    let target = to.to_owned();
+    if !target.starts_with("https://") && !member_roles.contains_key(&target) {
+        return Err(OpError::new(
+            "unsupported_import",
+            format!("unresolved Web reference: {target}"),
+        ));
+    }
+    graph.edges.insert(GraphEdge {
+        from: from.to_owned(),
+        to: target,
+        kind,
+    });
+    Ok(())
+}
+
+fn resolve_reference(from: &str, specifier: &str, module_import: bool) -> OpResult<String> {
+    if valid_https_url(specifier) {
+        return Ok(specifier.to_owned());
+    }
+    if specifier.starts_with("https:")
+        || specifier.starts_with("//")
+        || specifier.starts_with('/')
+        || specifier.contains(':')
+        || specifier.contains(['\\', '\0', '?', '#', '%'])
+        || specifier.chars().any(char::is_whitespace)
+    {
+        return Err(OpError::new(
+            "unsupported_import",
+            format!("forbidden Web reference: {specifier}"),
+        ));
+    }
+    if module_import && !specifier.starts_with("./") {
+        return Err(OpError::new(
+            "unsupported_import",
+            format!("bare module import is unsupported: {specifier}"),
+        ));
+    }
+    let relative = specifier.strip_prefix("./").unwrap_or(specifier);
+    let segments = relative.split('/').collect::<Vec<_>>();
+    if relative.is_empty()
+        || segments
+            .iter()
+            .any(|segment| segment.is_empty() || matches!(*segment, "." | ".."))
+    {
+        return Err(OpError::new(
+            "unsupported_import",
+            format!("invalid relative Web reference: {specifier}"),
+        ));
+    }
+    let parent = Path::new(from)
+        .parent()
+        .and_then(Path::to_str)
+        .unwrap_or_default();
+    Ok(if parent.is_empty() {
+        relative.to_owned()
+    } else {
+        format!("{parent}/{relative}")
+    })
+}
+
+fn valid_https_url(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    !authority.is_empty()
+        && !value.contains(['\\', '\0', '"', '\'', '<', '>'])
+        && !value.chars().any(char::is_whitespace)
+}
+
+fn javascript_references(bytes: &[u8]) -> OpResult<Vec<(String, &'static str, bool)>> {
+    let source = std::str::from_utf8(bytes)
+        .map_err(|_| OpError::new("unsupported_import", "JavaScript is not UTF-8"))?;
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .map_err(|error| OpError::new("internal", error.to_string()))?;
+    let tree = parser
+        .parse(source, None)
+        .ok_or_else(|| OpError::new("internal", "JavaScript parser returned no tree"))?;
+    if tree.root_node().has_error() {
+        return Err(OpError::new(
+            "unsupported_import",
+            "JavaScript contains syntax errors",
+        ));
+    }
+    let mut references = Vec::new();
+    collect_javascript_references(tree.root_node(), source.as_bytes(), &mut references)?;
+    Ok(references)
+}
+
+fn collect_javascript_references(
+    node: Node<'_>,
+    source: &[u8],
+    references: &mut Vec<(String, &'static str, bool)>,
+) -> OpResult<()> {
+    match node.kind() {
+        "import_statement" | "export_statement" => {
+            if let Some(specifier) = node.child_by_field_name("source") {
+                references.push((string_literal(specifier, source)?, "esm_import", true));
+            }
+        }
+        "call_expression" => {
+            let function = node.child_by_field_name("function");
+            if function.is_some_and(|function| function.kind() == "import") {
+                let arguments = node
+                    .child_by_field_name("arguments")
+                    .ok_or_else(|| OpError::new("unsupported_import", "invalid dynamic import"))?;
+                if arguments.named_child_count() != 1 {
+                    return Err(OpError::new(
+                        "unsupported_import",
+                        "dynamic import must have one literal argument",
+                    ));
+                }
+                let specifier = arguments.named_child(0).unwrap();
+                references.push((string_literal(specifier, source)?, "dynamic_import", true));
+            }
+        }
+        "new_expression" => {
+            let constructor = node.child_by_field_name("constructor");
+            let arguments = node.child_by_field_name("arguments");
+            if constructor.is_some_and(|constructor| node_text(constructor, source) == "URL")
+                && arguments.is_some_and(|arguments| arguments.named_child_count() == 2)
+            {
+                let arguments = arguments.unwrap();
+                let base = arguments.named_child(1).unwrap();
+                if node_text(base, source) == "import.meta.url" {
+                    let specifier = string_literal(arguments.named_child(0).unwrap(), source)?;
+                    let kind = if reference_path(&specifier).ends_with(".wasm") {
+                        "wasm_url"
+                    } else {
+                        "asset_url"
+                    };
+                    references.push((specifier, kind, false));
+                }
+            }
+        }
+        "comment" => {
+            if let Some(specifier) = source_map_comment(node_text(node, source)) {
+                references.push((specifier, "source_map", false));
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_javascript_references(child, source, references)?;
+    }
+    Ok(())
+}
+
+fn string_literal(node: Node<'_>, source: &[u8]) -> OpResult<String> {
+    if node.kind() != "string" {
+        return Err(OpError::new(
+            "unsupported_import",
+            "Web references must use string literals",
+        ));
+    }
+    let raw = node_text(node, source);
+    if raw.len() < 2 || raw.contains('\\') {
+        return Err(OpError::new(
+            "unsupported_import",
+            "escaped Web references are unsupported",
+        ));
+    }
+    Ok(raw[1..raw.len() - 1].to_owned())
+}
+
+fn node_text<'a>(node: Node<'_>, source: &'a [u8]) -> &'a str {
+    std::str::from_utf8(&source[node.byte_range()]).unwrap_or_default()
+}
+
+fn source_map_comment(comment: &str) -> Option<String> {
+    let content = comment
+        .strip_prefix("//")
+        .or_else(|| {
+            comment
+                .strip_prefix("/*")
+                .and_then(|value| value.strip_suffix("*/"))
+        })?
+        .trim();
+    let value = content
+        .strip_prefix("# sourceMappingURL=")
+        .or_else(|| content.strip_prefix("@ sourceMappingURL="))?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn reference_path(value: &str) -> &str {
+    value.split(['?', '#']).next().unwrap_or(value)
+}
+
+fn css_references(bytes: &[u8]) -> OpResult<Vec<(String, &'static str, bool)>> {
+    let source = std::str::from_utf8(bytes)
+        .map_err(|_| OpError::new("unsupported_import", "CSS is not UTF-8"))?;
+    let bytes = source.as_bytes();
+    let mut references = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"/*") {
+            let end = find_bytes(bytes, index + 2, b"*/")
+                .ok_or_else(|| OpError::new("unsupported_import", "unterminated CSS comment"))?;
+            if let Some(specifier) = source_map_comment(&source[index..end + 2]) {
+                references.push((specifier, "source_map", false));
+            }
+            index = end + 2;
+            continue;
+        }
+        if matches!(bytes[index], b'\'' | b'"') {
+            index = skip_quoted(bytes, index)?;
+            continue;
+        }
+        if css_keyword(bytes, index, b"@import") {
+            let mut cursor = skip_ascii_space(bytes, index + 7);
+            let (specifier, end) = if cursor < bytes.len() && matches!(bytes[cursor], b'\'' | b'"')
+            {
+                read_quoted(bytes, cursor)?
+            } else if css_keyword(bytes, cursor, b"url") {
+                cursor = skip_ascii_space(bytes, cursor + 3);
+                read_css_url(bytes, cursor)?
+            } else {
+                return Err(OpError::new(
+                    "unsupported_import",
+                    "CSS imports must use a literal URL",
+                ));
+            };
+            references.push((specifier, "css_url", false));
+            index = end;
+            continue;
+        }
+        if css_keyword(bytes, index, b"url") {
+            let cursor = skip_ascii_space(bytes, index + 3);
+            let (specifier, end) = read_css_url(bytes, cursor)?;
+            references.push((specifier, "asset_url", false));
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    Ok(references)
+}
+
+fn css_keyword(bytes: &[u8], index: usize, keyword: &[u8]) -> bool {
+    let end = index.saturating_add(keyword.len());
+    end <= bytes.len()
+        && bytes[index..end].eq_ignore_ascii_case(keyword)
+        && (index == 0 || !css_name_byte(bytes[index - 1]))
+        && (end == bytes.len() || !css_name_byte(bytes[end]))
+}
+
+fn css_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+}
+
+fn read_css_url(bytes: &[u8], open: usize) -> OpResult<(String, usize)> {
+    if bytes.get(open) != Some(&b'(') {
+        return Err(OpError::new("unsupported_import", "invalid CSS url()"));
+    }
+    let start = skip_ascii_space(bytes, open + 1);
+    let (value, end) = if bytes
+        .get(start)
+        .is_some_and(|byte| matches!(byte, b'\'' | b'"'))
+    {
+        read_quoted(bytes, start)?
+    } else {
+        let close = bytes[start..]
+            .iter()
+            .position(|byte| *byte == b')')
+            .map(|offset| start + offset)
+            .ok_or_else(|| OpError::new("unsupported_import", "unterminated CSS url()"))?;
+        let raw = std::str::from_utf8(&bytes[start..close])
+            .map_err(|_| OpError::new("unsupported_import", "invalid CSS URL"))?
+            .trim();
+        if raw.is_empty() || raw.contains(['\\', '\'', '"', '(']) {
+            return Err(OpError::new("unsupported_import", "invalid CSS URL"));
+        }
+        (raw.to_owned(), close)
+    };
+    let close = skip_ascii_space(bytes, end);
+    if bytes.get(close) != Some(&b')') {
+        return Err(OpError::new("unsupported_import", "invalid CSS url()"));
+    }
+    Ok((value, close + 1))
+}
+
+fn read_quoted(bytes: &[u8], start: usize) -> OpResult<(String, usize)> {
+    let quote = bytes[start];
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            return Err(OpError::new(
+                "unsupported_import",
+                "escaped Web references are unsupported",
+            ));
+        }
+        if bytes[index] == quote {
+            let value = std::str::from_utf8(&bytes[start + 1..index])
+                .map_err(|_| OpError::new("unsupported_import", "invalid Web reference"))?;
+            return Ok((value.to_owned(), index + 1));
+        }
+        index += 1;
+    }
+    Err(OpError::new(
+        "unsupported_import",
+        "unterminated string literal",
+    ))
+}
+
+fn skip_quoted(bytes: &[u8], start: usize) -> OpResult<usize> {
+    let quote = bytes[start];
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index = index.saturating_add(2);
+        } else if bytes[index] == quote {
+            return Ok(index + 1);
+        } else {
+            index += 1;
+        }
+    }
+    Err(OpError::new(
+        "unsupported_import",
+        "unterminated string literal",
+    ))
+}
+
+fn skip_ascii_space(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    index
+}
+
+fn find_bytes(haystack: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
+    haystack[start..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|offset| start + offset)
+}
+
 fn package(request: &Value) -> OpResult<Value> {
     const KEYS: &[&str] = &[
         "v",
@@ -316,11 +724,30 @@ fn package(request: &Value) -> OpResult<Value> {
             }
         }
     }
-    let javascript = sources
-        .keys()
-        .find(|path| path.ends_with(".js") && !path.ends_with(".d.ts"))
-        .cloned()
-        .ok_or_else(|| OpError::new("unsupported_import", "bindgen javascript entry is missing"))?;
+    let javascript = bindgen_files
+        .iter()
+        .filter(|file| file.relative.ends_with(".js") && !file.relative.ends_with(".d.ts"))
+        .map(|file| file.relative.clone())
+        .collect::<Vec<_>>();
+    if javascript.len() != 1 {
+        return Err(OpError::new(
+            "unsupported_import",
+            "bindgen output must contain exactly one JavaScript entry",
+        ));
+    }
+    let javascript = &javascript[0];
+    let wasm = bindgen_files
+        .iter()
+        .filter(|file| file.relative.ends_with(".wasm"))
+        .map(|file| file.relative.clone())
+        .collect::<Vec<_>>();
+    if wasm.len() != 1 {
+        return Err(OpError::new(
+            "unsupported_import",
+            "bindgen output must contain exactly one Wasm member",
+        ));
+    }
+    let wasm = &wasm[0];
     for (relative_path, source) in &sources {
         let destination = members_root.join(relative_path);
         if let Some(parent) = destination.parent() {
@@ -331,8 +758,13 @@ fn package(request: &Value) -> OpResult<Value> {
     let bootstrap_path = "entry.js";
     let hot_styles = serde_jcs::to_string(&request["manifest_base"]["hot_styles"])
         .map_err(|error| OpError::new("internal", error.to_string()))?;
+    let javascript_specifier = serde_jcs::to_string(&format!("./{javascript}"))
+        .map_err(|error| OpError::new("internal", error.to_string()))?;
+    let wasm_specifier = serde_jcs::to_string(&format!("./{wasm}"))
+        .map_err(|error| OpError::new("internal", error.to_string()))?;
     let bootstrap = BOOTSTRAP_TEMPLATE
-        .replace("__REKINDLE_ENTRY__", &javascript)
+        .replace("__REKINDLE_ENTRY__", &javascript_specifier)
+        .replace("__REKINDLE_WASM__", &wasm_specifier)
         .replace("__REKINDLE_HOT_STYLES__", &hot_styles);
     fs::write(members_root.join(bootstrap_path), bootstrap).map_err(io_error)?;
 
@@ -365,36 +797,34 @@ fn package(request: &Value) -> OpResult<Value> {
         }));
     }
     members.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
-    let member_paths = members
+    let member_roles = members
         .iter()
-        .filter_map(|member| member["path"].as_str().map(str::to_owned))
-        .collect::<BTreeSet<_>>();
+        .map(|member| {
+            (
+                member["path"].as_str().unwrap().to_owned(),
+                member["role"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let graph = derive_graph(
+        &members_root,
+        &member_roles,
+        bootstrap_path,
+        request["manifest_base"]["hot_styles"].as_array().unwrap(),
+    )?;
     for member in &mut members {
         let Some(path) = member["path"].as_str() else {
             continue;
         };
-        let map = format!("{path}.map");
-        if member_paths.contains(&map) {
-            member["source_map"] = json!(map);
+        if let Some(source_map) = graph.source_maps.get(path) {
+            member["source_map"] = json!(source_map);
         }
     }
-    let mut edges =
-        vec![json!({"from": bootstrap_path, "to": javascript, "kind": "dynamic_import"})];
-    for member in &members {
-        if member["role"] == "wasm" {
-            edges.push(json!({"from": javascript, "to": member["path"], "kind": "wasm_url"}));
-        }
-        if let Some(source_map) = member["source_map"].as_str() {
-            edges.push(json!({"from": member["path"], "to": source_map, "kind": "source_map"}));
-        }
-    }
-    edges.sort_by(|a, b| {
-        (a["from"].as_str(), a["to"].as_str(), a["kind"].as_str()).cmp(&(
-            b["from"].as_str(),
-            b["to"].as_str(),
-            b["kind"].as_str(),
-        ))
-    });
+    let edges = graph
+        .edges
+        .into_iter()
+        .map(|edge| json!({"from": edge.from, "to": edge.to, "kind": edge.kind}))
+        .collect::<Vec<_>>();
     let identity_members = members
         .iter()
         .map(|member| {
@@ -820,6 +1250,7 @@ fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usi
     let mut previous = None;
     let mut folded = BTreeSet::new();
     let mut member_paths = BTreeSet::new();
+    let mut member_roles = BTreeMap::new();
     let mut total_bytes = 0_u64;
     let mut identity_members = Vec::new();
     for member in members {
@@ -868,6 +1299,7 @@ fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usi
             "sha256": member["sha256"], "size": member["size"]
         }));
         member_paths.insert(path.to_owned());
+        member_roles.insert(path.to_owned(), member["role"].as_str().unwrap().to_owned());
         previous = Some(path);
     }
     let actual_members = WalkDir::new(root.path.join("members"))
@@ -889,67 +1321,6 @@ fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usi
     }) {
         return Err(OpError::new("invalid_request", "invalid manifest entry"));
     }
-    let edges = manifest["edges"]
-        .as_array()
-        .ok_or_else(|| OpError::new("invalid_request", "invalid edges"))?;
-    let mut prior_edge: Option<(&str, &str, &str)> = None;
-    for edge in edges {
-        if !frame::exact_keys(edge, &["from", "to", "kind"]) {
-            return Err(OpError::new("invalid_request", "invalid edge"));
-        }
-        let tuple = (
-            edge["from"].as_str().unwrap_or_default(),
-            edge["to"].as_str().unwrap_or_default(),
-            edge["kind"].as_str().unwrap_or_default(),
-        );
-        if prior_edge.is_some_and(|prior| prior >= tuple)
-            || !member_paths.contains(tuple.0)
-            || !member_paths.contains(tuple.1)
-            || !matches!(
-                tuple.2,
-                "esm_import"
-                    | "dynamic_import"
-                    | "wasm_url"
-                    | "source_map"
-                    | "css_url"
-                    | "asset_url"
-            )
-        {
-            return Err(OpError::new("unsupported_import", "invalid manifest edge"));
-        }
-        prior_edge = Some(tuple);
-    }
-    let bootstrap_edges = edges
-        .iter()
-        .filter(|edge| edge["from"] == entry && edge["kind"] == "dynamic_import")
-        .collect::<Vec<_>>();
-    if bootstrap_edges.len() != 1
-        || !members.iter().any(|member| {
-            member["path"] == bootstrap_edges[0]["to"] && member["role"] == "javascript"
-        })
-    {
-        return Err(OpError::new(
-            "unsupported_import",
-            "bootstrap graph is incomplete",
-        ));
-    }
-    for member in members {
-        let required_kind = match member["role"].as_str() {
-            Some("wasm") => Some("wasm_url"),
-            Some("source_map") => Some("source_map"),
-            _ => None,
-        };
-        if let Some(kind) = required_kind
-            && !edges
-                .iter()
-                .any(|edge| edge["to"] == member["path"] && edge["kind"] == kind)
-        {
-            return Err(OpError::new(
-                "unsupported_import",
-                "member graph is incomplete",
-            ));
-        }
-    }
     for hot_style in manifest["hot_styles"].as_array().unwrap() {
         let path = hot_style.as_str().unwrap();
         if !members
@@ -959,6 +1330,68 @@ fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usi
             return Err(OpError::new(
                 "invalid_request",
                 "hot style is not a CSS member",
+            ));
+        }
+    }
+    let graph = derive_graph(
+        &root.path.join("members"),
+        &member_roles,
+        entry,
+        manifest["hot_styles"].as_array().unwrap(),
+    )?;
+    let expected_edges = graph
+        .edges
+        .iter()
+        .map(|edge| json!({"from": edge.from, "to": edge.to, "kind": edge.kind}))
+        .collect::<Vec<_>>();
+    if manifest["edges"] != Value::Array(expected_edges) {
+        return Err(OpError::new(
+            "unsupported_import",
+            "manifest graph does not match member bytes",
+        ));
+    }
+    for member in members {
+        let expected_source_map = graph.source_maps.get(member["path"].as_str().unwrap());
+        if member["source_map"].as_str() != expected_source_map.map(String::as_str)
+            && !(member["source_map"].is_null() && expected_source_map.is_none())
+        {
+            return Err(OpError::new(
+                "unsupported_import",
+                "manifest source map does not match member bytes",
+            ));
+        }
+    }
+    let bootstrap_edges = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.from == entry && edge.kind == "dynamic_import")
+        .collect::<Vec<_>>();
+    if bootstrap_edges.len() != 1
+        || member_roles.get(&bootstrap_edges[0].to).map(String::as_str) != Some("javascript")
+    {
+        return Err(OpError::new(
+            "unsupported_import",
+            "bootstrap graph is incomplete",
+        ));
+    }
+    for (path, role) in &member_roles {
+        let required_kind = match role.as_str() {
+            "wasm" => Some("wasm_url"),
+            "source_map" => Some("source_map"),
+            _ => None,
+        };
+        if required_kind.is_some_and(|kind| {
+            !graph
+                .edges
+                .iter()
+                .any(|edge| edge.to == *path && edge.kind == kind)
+        }) {
+            return Err(OpError::new(
+                "unsupported_import",
+                format!(
+                    "member graph is incomplete: {path} requires {kind}",
+                    kind = required_kind.unwrap()
+                ),
             ));
         }
     }
@@ -1116,4 +1549,75 @@ fn io_error(error: std::io::Error) -> OpError {
 
 fn device_identity(device: u64, special_device: u64) -> u64 {
     device * 4_294_967_296 + special_device
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::*;
+
+    #[test]
+    fn discovers_javascript_reference_forms() {
+        let source = br#"
+            import "./static.js";
+            export { value } from "./exported.js";
+            const lazy = import("./lazy.js");
+            const wasm = new URL("app_bg.wasm", import.meta.url);
+            //# sourceMappingURL=app.js.map
+        "#;
+        let references = javascript_references(source).unwrap();
+        assert_eq!(
+            references,
+            vec![
+                ("./static.js".into(), "esm_import", true),
+                ("./exported.js".into(), "esm_import", true),
+                ("./lazy.js".into(), "dynamic_import", true),
+                ("app_bg.wasm".into(), "wasm_url", false),
+                ("app.js.map".into(), "source_map", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn discovers_css_reference_forms_without_scanning_comments_or_strings() {
+        let source = br#"
+            @import "./theme.css";
+            @import url("https://cdn.example/base.css");
+            .hero { background: url(./image.png); content: "url(./ignored.png)"; }
+            /* url("./also-ignored.png") */
+            /*# sourceMappingURL=app.css.map */
+        "#;
+        let references = css_references(source).unwrap();
+        assert_eq!(
+            references,
+            vec![
+                ("./theme.css".into(), "css_url", false),
+                ("https://cdn.example/base.css".into(), "css_url", false),
+                ("./image.png".into(), "asset_url", false),
+                ("app.css.map".into(), "source_map", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn admits_only_relative_members_and_explicit_https_urls() {
+        assert_eq!(
+            resolve_reference("modules/app.js", "./nested.js", true).unwrap(),
+            "modules/nested.js"
+        );
+        assert_eq!(
+            resolve_reference("styles/app.css", "https://cdn.example/a.png", false).unwrap(),
+            "https://cdn.example/a.png"
+        );
+        for forbidden in [
+            "react",
+            "npm:react",
+            "../escape.js",
+            "data:text/plain,x",
+            "javascript:alert(1)",
+            "file:///tmp/member",
+            "/absolute.js",
+        ] {
+            assert!(resolve_reference("app.js", forbidden, true).is_err());
+        }
+    }
 }
