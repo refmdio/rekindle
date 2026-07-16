@@ -40,10 +40,30 @@ defmodule Rekindle.Toolchain.Helper do
   @spec run_web(Path.t(), map(), Web.t(), keyword()) ::
           {:ok, map(), [map()]} | {:error, atom()}
   def run_web(executable, operation, %Web{} = state, options \\ []) do
-    with {:ok, port, buffer} <- start(executable, "web-v1", options),
-         :ok <- send_frame(port, operation),
-         result <- receive_web(port, buffer, operation, state, [], deadline(options)) do
-      result
+    case Web.admit_operation(state, operation) do
+      {:ok, admitted_state} ->
+        run_admitted_web(executable, operation, admitted_state, options)
+
+      {:error, _reason} ->
+        Web.release(state)
+        {:error, :helper_protocol}
+    end
+  end
+
+  defp run_admitted_web(executable, operation, state, options) do
+    try do
+      with {:ok, port, buffer} <- start(executable, "web-v1", options) do
+        case send_frame(port, operation) do
+          :ok ->
+            receive_web(port, buffer, operation, state, [], deadline(options))
+
+          {:error, reason} ->
+            close(port)
+            {:error, reason}
+        end
+      end
+    after
+      Web.release(state)
     end
   end
 

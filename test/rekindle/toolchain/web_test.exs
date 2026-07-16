@@ -1,7 +1,7 @@
 defmodule Rekindle.Toolchain.WebTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
-  alias Rekindle.Toolchain.Web
+  alias Rekindle.Toolchain.{RootAuthority, Web}
   alias Rekindle.CanonicalValue
 
   @request "0123456789abcdef0123456789abcdef"
@@ -57,9 +57,14 @@ defmodule Rekindle.Toolchain.WebTest do
              ~w[v type request_id payload_len op input_root input_wasm output_root output_stem debug source_maps expected_wasm_bindgen limits]
              |> Enum.sort()
 
+    assert {:ok, bindgen_root} =
+             Web.root(roots.input, :read, id: "33333333333333333333333333333333")
+
+    assert {:ok, bindgen_wasm} = Web.file(bindgen_root, "app.wasm")
+
     package_body = %{
-      bindgen_root: %{input_root | "id" => "33333333333333333333333333333333"},
-      bindgen_files: [%{wasm | "root_id" => "33333333333333333333333333333333"}],
+      bindgen_root: bindgen_root,
+      bindgen_files: [bindgen_wasm],
       public_root: nil,
       public_files: [],
       bootstrap_template: %{id: "v1", sha256: String.duplicate("a", 64)},
@@ -121,19 +126,22 @@ defmodule Rekindle.Toolchain.WebTest do
     end
   end
 
-  test "encodes the closed bindgen request byte-exactly" do
+  test "encodes the closed bindgen request byte-exactly", roots do
     digest = String.duplicate("a", 64)
+
+    assert {:ok, input_root} =
+             Web.root(roots.input, :read, id: "11111111111111111111111111111111")
+
+    assert {:ok, output_root} =
+             Web.prepare_output_root(roots.output,
+               id: "22222222222222222222222222222222"
+             )
 
     assert {:ok, request, _state} =
              Web.operation(
                "bindgen_web",
                %{
-                 input_root: %{
-                   id: "11111111111111111111111111111111",
-                   path: "/input",
-                   mode: "read",
-                   device: 7
-                 },
+                 input_root: input_root,
                  input_wasm: %{
                    root_id: "11111111111111111111111111111111",
                    path: "app.wasm",
@@ -141,12 +149,7 @@ defmodule Rekindle.Toolchain.WebTest do
                    size: 8,
                    mode: "data"
                  },
-                 output_root: %{
-                   id: "22222222222222222222222222222222",
-                   path: "/output",
-                   mode: "write_empty",
-                   device: 7
-                 },
+                 output_root: output_root,
                  output_stem: "app",
                  debug: true,
                  source_maps: "external",
@@ -161,8 +164,11 @@ defmodule Rekindle.Toolchain.WebTest do
                request_id: @request
              )
 
+    input_path = CanonicalValue.encode!(input_root["path"])
+    output_path = CanonicalValue.encode!(output_root["path"])
+
     assert CanonicalValue.encode!(request) ==
-             ~s({"debug":true,"expected_wasm_bindgen":"0.2.121","input_root":{"device":7,"id":"11111111111111111111111111111111","mode":"read","path":"/input"},"input_wasm":{"mode":"data","path":"app.wasm","root_id":"11111111111111111111111111111111","sha256":"#{digest}","size":8},"limits":{"deadline_ms":1000,"max_files":10,"max_input_bytes":100,"max_output_bytes":200},"op":"bindgen_web","output_root":{"device":7,"id":"22222222222222222222222222222222","mode":"write_empty","path":"/output"},"output_stem":"app","payload_len":0,"request_id":"#{@request}","source_maps":"external","type":"operation","v":1})
+             ~s({"debug":true,"expected_wasm_bindgen":"0.2.121","input_root":{"device":#{input_root["device"]},"id":"11111111111111111111111111111111","mode":"read","path":#{input_path}},"input_wasm":{"mode":"data","path":"app.wasm","root_id":"11111111111111111111111111111111","sha256":"#{digest}","size":8},"limits":{"deadline_ms":1000,"max_files":10,"max_input_bytes":100,"max_output_bytes":200},"op":"bindgen_web","output_root":{"device":#{output_root["device"]},"id":"22222222222222222222222222222222","mode":"write_empty","path":#{output_path}},"output_stem":"app","payload_len":0,"request_id":"#{@request}","source_maps":"external","type":"operation","v":1})
   end
 
   test "admits only the exact canonical Web manifest base before helper execution", roots do
@@ -430,7 +436,8 @@ defmodule Rekindle.Toolchain.WebTest do
     end
   end
 
-  test "root authority survives issuer exit and cannot be rebound", roots do
+  test "unused root authority is removed when its issuer exits", roots do
+    assert_eventually(fn -> RootAuthority.stats() == %{authorities: 0, leases: 0} end)
     base = Path.dirname(roots.input)
     issued_path = Path.join(base, "issued-root")
     replacement = Path.join(base, "replacement-root")
@@ -446,23 +453,71 @@ defmodule Rekindle.Toolchain.WebTest do
       end)
       |> Task.await()
 
-    assert {:ok, root} = issued
-    assert {:ok, descriptor} = Web.file(root, "member")
-    assert descriptor["sha256"] == :crypto.hash(:sha256, "same") |> Base.encode16(case: :lower)
+    assert {:ok, _root} = issued
+    assert_eventually(fn -> RootAuthority.stats() == %{authorities: 0, leases: 0} end)
 
     File.rename!(issued_path, moved)
     File.rename!(replacement, issued_path)
 
     try do
-      assert {:error, :invalid_root} =
+      assert {:ok, rebound} =
                Web.root(issued_path, :read, id: "77777777777777777777777777777777")
 
-      assert {:error, :invalid_file} = Web.file(root, "member")
+      assert {:ok, _descriptor} = Web.file(rebound, "member")
     after
       File.rm_rf!(issued_path)
       File.rename!(moved, issued_path)
     end
   end
+
+  test "explicit operation release is idempotent and permits a fresh admission", roots do
+    assert_eventually(fn -> RootAuthority.stats() == %{authorities: 0, leases: 0} end)
+    assert {:ok, input_root} = Web.root(roots.input, :read, id: String.duplicate("8", 32))
+    assert {:ok, wasm} = Web.file(input_root, "app.wasm")
+
+    assert {:ok, output_root} =
+             Web.prepare_output_root(roots.output, id: String.duplicate("9", 32))
+
+    body = %{
+      input_root: input_root,
+      input_wasm: wasm,
+      output_root: output_root,
+      output_stem: "app",
+      debug: false,
+      source_maps: :none,
+      expected_wasm_bindgen: "0.2.121",
+      limits: %{
+        max_files: 10,
+        max_input_bytes: 100,
+        max_output_bytes: 200,
+        deadline_ms: 1_000
+      }
+    }
+
+    assert {:ok, _request, first_state} = Web.operation("bindgen_web", body)
+    assert RootAuthority.stats() == %{authorities: 2, leases: 1}
+    assert :ok = Web.release(first_state)
+    assert :ok = Web.release(first_state)
+    assert RootAuthority.stats() == %{authorities: 0, leases: 0}
+
+    assert {:ok, _request, second_state} = Web.operation("bindgen_web", body)
+    assert RootAuthority.stats() == %{authorities: 2, leases: 1}
+    assert :ok = Web.release(second_state)
+    assert RootAuthority.stats() == %{authorities: 0, leases: 0}
+  end
+
+  defp assert_eventually(assertion, attempts \\ 100)
+
+  defp assert_eventually(assertion, attempts) when attempts > 0 do
+    if assertion.() do
+      :ok
+    else
+      Process.sleep(5)
+      assert_eventually(assertion, attempts - 1)
+    end
+  end
+
+  defp assert_eventually(assertion, 0), do: assert(assertion.())
 
   test "requires an exact no-follow attempt marker bound to the output root id", roots do
     assert {:error, :invalid_root} =

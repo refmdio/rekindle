@@ -245,13 +245,20 @@ defmodule Rekindle.Toolchain.Web do
   }
   """
 
-  defstruct request_id: nil, op: nil, progress_sequence: 0, terminal?: false
+  defstruct request_id: nil,
+            op: nil,
+            progress_sequence: 0,
+            terminal?: false,
+            authority_roots: [],
+            authority_lease: nil
 
   @type t :: %__MODULE__{
           request_id: String.t() | nil,
           op: String.t() | nil,
           progress_sequence: non_neg_integer(),
-          terminal?: boolean()
+          terminal?: boolean(),
+          authority_roots: [map()],
+          authority_lease: reference() | nil
         }
 
   @spec root(Path.t(), :read | :write_empty, keyword()) :: {:ok, map()} | {:error, atom()}
@@ -331,25 +338,66 @@ defmodule Rekindle.Toolchain.Web do
 
   def operation(op, body, options) when op in @ops and is_map(body) do
     request_id = Keyword.get_lazy(options, :request_id, &random_id/0)
+    body = stringify(body)
 
     with :ok <- request_id(request_id),
-         :ok <- validate_operation(op, stringify(body)) do
-      header =
-        body
-        |> stringify()
-        |> Map.merge(%{
-          "v" => 1,
-          "type" => "operation",
-          "request_id" => request_id,
-          "payload_len" => 0,
-          "op" => op
-        })
-
-      {:ok, header, %__MODULE__{request_id: request_id, op: op}}
+         :ok <- validate_operation(op, body),
+         header =
+           Map.merge(body, %{
+             "v" => 1,
+             "type" => "operation",
+             "request_id" => request_id,
+             "payload_len" => 0,
+             "op" => op
+           }),
+         {:ok, roots, lease} <- lease_operation_roots(header) do
+      {:ok, header,
+       %__MODULE__{
+         request_id: request_id,
+         op: op,
+         authority_roots: roots,
+         authority_lease: lease
+       }}
     end
   end
 
   def operation(_op, _body, _options), do: {:error, :invalid_operation}
+
+  @spec admit_operation(t(), map()) :: {:ok, t()} | {:error, atom()}
+  def admit_operation(
+        %__MODULE__{authority_lease: lease, authority_roots: roots} = state,
+        operation
+      )
+      when is_reference(lease) and is_map(operation) do
+    with true <- operation["request_id"] == state.request_id,
+         true <- operation["op"] == state.op,
+         true <- operation_roots(operation) == roots do
+      if root_authority_leased?(lease) do
+        {:ok, state}
+      else
+        case lease_operation_roots(operation) do
+          {:ok, ^roots, renewed_lease} ->
+            {:ok, %{state | authority_lease: renewed_lease}}
+
+          _ ->
+            {:error, :invalid_operation}
+        end
+      end
+    else
+      _ -> {:error, :invalid_operation}
+    end
+  end
+
+  def admit_operation(_state, _operation), do: {:error, :invalid_operation}
+
+  @spec release(t()) :: :ok
+  def release(%__MODULE__{authority_lease: lease}) when is_reference(lease) do
+    RootAuthority.release(lease)
+  catch
+    :exit, _reason -> :ok
+  end
+
+  def release(%__MODULE__{}), do: :ok
 
   @spec accept(t(), map()) :: {:ok, t(), map()} | {:terminal, map(), t()} | {:error, atom()}
   def accept(%__MODULE__{terminal?: true}, _header), do: {:error, :post_terminal_frame}
@@ -1708,11 +1756,10 @@ defmodule Rekindle.Toolchain.Web do
 
   defp revalidate_root(root) do
     with :ok <- validate_root(root),
-         {:ok, admitted_identity} <- root_authority(root),
          {:ok, stat} <- no_follow_stat(root["path"]),
          true <- stat.type == :directory,
          true <- root["device"] == device_identity(stat),
-         true <- root_identity(stat) == admitted_identity do
+         :ok <- admit_root_identity(root, root_identity(stat)) do
       {:ok, stat}
     else
       _ -> {:error, :invalid_root}
@@ -1815,8 +1862,103 @@ defmodule Rekindle.Toolchain.Web do
     :exit, _reason -> {:error, :root_authority_unavailable}
   end
 
+  defp lease_operation_roots(operation) do
+    with roots when is_list(roots) <- operation_roots(operation),
+         {:ok, entries} <- qualify_operation_roots(roots),
+         {:ok, lease} <- RootAuthority.lease(entries) do
+      {:ok, roots, lease}
+    else
+      _ -> {:error, :invalid_operation}
+    end
+  catch
+    :exit, _reason -> {:error, :invalid_operation}
+  end
+
+  defp qualify_operation_roots(roots) do
+    Enum.reduce_while(roots, {:ok, []}, fn root, {:ok, entries} ->
+      case qualify_operation_root(root) do
+        {:ok, stat} ->
+          entry = {root_authority_key(root), root_identity(stat)}
+          {:cont, {:ok, [entry | entries]}}
+
+        {:error, _reason} ->
+          {:halt, {:error, :invalid_root}}
+      end
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      error -> error
+    end
+  end
+
+  defp qualify_operation_root(root) do
+    with :ok <- validate_root(root),
+         {:ok, stat} <- no_follow_stat(root["path"]),
+         true <- stat.type == :directory,
+         true <- root["device"] == device_identity(stat),
+         :ok <- compatible_root_identity(root, root_identity(stat)) do
+      {:ok, stat}
+    end
+  end
+
+  defp operation_roots(%{"op" => "bindgen_web"} = operation),
+    do: canonical_operation_roots([operation["input_root"], operation["output_root"]])
+
+  defp operation_roots(%{"op" => "package_web"} = operation),
+    do:
+      canonical_operation_roots([
+        operation["bindgen_root"],
+        operation["public_root"],
+        operation["output_root"]
+      ])
+
+  defp operation_roots(%{"op" => "verify_web"} = operation),
+    do: canonical_operation_roots([operation["artifact_root"]])
+
+  defp operation_roots(_operation), do: :invalid
+
+  defp canonical_operation_roots(roots) do
+    roots = Enum.reject(roots, &is_nil/1)
+
+    if roots != [] and Enum.all?(roots, &is_map/1) do
+      roots
+      |> Enum.uniq_by(&root_authority_key/1)
+      |> Enum.sort_by(&:erlang.term_to_binary(root_authority_key(&1)))
+    else
+      :invalid
+    end
+  end
+
+  defp root_authority_leased?(lease) do
+    RootAuthority.leased?(lease)
+  catch
+    :exit, _reason -> false
+  end
+
   defp root_authority(root) do
     RootAuthority.fetch(root_authority_key(root))
+  catch
+    :exit, _reason -> {:error, :root_authority_unavailable}
+  end
+
+  defp compatible_root_identity(root, identity) do
+    case root_authority(root) do
+      {:ok, ^identity} -> :ok
+      {:error, :unknown_authority} -> :ok
+      _ -> {:error, :identity_changed}
+    end
+  end
+
+  defp admit_root_identity(root, identity) do
+    case root_authority(root) do
+      {:ok, ^identity} -> :ok
+      {:error, :unknown_authority} -> register_root_identity(root, identity)
+      _ -> {:error, :identity_changed}
+    end
+  end
+
+  defp register_root_identity(root, identity) do
+    RootAuthority.register(root_authority_key(root), identity)
   catch
     :exit, _reason -> {:error, :root_authority_unavailable}
   end

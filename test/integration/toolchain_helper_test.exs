@@ -2,7 +2,17 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
   use ExUnit.Case, async: false
 
   alias Rekindle.CanonicalValue
-  alias Rekindle.Toolchain.{Exec, Frame, Handshake, Helper, Installer, Release, Web}
+
+  alias Rekindle.Toolchain.{
+    Exec,
+    Frame,
+    Handshake,
+    Helper,
+    Installer,
+    Release,
+    RootAuthority,
+    Web
+  }
 
   @request "0123456789abcdef0123456789abcdef"
 
@@ -484,6 +494,65 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     end
   end
 
+  test "web root leases stay bounded across every helper terminal path", %{helper: helper} do
+    root = temp_root("web-root-leases")
+    on_exit(fn -> File.rm_rf!(root) end)
+    assert_authority_baseline()
+
+    operation_error = %{
+      "v" => 1,
+      "type" => "operation_error",
+      "payload_len" => 0,
+      "op" => "bindgen_web",
+      "code" => "internal",
+      "message" => "controlled failure",
+      "diagnostics" => []
+    }
+
+    cases = [
+      {:success, wasm_module()},
+      {:success, wasm_module()},
+      {:success, wasm_module()},
+      {:operation_error, "not wasm"},
+      {:protocol_failure, wasm_module()},
+      {:timeout, wasm_module()}
+    ]
+
+    for {{kind, bytes}, number} <- Enum.with_index(cases, 500) do
+      input = Path.join(root, "input-#{number}")
+      output = Path.join(root, "output-#{number}")
+      Enum.each([input, output], &File.mkdir_p!/1)
+      File.write!(Path.join(input, "app.wasm"), bytes)
+      assert {:ok, input_root} = Web.root(input, :read, id: id(number))
+      assert {:ok, wasm} = Web.file(input_root, "app.wasm")
+      assert {:ok, output_root} = Web.prepare_output_root(output, id: id(number + 100))
+      assert {:ok, request, state} = bindgen_operation(input_root, wasm, output_root, limits())
+      assert RootAuthority.stats() == %{authorities: 2, leases: 1}
+
+      case kind do
+        :success ->
+          assert {:ok, %{"type" => "operation_ok"}, []} =
+                   Helper.run_web(helper, request, state)
+
+        :operation_error ->
+          assert {:ok, %{"type" => "operation_error", "code" => "invalid_wasm"}, []} =
+                   Helper.run_web(helper, request, state)
+
+        :protocol_failure ->
+          fake = fake_web_helper(root, "protocol-#{number}", operation_error, extra: true)
+          assert {:error, :post_terminal_frame} = Helper.run_web(fake, request, state)
+
+        :timeout ->
+          fake = fake_web_helper(root, "timeout-#{number}", operation_error, delay_ms: 250)
+
+          assert {:error, :helper_protocol} =
+                   Helper.run_web(fake, request, state, timeout_ms: 25)
+      end
+
+      assert_authority_baseline()
+    end
+  end
+
   test "web-v1 rejects real bindgen schema, identity, Wasm, and limit failures", %{
     helper: helper
   } do
@@ -642,11 +711,16 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
     File.chmod!(Path.join(replacement_output, Web.marker()), 0o600)
     replacement_helper = fake_web_helper(root, "replacement-output", terminal)
+
+    assert {:ok, replacement_request, replacement_state} =
+             bindgen_operation(input_root, wasm, output_root, limits())
+
     File.rename!(output, moved_output)
     File.rename!(replacement_output, output)
 
     try do
-      assert {:error, :helper_protocol} = Helper.run_web(replacement_helper, request, state)
+      assert {:error, :helper_protocol} =
+               Helper.run_web(replacement_helper, replacement_request, replacement_state)
     after
       File.rm_rf!(output)
       File.rename!(moved_output, output)
@@ -1507,6 +1581,18 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     ]
 
     for {label, mutate} <- mutations do
+      assert {:ok, request, state} =
+               Web.operation(
+                 "verify_web",
+                 %{
+                   artifact_root: artifact_root,
+                   manifest: manifest,
+                   expected_manifest_digest: package["manifest_digest"],
+                   limits: limits
+                 },
+                 request_id: @request
+               )
+
       cleanup = mutate.()
 
       try do
@@ -1610,14 +1696,17 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     path = Path.join(root, "fake-helper-#{label}")
     terminal = CanonicalValue.encode!(terminal)
     extra = if Keyword.get(options, :extra, false), do: "write_frame(terminal)", else: ""
+    delay = Keyword.get(options, :delay_ms, 0) / 1_000
 
     File.write!(
       path,
       """
       ##!#{python}
       import json
+      import os
       import struct
       import sys
+      import time
 
       def read_frame():
           length_bytes = sys.stdin.buffer.read(4)
@@ -1632,8 +1721,11 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
       def write_frame(header):
           body = json.dumps(header, sort_keys=True, separators=(",", ":")).encode()
-          sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
-          sys.stdout.buffer.flush()
+          try:
+              sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
+              sys.stdout.buffer.flush()
+          except BrokenPipeError:
+              os._exit(0)
 
       hello = read_frame()
       write_frame({
@@ -1649,6 +1741,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       operation = read_frame()
       terminal = json.loads(#{inspect(terminal)})
       terminal["request_id"] = operation["request_id"]
+      time.sleep(#{delay})
       write_frame(terminal)
       #{extra}
       """
@@ -1991,5 +2084,20 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       System.tmp_dir!(),
       "rekindle-helper-#{label}-#{System.unique_integer([:positive])}"
     )
+  end
+
+  defp assert_authority_baseline(attempts \\ 100)
+
+  defp assert_authority_baseline(attempts) when attempts > 0 do
+    if RootAuthority.stats() == %{authorities: 0, leases: 0} do
+      :ok
+    else
+      Process.sleep(5)
+      assert_authority_baseline(attempts - 1)
+    end
+  end
+
+  defp assert_authority_baseline(0) do
+    assert RootAuthority.stats() == %{authorities: 0, leases: 0}
   end
 end
