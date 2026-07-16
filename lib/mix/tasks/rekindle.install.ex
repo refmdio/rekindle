@@ -24,12 +24,11 @@ if Code.ensure_loaded?(Igniter) do
     def igniter(igniter) do
       options = igniter.args.options
 
-      with {:ok, targets} <- parse_targets(options[:targets]),
-           {:ok, endpoint} <- existing_endpoint(options[:endpoint]) do
+      with {:ok, targets} <- parse_targets(options[:targets]) do
         Rekindle.Igniter.install(igniter,
           client_path: options[:client_path],
           targets: targets,
-          endpoint: endpoint,
+          endpoint: options[:endpoint],
           accepted_origins: accepted_origins(options[:accepted_origin]),
           no_client: options[:no_client]
         )
@@ -48,15 +47,6 @@ if Code.ensure_loaded?(Igniter) do
         {:ok, targets}
       else
         {:error, "--targets must be web, desktop, or web,desktop without duplicates"}
-      end
-    end
-
-    defp existing_endpoint(nil), do: {:ok, nil}
-
-    defp existing_endpoint(text) do
-      case Enum.find(:code.all_loaded(), fn {module, _path} -> inspect(module) == text end) do
-        {module, _path} -> {:ok, module}
-        nil -> {:error, "--endpoint must name an already loaded module"}
       end
     end
 

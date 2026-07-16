@@ -54,6 +54,12 @@ defmodule Rekindle.IgniterTest do
     assert source(installed, "lib/sample_app_web/components/layouts/root.html.heex") =~
              "host-owned"
 
+    endpoint = source(installed, "lib/sample_app_web/endpoint.ex")
+    assert endpoint =~ "if code_reloading? do"
+    assert endpoint =~ ~s(socket("/_rekindle/socket", Rekindle.Phoenix.Socket)
+    assert endpoint =~ "plug(Rekindle.Phoenix.DevPlug, otp_app: :sample_app)"
+    assert source(installed, "lib/sample_app_web.ex") =~ ~s("rekindle")
+
     application = source(installed, "lib/sample_app/application.ex")
     assert application =~ "SampleApp.HostChild"
     assert application =~ "Code.ensure_loaded?(Mix) and Mix.env() != :prod"
@@ -74,6 +80,8 @@ defmodule Rekindle.IgniterTest do
 
     assert reinstalled.issues == []
     assert source(reinstalled, "mix.exs") == source(installed, "mix.exs")
+    assert source(reinstalled, "lib/sample_app_web/endpoint.ex") == endpoint
+    assert count(source(reinstalled, "lib/sample_app_web.ex"), ~s("rekindle")) == 1
 
     assert count(
              source(reinstalled, "lib/sample_app_web/components/layouts/root.html.heex"),
@@ -161,7 +169,59 @@ defmodule Rekindle.IgniterTest do
     assert Enum.any?(rejected.issues, &String.contains?(to_string(&1), "structurally adoptable"))
   end
 
-  defp project do
+  test "selects the only project endpoint and matches an explicit module string" do
+    automatic = RekindleIgniter.install(project(), targets: [:web])
+    assert automatic.issues == []
+    assert source(automatic, "config/dev.exs") =~ "SampleAppWeb.Endpoint"
+
+    explicit =
+      RekindleIgniter.install(project(),
+        targets: [:web],
+        endpoint: "SampleAppWeb.Endpoint"
+      )
+
+    assert explicit.issues == []
+    assert source(explicit, "lib/sample_app_web/endpoint.ex") =~ "Rekindle.Phoenix.Socket"
+  end
+
+  test "requires explicit selection for multiple endpoints without creating input atoms" do
+    ambiguous =
+      project()
+      |> Igniter.create_new_file(
+        "lib/admin_web/endpoint.ex",
+        """
+        defmodule AdminWeb.Endpoint do
+          use Phoenix.Endpoint, otp_app: :sample_app
+        end
+        """
+      )
+      |> apply_igniter!()
+      |> RekindleIgniter.install(targets: [:web])
+
+    assert Enum.any?(ambiguous.issues, &String.contains?(to_string(&1), "multiple Phoenix"))
+
+    missing = RekindleIgniter.install(project(), targets: [:web], endpoint: "Unknown.Endpoint")
+    assert Enum.any?(missing.issues, &String.contains?(to_string(&1), "must match"))
+  end
+
+  test "rejects foreign Rekindle endpoint registrations and dynamic static allowlists" do
+    foreign =
+      project(endpoint_extra: ~s(plug Rekindle.Phoenix.DevPlug, otp_app: :other))
+      |> RekindleIgniter.install(targets: [:web], endpoint: SampleAppWeb.Endpoint)
+
+    assert Enum.any?(foreign.issues, &String.contains?(to_string(&1), "conflicting Rekindle"))
+
+    dynamic =
+      project(static_paths: "@paths")
+      |> RekindleIgniter.install(targets: [:web], endpoint: SampleAppWeb.Endpoint)
+
+    assert Enum.any?(dynamic.issues, &String.contains?(to_string(&1), "literal top-level"))
+  end
+
+  defp project(options \\ []) do
+    endpoint_extra = Keyword.get(options, :endpoint_extra, "")
+    static_paths = Keyword.get(options, :static_paths, "~w(assets images favicon.ico)")
+
     test_project(
       app_name: :sample_app,
       files: %{
@@ -192,6 +252,17 @@ defmodule Rekindle.IgniterTest do
             children = [SampleApp.HostChild]
             Supervisor.start_link(children, strategy: :one_for_one)
           end
+        end
+        """,
+        "lib/sample_app_web.ex" => """
+        defmodule SampleAppWeb do
+          def static_paths, do: #{static_paths}
+        end
+        """,
+        "lib/sample_app_web/endpoint.ex" => """
+        defmodule SampleAppWeb.Endpoint do
+          use Phoenix.Endpoint, otp_app: :sample_app
+          #{endpoint_extra}
         end
         """,
         "lib/sample_app_web/components/layouts/root.html.heex" => """

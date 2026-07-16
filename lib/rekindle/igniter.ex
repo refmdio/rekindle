@@ -14,8 +14,10 @@ if Code.ensure_loaded?(Igniter) do
       application_id = Atom.to_string(otp_app)
       client_path = Keyword.get(options, :client_path, "client")
       targets = Keyword.get(options, :targets, [:web, :desktop])
-      endpoint = Keyword.get(options, :endpoint, default_endpoint(igniter))
       accepted_origins = Keyword.get(options, :accepted_origins, :endpoint)
+
+      {igniter, endpoint} =
+        resolve_endpoint(igniter, Keyword.get(options, :endpoint), :web in targets)
 
       igniter
       |> install_client(client_path, application_id, targets, options)
@@ -28,6 +30,8 @@ if Code.ensure_loaded?(Igniter) do
         accepted_origins
       )
       |> install_child(otp_app)
+      |> install_phoenix_endpoint(otp_app, endpoint, :web in targets)
+      |> install_static_allowlist(endpoint, :web in targets)
       |> install_aliases(:web in targets)
       |> install_page_marker(otp_app, endpoint, targets)
       |> install_ignores(client_path)
@@ -240,6 +244,197 @@ if Code.ensure_loaded?(Igniter) do
       Igniter.add_issue(igniter, "Web installation requires one selected Phoenix endpoint")
     end
 
+    defp resolve_endpoint(igniter, _requested, false), do: {igniter, nil}
+
+    defp resolve_endpoint(igniter, requested, true) do
+      {igniter, endpoints} =
+        Igniter.Project.Module.find_all_matching_modules(igniter, fn _module, zipper ->
+          Igniter.Code.Module.move_to_use(zipper, Phoenix.Endpoint) != :error
+        end)
+
+      endpoint =
+        case requested do
+          nil when length(endpoints) == 1 ->
+            List.first(endpoints)
+
+          nil ->
+            nil
+
+          module when is_atom(module) ->
+            Enum.find(endpoints, &(&1 == module))
+
+          text when is_binary(text) ->
+            Enum.find(endpoints, &(inspect(&1) == text))
+
+          _ ->
+            nil
+        end
+
+      cond do
+        endpoint ->
+          {igniter, endpoint}
+
+        is_nil(requested) and endpoints == [] ->
+          {Igniter.add_issue(igniter, "Web installation requires one Phoenix endpoint"), nil}
+
+        is_nil(requested) ->
+          modules = endpoints |> Enum.map(&inspect/1) |> Enum.sort() |> Enum.join(", ")
+
+          {Igniter.add_issue(
+             igniter,
+             "multiple Phoenix endpoints found (#{modules}); pass --endpoint MODULE"
+           ), nil}
+
+        true ->
+          {Igniter.add_issue(
+             igniter,
+             "--endpoint must match a Phoenix endpoint discovered in this project"
+           ), nil}
+      end
+    end
+
+    defp install_phoenix_endpoint(igniter, _otp_app, _endpoint, false), do: igniter
+    defp install_phoenix_endpoint(igniter, _otp_app, nil, true), do: igniter
+
+    defp install_phoenix_endpoint(igniter, otp_app, endpoint, true) do
+      block = endpoint_block(otp_app)
+
+      case Igniter.Project.Module.find_and_update_module(igniter, endpoint, fn zipper ->
+             source = Macro.to_string(Sourceror.Zipper.node(zipper))
+
+             cond do
+               endpoint_block_present?(source, otp_app) ->
+                 {:ok, zipper}
+
+               endpoint_owned_reference?(source) ->
+                 {:error,
+                  "the selected endpoint contains a conflicting Rekindle development registration"}
+
+               true ->
+                 {:ok, Common.add_code(zipper, block)}
+             end
+           end) do
+        {:ok, igniter} ->
+          igniter
+
+        {:error, igniter} ->
+          Igniter.add_issue(igniter, "could not update selected Phoenix endpoint")
+      end
+    end
+
+    defp endpoint_block(otp_app) do
+      """
+      if code_reloading? do
+        socket "/_rekindle/socket", Rekindle.Phoenix.Socket,
+          websocket: true,
+          longpoll: false
+
+        plug Rekindle.Phoenix.DevPlug, otp_app: #{inspect(otp_app)}
+      end
+      """
+    end
+
+    defp endpoint_block_present?(source, otp_app) do
+      expected =
+        otp_app
+        |> endpoint_block()
+        |> Code.string_to_quoted!()
+        |> Macro.to_string()
+
+      parsed = Code.string_to_quoted!(source)
+
+      {_parsed, matches} =
+        Macro.prewalk(parsed, 0, fn
+          {:if, _, _} = node, matches ->
+            increment = if Macro.to_string(node) == expected, do: 1, else: 0
+            {node, matches + increment}
+
+          node, matches ->
+            {node, matches}
+        end)
+
+      matches == 1 and
+        count(source, "Rekindle.Phoenix.Socket") == 1 and
+        count(source, "Rekindle.Phoenix.DevPlug") == 1 and
+        count(source, "\"/_rekindle/socket\"") == 1 and
+        String.contains?(source, "otp_app: #{inspect(otp_app)}")
+    rescue
+      _ -> false
+    end
+
+    defp endpoint_owned_reference?(source) do
+      String.contains?(source, "Rekindle.Phoenix.Socket") or
+        String.contains?(source, "Rekindle.Phoenix.DevPlug") or
+        String.contains?(source, "/_rekindle/")
+    end
+
+    defp install_static_allowlist(igniter, _endpoint, false), do: igniter
+    defp install_static_allowlist(igniter, nil, true), do: igniter
+
+    defp install_static_allowlist(igniter, endpoint, true) do
+      web_module = endpoint |> Module.split() |> Enum.drop(-1) |> Module.concat()
+
+      case Igniter.Project.Module.find_and_update_module(igniter, web_module, fn zipper ->
+             with {:ok, zipper} <-
+                    Function.move_to_def(zipper, :static_paths, 0, target: :at),
+                  {:ok, paths} <- static_paths_literal(Sourceror.Zipper.node(zipper)),
+                  true <- Enum.all?(paths, &is_binary/1) do
+               case Enum.count(paths, &(&1 == "rekindle")) do
+                 0 ->
+                   replacement =
+                     Sourceror.parse_string!(
+                       "def static_paths, do: #{inspect(paths ++ ["rekindle"])}"
+                     )
+
+                   {:ok, Common.replace_code(zipper, replacement)}
+
+                 1 ->
+                   {:ok, zipper}
+
+                 _ ->
+                   {:error, "static_paths/0 contains duplicate rekindle entries"}
+               end
+             else
+               _ -> {:error, "static_paths/0 must return a literal top-level path list"}
+             end
+           end) do
+        {:ok, igniter} ->
+          igniter
+
+        {:error, igniter} ->
+          Igniter.add_issue(igniter, "could not update the Phoenix static path allowlist")
+      end
+    end
+
+    defp static_paths_literal({:def, _, [_, clauses]}) when is_list(clauses) do
+      clauses
+      |> Enum.find_value(fn
+        {:do, body} -> body
+        {{:__block__, _, [:do]}, body} -> body
+        _ -> nil
+      end)
+      |> literal_static_paths()
+    end
+
+    defp static_paths_literal(_node), do: :error
+
+    defp literal_static_paths({:sigil_w, _, _} = body) do
+      {paths, _binding} = Code.eval_quoted(body)
+      if is_list(paths), do: {:ok, paths}, else: :error
+    rescue
+      _ -> :error
+    end
+
+    defp literal_static_paths(body) do
+      with {:ok, quoted} <- body |> Sourceror.to_string() |> Code.string_to_quoted(),
+           true <- Macro.quoted_literal?(quoted) do
+        {paths, _binding} = Code.eval_quoted(quoted)
+        if is_list(paths), do: {:ok, paths}, else: :error
+      else
+        _ -> :error
+      end
+    end
+
     defp install_child(igniter, otp_app) do
       child_name = Igniter.Project.Module.module_name(igniter, "Rekindle")
       application = Application.app_module(igniter)
@@ -390,10 +585,6 @@ if Code.ensure_loaded?(Igniter) do
       %{igniter | rewrite: Rewrite.put!(igniter.rewrite, source)}
     end
 
-    defp default_endpoint(igniter) do
-      Igniter.Project.Module.module_name(igniter, "Web.Endpoint")
-    end
-
     defp adoptable_marker?(igniter, path, application_id) do
       contents =
         case Rewrite.source(igniter.rewrite, path) do
@@ -418,5 +609,8 @@ if Code.ensure_loaded?(Igniter) do
     rescue
       _ -> false
     end
+
+    defp count(value, pattern),
+      do: value |> String.split(pattern) |> length() |> Kernel.-(1)
   end
 end
