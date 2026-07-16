@@ -10,9 +10,18 @@ if Code.ensure_loaded?(Igniter) do
 
     @spec install(Igniter.t(), keyword()) :: Igniter.t()
     def install(igniter, options \\ []) do
+      case normalize_client_path(Keyword.get(options, :client_path, "client")) do
+        {:ok, client_path} ->
+          install_with_client_path(igniter, options, client_path)
+
+        :error ->
+          Igniter.add_issue(igniter, "client_path must be normalized and project-relative")
+      end
+    end
+
+    defp install_with_client_path(igniter, options, client_path) do
       otp_app = Application.app_name(igniter)
       application_id = Atom.to_string(otp_app)
-      client_path = Keyword.get(options, :client_path, "client")
       targets = Keyword.get(options, :targets, [:web, :desktop])
       accepted_origins = Keyword.get(options, :accepted_origins, :endpoint)
 
@@ -36,6 +45,22 @@ if Code.ensure_loaded?(Igniter) do
       |> install_page_marker(otp_app, endpoint, targets)
       |> install_ignores(client_path)
     end
+
+    defp normalize_client_path(value) when is_binary(value) do
+      segments = String.split(value, "/")
+
+      if value != "" and byte_size(value) <= 4_096 and String.valid?(value) and
+           String.normalize(value, :nfc) == value and Path.type(value) != :absolute and
+           not String.contains?(value, ["\\", <<0>>]) and
+           not Regex.match?(~r/[\x00-\x1F\x7F]/, value) and
+           Enum.all?(segments, &(&1 not in ["", ".", ".."])) do
+        {:ok, Enum.join(segments, "/")}
+      else
+        :error
+      end
+    end
+
+    defp normalize_client_path(_value), do: :error
 
     @spec transform_assets_deploy(term()) :: {:ok, list()} | {:error, String.t()}
     def transform_assets_deploy({:__block__, _meta, [value]}),

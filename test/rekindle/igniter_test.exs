@@ -127,6 +127,48 @@ defmodule Rekindle.IgniterTest do
     assert Enum.count(ignore_lines, &(&1 == "/client/.rekindle/")) == 1
   end
 
+  test "client path admission is project-relative and precedes every proposal mutation" do
+    for invalid <- [
+          "../escape",
+          "/absolute",
+          "client/../escape",
+          "client/./nested",
+          "client//nested",
+          "client\\nested",
+          "client\0nested",
+          "client\nnested",
+          "cafe\u0301",
+          String.duplicate("a", 4_097),
+          nil
+        ] do
+      initial = project()
+
+      rejected =
+        RekindleIgniter.install(initial,
+          client_path: invalid,
+          targets: [:web],
+          endpoint: SampleAppWeb.Endpoint
+        )
+
+      assert Enum.any?(rejected.issues, &String.contains?(to_string(&1), "client_path"))
+      assert rejected.tasks == initial.tasks
+      assert Rewrite.sources(rejected.rewrite) == Rewrite.sources(initial.rewrite)
+      assert rejected.assigns.test_files == initial.assigns.test_files
+    end
+
+    nested =
+      RekindleIgniter.install(project(),
+        client_path: "clients/gpui",
+        targets: [:web],
+        endpoint: SampleAppWeb.Endpoint
+      )
+
+    assert nested.issues == []
+    assert source(nested, "clients/gpui/Cargo.toml") =~ ~s(name = "sample_app_ui")
+    assert source(nested, "config/config.exs") =~ ~s(client: "clients/gpui")
+    assert {"rekindle.client.lock", ["clients/gpui"]} in nested.tasks
+  end
+
   test "applied canonical client generates a lock and checks both declared toolchains" do
     root = temp_dir!("rekindle-igniter-applied")
     client_root = Path.join(root, "client")
