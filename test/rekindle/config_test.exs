@@ -373,6 +373,17 @@ defmodule Rekindle.ConfigTest do
       ),
       :config_invalid
     )
+
+    Application.put_env(:demo_app, Endpoint, check_origin: ["//example.com:8443/socket"])
+
+    assert_error(
+      Config.normalize(
+        :demo_app,
+        web_build(),
+        Keyword.put(dev, :accepted_origins, ["https://example.com:9443"])
+      ),
+      :config_invalid
+    )
   end
 
   defp web_build do

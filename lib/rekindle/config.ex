@@ -679,7 +679,7 @@ defmodule Rekindle.Config do
     scheme_matches? =
       scheme_optional? or String.downcase(policy_uri.scheme || "") == origin_uri.scheme
 
-    explicit_port? = Regex.match?(~r/:\d+\/?\z/, pattern)
+    explicit_port? = Regex.match?(~r/:\d+\z/, policy_uri.authority || "")
 
     port_matches? =
       (scheme_optional? and not explicit_port?) or policy_uri.port == origin_uri.port
