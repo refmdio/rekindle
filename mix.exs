@@ -19,7 +19,7 @@ defmodule Rekindle.MixProject do
   end
 
   def application do
-    [extra_applications: [:crypto, :logger]]
+    [extra_applications: [:crypto, :logger], mod: {Rekindle.Application, []}]
   end
 
   defp deps do
