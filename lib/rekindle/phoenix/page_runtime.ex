@@ -38,7 +38,7 @@ defmodule Rekindle.Phoenix.PageRuntime do
   end
 
   defp validate_session!(socket_path, project_session, token) do
-    unless String.starts_with?(socket_path, "/") and
+    unless valid_socket_path?(socket_path) and
              Regex.match?(~r/\A[0-9a-f]{32}\z/, project_session) and
              byte_size(token) in 32..256 and String.valid?(token) do
       raise ArgumentError, "invalid Rekindle page runtime session"
@@ -46,4 +46,17 @@ defmodule Rekindle.Phoenix.PageRuntime do
 
     %{socket_path: socket_path, project_session: project_session, token: token}
   end
+
+  defp valid_socket_path?(path) when is_binary(path) do
+    segments = path |> String.trim_leading("/") |> String.split("/")
+
+    byte_size(path) in 2..4_096 and String.valid?(path) and
+      String.normalize(path, :nfc) == path and String.starts_with?(path, "/") and
+      not String.starts_with?(path, "//") and
+      not String.contains?(path, ["\\", "?", "#", "%", <<0>>]) and
+      not Regex.match?(~r/[\x00-\x1F\x7F]/, path) and
+      Enum.all?(segments, &(&1 not in ["", ".", ".."]))
+  end
+
+  defp valid_socket_path?(_path), do: false
 end

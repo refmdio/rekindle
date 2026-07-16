@@ -74,6 +74,36 @@ defmodule Rekindle.Phoenix.ComponentsTest do
     end
   end
 
+  test "development rendering rejects noncanonical or cross-origin socket paths" do
+    Application.put_env(@otp_app, @endpoint, code_reloader: true)
+    Application.put_env(@otp_app, :rekindle_dev, enabled: true)
+
+    for socket_path <- [
+          "//evil.example/socket",
+          "https://evil.example/socket",
+          "socket/rekindle",
+          "/socket//rekindle",
+          "/socket/./rekindle",
+          "/socket/../rekindle",
+          "/socket\\rekindle",
+          "/socket?authority=evil.example",
+          "/socket#fragment",
+          "/socket%2Fescape",
+          "/socket\0escape",
+          "/"
+        ] do
+      Application.put_env(@otp_app, :rekindle_page_runtime,
+        socket_path: socket_path,
+        project_session: "0123456789abcdef0123456789abcdef",
+        token: String.duplicate("t", 32)
+      )
+
+      assert_raise ArgumentError, fn ->
+        render_component(&Components.gpui_page/1, otp_app: @otp_app, endpoint: @endpoint)
+      end
+    end
+  end
+
   test "exports only one page marker function" do
     functions = Components.__info__(:functions)
     assert {:gpui_page, 1} in functions
