@@ -90,6 +90,19 @@ defmodule Rekindle.ConfigTest do
     assert project.dev.accepted_origins == nil
   end
 
+  test "defaults startup grace when startup-grace readiness is selected" do
+    runtime = [readiness: :startup_grace, handoff: :disabled]
+    build = put_desktop_target(desktop_build(), &Keyword.put(&1, :runtime, runtime))
+
+    assert {:ok, project} = Config.normalize(:demo_app, build, [])
+    assert project.build.targets.desktop.runtime.startup_grace_ms == 1_000
+
+    invalid =
+      put_desktop_target(build, &Keyword.put(&1, :runtime, runtime ++ [startup_grace_ms: nil]))
+
+    assert_error(Config.normalize(:demo_app, invalid, []), :config_invalid)
+  end
+
   test "enforces every configurable resource boundary inclusively" do
     cases = [
       {:cache, :retained_generations, 1, 20},

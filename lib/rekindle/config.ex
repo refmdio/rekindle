@@ -448,7 +448,11 @@ defmodule Rekindle.Config do
            ),
          {:ok, startup_grace} <-
            optional_integer_in(
-             Keyword.get(value, :startup_grace_ms),
+             Keyword.get(
+               value,
+               :startup_grace_ms,
+               if(readiness == :startup_grace, do: 1_000, else: nil)
+             ),
              100..30_000,
              path ++ [:runtime, :startup_grace_ms]
            ),
