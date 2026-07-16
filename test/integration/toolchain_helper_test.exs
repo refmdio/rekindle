@@ -656,6 +656,20 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       {"host-requirement extra field",
        &update_in(&1["host_requirements"], fn host -> Map.put(host, "extra", true) end)},
       {"entry path", &Map.put(&1, "entry", "../entry.js")},
+      {"second bootstrap",
+       fn value ->
+         javascript = Enum.find(value["members"], &(&1["role"] == "javascript"))
+
+         value
+         |> update_in(["members"], fn members ->
+           Enum.map(members, fn member ->
+             if member["path"] == javascript["path"],
+               do: %{member | "role" => "bootstrap", "cache" => "no_cache"},
+               else: member
+           end)
+         end)
+         |> with_web_artifact_id()
+       end},
       {"hot-style order", &Map.put(&1, "hot_styles", ["styles/theme.css", "styles/app.css"])},
       {"member unknown field",
        &update_in(&1["members"], fn [member | rest] -> [Map.put(member, "extra", 1) | rest] end)},

@@ -1308,6 +1308,18 @@ fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usi
         previous = Some(path);
     }
 
+    if member_roles
+        .values()
+        .filter(|role| role.as_str() == "bootstrap")
+        .count()
+        != 1
+    {
+        return Err(OpError::new(
+            "invalid_request",
+            "manifest must contain exactly one bootstrap",
+        ));
+    }
+
     validate_web_artifact_tree(root, &member_paths)?;
     validate_artifact_marker(root)?;
 
