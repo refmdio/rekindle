@@ -45,7 +45,11 @@ defmodule Rekindle.ConfigTest do
     assert project.build.cache.retained_generations == 3
     assert project.build.cache.max_generation_bytes == 2_147_483_648
     assert project.build.process.build_timeout_ms == 900_000
+    assert project.build.process.terminate_grace_ms == 3_000
+    assert project.build.process.kill_grace_ms == 2_000
+    assert project.build.process.output_bytes_per_stream == 16_777_216
     assert project.build.process.max_cargo_builds == 2
+    assert project.build.process.max_helper_jobs == min(System.schedulers_online(), 4)
 
     assert %WebTarget{} = web = project.build.targets.web
     assert web.package == "demo_app_ui"
@@ -63,6 +67,12 @@ defmodule Rekindle.ConfigTest do
     assert project.dev.endpoint == Endpoint
     assert project.dev.accepted_origins == :endpoint
     assert project.dev.debounce_ms == 75
+    assert project.dev.diagnostic_limit == 512
+    assert project.dev.browser_message_bytes == 1_048_576
+    assert project.dev.browser_startup_timeout_ms == 15_000
+    assert project.dev.handoff_bytes == 1_048_576
+    assert project.dev.snapshot_timeout_ms == 1_000
+    assert project.dev.restore_timeout_ms == 1_000
   end
 
   test "normalizes desktop runtime defaults and desktop-only development" do
@@ -70,11 +80,74 @@ defmodule Rekindle.ConfigTest do
     assert %DesktopTarget{} = desktop = project.build.targets.desktop
     assert desktop.rust_target == nil
     assert desktop.runtime.readiness == :ipc_v1
+    assert desktop.runtime.startup_timeout_ms == 10_000
+    assert desktop.runtime.shutdown_timeout_ms == 3_000
     assert desktop.runtime.replacement == :overlap
     assert desktop.runtime.handoff == :enabled
+    assert desktop.runtime.startup_grace_ms == nil
     assert project.dev.targets == [:desktop]
     assert project.dev.endpoint == nil
     assert project.dev.accepted_origins == nil
+  end
+
+  test "enforces every configurable resource boundary inclusively" do
+    cases = [
+      {:cache, :retained_generations, 1, 20},
+      {:cache, :max_generation_bytes, 67_108_864, 17_179_869_184},
+      {:process, :build_timeout_ms, 1_000, 3_600_000},
+      {:process, :terminate_grace_ms, 0, 30_000},
+      {:process, :kill_grace_ms, 100, 30_000},
+      {:process, :output_bytes_per_stream, 1_048_576, 268_435_456},
+      {:process, :max_cargo_builds, 1, 16},
+      {:process, :max_helper_jobs, 1, 16},
+      {:runtime, :startup_timeout_ms, 100, 120_000},
+      {:runtime, :startup_grace_ms, 100, 30_000},
+      {:runtime, :shutdown_timeout_ms, 100, 30_000},
+      {:dev, :debounce_ms, 0, 2_000},
+      {:dev, :diagnostic_limit, 1, 4_096},
+      {:dev, :browser_message_bytes, 65_536, 4_194_304},
+      {:dev, :browser_startup_timeout_ms, 1_000, 120_000},
+      {:dev, :handoff_bytes, 0, 16_777_216},
+      {:dev, :snapshot_timeout_ms, 100, 10_000},
+      {:dev, :restore_timeout_ms, 100, 10_000}
+    ]
+
+    for {scope, field, minimum, maximum} <- cases do
+      for value <- [minimum, maximum] do
+        {build, dev} = resource_config(scope, field, value)
+        assert {:ok, project} = Config.normalize(:demo_app, build, dev)
+        assert resource_value(project, scope, field) == value
+      end
+
+      for value <- [minimum - 1, maximum + 1] do
+        {build, dev} = resource_config(scope, field, value)
+        assert_error(Config.normalize(:demo_app, build, dev), :config_invalid)
+      end
+    end
+  end
+
+  test "enforces feature count and aggregate encoded-byte boundaries" do
+    below = feature_vector(128, 64) |> List.update_at(-1, &binary_part(&1, 0, 63))
+    boundary = feature_vector(128, 64)
+    above = List.update_at(boundary, -1, &(&1 <> "x"))
+
+    assert Enum.sum(Enum.map(below, &byte_size/1)) == 8_191
+    assert Enum.sum(Enum.map(boundary, &byte_size/1)) == 8_192
+    assert Enum.sum(Enum.map(above, &byte_size/1)) == 8_193
+
+    for features <- [below, boundary] do
+      assert {:ok, project} =
+               Config.normalize(:demo_app, put_web_features(features), web_dev())
+
+      assert project.build.targets.web.features == Enum.sort(features)
+    end
+
+    assert_error(Config.normalize(:demo_app, put_web_features(above), web_dev()), :config_invalid)
+
+    assert_error(
+      Config.normalize(:demo_app, put_web_features(feature_vector(129, 8)), web_dev()),
+      :config_invalid
+    )
   end
 
   test "admits the external pipeline and forbids canonical field mixing" do
@@ -761,6 +834,57 @@ defmodule Rekindle.ConfigTest do
 
   defp put_desktop_target(build, function) do
     Keyword.update!(build, :targets, &Keyword.update!(&1, :desktop, function))
+  end
+
+  defp put_web_features(features) do
+    put_web_target(web_build(), &Keyword.put(&1, :features, features))
+  end
+
+  defp resource_config(:cache, field, value) do
+    build = Keyword.update!(web_build(), :cache, &Keyword.put(&1, field, value))
+    {build, web_dev()}
+  end
+
+  defp resource_config(:process, field, value) do
+    build = Keyword.update!(web_build(), :process, &Keyword.put(&1, field, value))
+    {build, web_dev()}
+  end
+
+  defp resource_config(:runtime, :startup_grace_ms, value) do
+    runtime = [readiness: :startup_grace, handoff: :disabled, startup_grace_ms: value]
+    build = put_desktop_target(desktop_build(), &Keyword.put(&1, :runtime, runtime))
+    {build, []}
+  end
+
+  defp resource_config(:runtime, field, value) do
+    build =
+      put_desktop_target(desktop_build(), fn target ->
+        Keyword.put(target, :runtime, [{field, value}])
+      end)
+
+    {build, []}
+  end
+
+  defp resource_config(:dev, field, value) do
+    {web_build(), Keyword.put(web_dev(), field, value)}
+  end
+
+  defp resource_value(project, :cache, field), do: Map.fetch!(project.build.cache, field)
+  defp resource_value(project, :process, field), do: Map.fetch!(project.build.process, field)
+
+  defp resource_value(project, :runtime, field),
+    do: Map.fetch!(project.build.targets.desktop.runtime, field)
+
+  defp resource_value(project, :dev, field), do: Map.fetch!(project.dev, field)
+
+  defp feature_vector(count, width) do
+    for index <- 1..count do
+      index
+      |> Integer.to_string()
+      |> String.pad_leading(3, "0")
+      |> then(&("f" <> &1))
+      |> String.pad_trailing(width, "x")
+    end
   end
 
   defp web_dev do

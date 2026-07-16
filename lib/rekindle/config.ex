@@ -38,7 +38,7 @@ defmodule Rekindle.Config do
     kill_grace_ms: 2_000,
     output_bytes_per_stream: 16_777_216,
     max_cargo_builds: 2,
-    max_helper_jobs: 4
+    max_helper_jobs: min(System.schedulers_online(), 4)
   ]
   @default_environment [inherit: :toolchain, set: [], unset: [], build_inputs: [], redact: []]
   @default_profiles [dev: "dev", release: "release"]
@@ -63,6 +63,7 @@ defmodule Rekindle.Config do
   ]
   @max_collection_items 128
   @max_configuration_depth 32
+  @max_feature_bytes 8_192
 
   @spec load(atom(), keyword()) :: {:ok, Project.t()} | {:error, [ConfigError.t()]}
   def load(otp_app, options \\ []) when is_atom(otp_app) do
@@ -422,13 +423,15 @@ defmodule Rekindle.Config do
              path ++ [:runtime, :readiness]
            ),
          {:ok, startup_timeout} <-
-           positive(
+           integer_in(
              Keyword.get(value, :startup_timeout_ms, 10_000),
+             100..120_000,
              path ++ [:runtime, :startup_timeout_ms]
            ),
          {:ok, shutdown_timeout} <-
-           positive(
+           integer_in(
              Keyword.get(value, :shutdown_timeout_ms, 3_000),
+             100..30_000,
              path ++ [:runtime, :shutdown_timeout_ms]
            ),
          {:ok, replacement} <-
@@ -444,8 +447,9 @@ defmodule Rekindle.Config do
              path ++ [:runtime, :handoff]
            ),
          {:ok, startup_grace} <-
-           optional_positive(
+           optional_integer_in(
              Keyword.get(value, :startup_grace_ms),
+             100..30_000,
              path ++ [:runtime, :startup_grace_ms]
            ),
          :ok <- validate_runtime(readiness, replacement, handoff, startup_grace, path) do
@@ -482,13 +486,13 @@ defmodule Rekindle.Config do
     with {:ok, root} <-
            relative_path(fetch(value, :root), [:rekindle_build, :cache, :root]),
          {:ok, retained} <-
-           nonnegative(fetch(value, :retained_generations), [
+           integer_in(fetch(value, :retained_generations), 1..20, [
              :rekindle_build,
              :cache,
              :retained_generations
            ]),
          {:ok, max_bytes} <-
-           positive(fetch(value, :max_generation_bytes), [
+           integer_in(fetch(value, :max_generation_bytes), 67_108_864..17_179_869_184, [
              :rekindle_build,
              :cache,
              :max_generation_bytes
@@ -508,33 +512,41 @@ defmodule Rekindle.Config do
 
   defp normalize_process_values(value) do
     with {:ok, build_timeout} <-
-           positive(fetch(value, :build_timeout_ms), [
+           integer_in(fetch(value, :build_timeout_ms), 1_000..3_600_000, [
              :rekindle_build,
              :process,
              :build_timeout_ms
            ]),
          {:ok, terminate_grace} <-
-           positive(fetch(value, :terminate_grace_ms), [
+           integer_in(fetch(value, :terminate_grace_ms), 0..30_000, [
              :rekindle_build,
              :process,
              :terminate_grace_ms
            ]),
          {:ok, kill_grace} <-
-           positive(fetch(value, :kill_grace_ms), [:rekindle_build, :process, :kill_grace_ms]),
+           integer_in(
+             fetch(value, :kill_grace_ms),
+             100..30_000,
+             [:rekindle_build, :process, :kill_grace_ms]
+           ),
          {:ok, output_bytes} <-
-           positive(fetch(value, :output_bytes_per_stream), [
+           integer_in(fetch(value, :output_bytes_per_stream), 1_048_576..268_435_456, [
              :rekindle_build,
              :process,
              :output_bytes_per_stream
            ]),
          {:ok, max_cargo} <-
-           positive(fetch(value, :max_cargo_builds), [
+           integer_in(fetch(value, :max_cargo_builds), 1..16, [
              :rekindle_build,
              :process,
              :max_cargo_builds
            ]),
          {:ok, max_helper} <-
-           positive(fetch(value, :max_helper_jobs), [:rekindle_build, :process, :max_helper_jobs]) do
+           integer_in(
+             fetch(value, :max_helper_jobs),
+             1..16,
+             [:rekindle_build, :process, :max_helper_jobs]
+           ) do
       {:ok,
        %ProcessPolicy{
          build_timeout_ms: build_timeout,
@@ -564,22 +576,36 @@ defmodule Rekindle.Config do
          {:ok, endpoint} <- endpoint(Keyword.get(value, :endpoint), targets, path),
          {:ok, origins} <-
            origins(fetch(value, :accepted_origins), targets, endpoint, otp_app, path),
-         {:ok, debounce} <- nonnegative(fetch(value, :debounce_ms), path ++ [:debounce_ms]),
+         {:ok, debounce} <-
+           integer_in(fetch(value, :debounce_ms), 0..2_000, path ++ [:debounce_ms]),
          {:ok, diagnostic_limit} <-
-           positive(fetch(value, :diagnostic_limit), path ++ [:diagnostic_limit]),
+           integer_in(fetch(value, :diagnostic_limit), 1..4_096, path ++ [:diagnostic_limit]),
          {:ok, browser_bytes} <-
-           positive(fetch(value, :browser_message_bytes), path ++ [:browser_message_bytes]),
+           integer_in(
+             fetch(value, :browser_message_bytes),
+             65_536..4_194_304,
+             path ++ [:browser_message_bytes]
+           ),
          {:ok, browser_timeout} <-
-           positive(
+           integer_in(
              fetch(value, :browser_startup_timeout_ms),
+             1_000..120_000,
              path ++ [:browser_startup_timeout_ms]
            ),
          {:ok, handoff_bytes} <-
-           nonnegative(fetch(value, :handoff_bytes), path ++ [:handoff_bytes]),
+           integer_in(fetch(value, :handoff_bytes), 0..16_777_216, path ++ [:handoff_bytes]),
          {:ok, snapshot_timeout} <-
-           positive(fetch(value, :snapshot_timeout_ms), path ++ [:snapshot_timeout_ms]),
+           integer_in(
+             fetch(value, :snapshot_timeout_ms),
+             100..10_000,
+             path ++ [:snapshot_timeout_ms]
+           ),
          {:ok, restore_timeout} <-
-           positive(fetch(value, :restore_timeout_ms), path ++ [:restore_timeout_ms]) do
+           integer_in(
+             fetch(value, :restore_timeout_ms),
+             100..10_000,
+             path ++ [:restore_timeout_ms]
+           ) do
       {:ok,
        %DevConfig{
          schema: 1,
@@ -1152,18 +1178,20 @@ defmodule Rekindle.Config do
   defp boolean(value, _path) when is_boolean(value), do: {:ok, value}
   defp boolean(_value, path), do: error(path, :config_invalid, "value must be boolean")
 
-  defp positive(value, _path) when is_integer(value) and value > 0, do: {:ok, value}
+  defp integer_in(value, first..last//1, _path)
+       when is_integer(value) and value >= first and value <= last,
+       do: {:ok, value}
 
-  defp positive(_value, path),
-    do: error(path, :config_invalid, "value must be a positive integer")
+  defp integer_in(_value, range, path),
+    do:
+      error(
+        path,
+        :config_invalid,
+        "value must be an integer in #{range.first}..#{range.last}"
+      )
 
-  defp optional_positive(nil, _path), do: {:ok, nil}
-  defp optional_positive(value, path), do: positive(value, path)
-
-  defp nonnegative(value, _path) when is_integer(value) and value >= 0, do: {:ok, value}
-
-  defp nonnegative(_value, path),
-    do: error(path, :config_invalid, "value must be a nonnegative integer")
+  defp optional_integer_in(nil, _range, _path), do: {:ok, nil}
+  defp optional_integer_in(value, range, path), do: integer_in(value, range, path)
 
   defp member(value, allowed, path) do
     if value in allowed do
@@ -1187,7 +1215,8 @@ defmodule Rekindle.Config do
 
   defp identifiers(value, path) when is_list(value) do
     with true <- bounded_proper_list?(value),
-         true <- Enum.all?(value, &match?({:ok, _}, identifier(&1, path))) do
+         true <- Enum.all?(value, &match?({:ok, _}, identifier(&1, path))),
+         true <- Enum.reduce(value, 0, &(byte_size(&1) + &2)) <= @max_feature_bytes do
       unique_sorted(value, & &1, path)
     else
       _ -> error(path, :config_invalid, "identifier list is invalid")
