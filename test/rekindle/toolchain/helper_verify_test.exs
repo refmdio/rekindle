@@ -19,6 +19,16 @@ defmodule Rekindle.Toolchain.HelperVerifyTest do
     assert ports == MapSet.new(Port.list())
   end
 
+  test "settles every successful verification port before returning", %{root: root} do
+    ports = MapSet.new(Port.list())
+    helper = helper!(root, "valid")
+
+    for iteration <- 1..50 do
+      assert Helper.verify(helper, timeout_ms: 1_000) == :ok, "iteration #{iteration}"
+      assert ports == MapSet.new(Port.list()), "iteration #{iteration}"
+    end
+  end
+
   test "rejects every compatibility binding mismatch and malformed response", %{root: root} do
     for kind <- ~w[protocol schema version host nonce request mode extra malformed premature] do
       assert {:error, %Failure{code: :helper_protocol_mismatch}} =

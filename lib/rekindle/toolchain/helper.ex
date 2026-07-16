@@ -309,9 +309,17 @@ defmodule Rekindle.Toolchain.Helper do
 
   defp finish(port, <<>>, deadline, result) do
     receive do
-      {^port, {:exit_status, 0}} -> result.()
-      {^port, {:data, _extra}} -> {:error, :post_terminal_frame}
-      {^port, {:exit_status, _status}} -> {:error, :helper_protocol}
+      {^port, {:exit_status, 0}} ->
+        close(port)
+        result.()
+
+      {^port, {:data, _extra}} ->
+        close(port)
+        {:error, :post_terminal_frame}
+
+      {^port, {:exit_status, _status}} ->
+        close(port)
+        {:error, :helper_protocol}
     after
       max(deadline - monotonic_ms(), 0) ->
         close(port)
