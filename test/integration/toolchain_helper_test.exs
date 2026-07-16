@@ -169,20 +169,65 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     assert terminal.cleanup == :confirmed
   end
 
-  test "the real helper rejects compatibility mismatch and noncanonical hello", %{
+  test "the real helper admits the exact hello schema and exposes every mismatch class", %{
     helper: helper
   } do
-    expected = %{Helper.compatibility() | "helper_version" => "9.9.9"}
     host = Installer.host() |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
-    hello = Handshake.hello("web-v1", expected, host)
+    expected = Helper.compatibility()
+    nonce = String.duplicate("a", 64)
+
+    hello = %{
+      "v" => 1,
+      "type" => "hello",
+      "request_id" => @request,
+      "payload_len" => 0,
+      "session_nonce" => nonce,
+      "mode" => "web-v1",
+      "expected" => expected,
+      "host" => host
+    }
+
+    invalid_hellos = [
+      update_in(hello, ["expected"], &Map.delete(&1, "helper_version")),
+      put_in(hello, ["expected", "extra"], 1),
+      put_in(hello, ["expected", "toolframe"], "1"),
+      update_in(hello, ["host"], &Map.delete(&1, "arch")),
+      put_in(hello, ["host", "extra"], "value"),
+      put_in(hello, ["host", "os"], 1)
+    ]
+
+    mismatch_hellos = [
+      {put_in(hello, ["expected", "toolframe"], 2), "protocol_mismatch"},
+      {put_in(hello, ["expected", "wasm_bindgen_schema"], "0.0.0"), "schema_mismatch"},
+      {put_in(hello, ["expected", "helper_version"], "9.9.9"), "version_mismatch"},
+      {put_in(hello, ["host", "arch"], "other"), "host_mismatch"}
+    ]
+
+    for invalid <- invalid_hellos do
+      assert_hello_error(helper, invalid, "invalid_hello", expected, host)
+    end
+
+    for {mismatch, code} <- mismatch_hellos do
+      assert_hello_error(helper, mismatch, code, expected, host)
+    end
+
     port = open_helper(helper, "web-v1")
     assert {:ok, encoded} = Frame.encode(hello)
     assert Port.command(port, encoded)
 
-    assert {:ok, %{"type" => "hello_error", "code" => "version_mismatch"}, <<>>} =
-             receive_frame(port, <<>>)
+    assert {:ok,
+            %{
+              "v" => 1,
+              "type" => "hello_ok",
+              "request_id" => @request,
+              "payload_len" => 0,
+              "session_nonce" => ^nonce,
+              "mode" => "web-v1",
+              "actual" => ^expected,
+              "host" => ^host
+            }, <<>>} = receive_frame(port, <<>>)
 
-    assert_receive {^port, {:exit_status, 2}}, 1_000
+    Port.close(port)
 
     port = open_helper(helper, "web-v1")
     request_id = String.duplicate("0", 32)
@@ -930,6 +975,30 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
           {_, _} -> false
         end
     end
+  end
+
+  defp assert_hello_error(helper, hello, code, actual, host) do
+    port = open_helper(helper, "web-v1")
+    nonce = hello["session_nonce"]
+    assert {:ok, encoded} = Frame.encode(hello)
+    assert Port.command(port, encoded)
+
+    assert {:ok,
+            %{
+              "v" => 1,
+              "type" => "hello_error",
+              "request_id" => @request,
+              "payload_len" => 0,
+              "session_nonce" => ^nonce,
+              "mode" => "web-v1",
+              "code" => ^code,
+              "expected" => expected,
+              "actual" => ^actual,
+              "host" => ^host
+            }, <<>>} = receive_frame(port, <<>>)
+
+    assert expected == hello["expected"]
+    assert_receive {^port, {:exit_status, 2}}, 1_000
   end
 
   defp open_helper(helper, mode) do
