@@ -1,8 +1,16 @@
 defmodule Rekindle.ClientGenerator do
   @moduledoc false
 
-  alias Rekindle.CanonicalValue
+  alias Rekindle.{CanonicalValue, Failure}
   alias Rekindle.Toolchain.{Executable, Rustup}
+
+  defmodule InstallError do
+    @moduledoc false
+    defexception [:failure]
+
+    @impl Exception
+    def message(%__MODULE__{failure: failure}), do: Rekindle.Failure.render(failure)
+  end
 
   @template_version "2"
   @client_version "0.1.0"
@@ -271,14 +279,8 @@ defmodule Rekindle.ClientGenerator do
           :ok ->
             :ok
 
-          {:error, %Rekindle.Failure{} = failure} ->
-            raise failure.message
-
-          {:error, {output, status}} ->
-            raise "cargo generate-lockfile failed (#{status}): #{output}"
-
           {:error, reason} ->
-            raise "cargo generate-lockfile failed: #{reason}"
+            raise InstallError, failure: lock_failure(reason)
         end
       end
 
@@ -296,6 +298,9 @@ defmodule Rekindle.ClientGenerator do
       if lstat_type(staging) in [:directory, :symlink], do: File.rm_rf!(staging)
     end
   end
+
+  @spec write(Path.t(), keyword()) :: {:ok, [Path.t()]} | {:error, Failure.t()}
+  def write(client_root, options), do: contain_install(fn -> write!(client_root, options) end)
 
   @doc false
   @spec reconcile!(Path.t(), keyword(), keyword()) :: [Path.t()]
@@ -343,14 +348,8 @@ defmodule Rekindle.ClientGenerator do
           :ok ->
             :ok
 
-          {:error, %Rekindle.Failure{} = failure} ->
-            raise failure.message
-
-          {:error, {output, status}} ->
-            raise "cargo generate-lockfile failed (#{status}): #{output}"
-
           {:error, reason} ->
-            raise "cargo generate-lockfile failed: #{reason}"
+            raise InstallError, failure: lock_failure(reason)
         end
       end
 
@@ -373,6 +372,22 @@ defmodule Rekindle.ClientGenerator do
       |> Enum.map(&Path.join(client_root, &1))
     after
       if lstat_type(staging) in [:directory, :symlink], do: File.rm_rf!(staging)
+    end
+  end
+
+  @doc false
+  @spec reconcile(Path.t(), keyword(), keyword()) ::
+          {:ok, [Path.t()]} | {:error, Failure.t()}
+  def reconcile(client_root, options, runtime_options \\ []) do
+    contain_install(fn -> reconcile!(client_root, options, runtime_options) end)
+  end
+
+  @doc false
+  @spec run_installer_reconciliation!(Path.t(), keyword()) :: [Path.t()] | no_return()
+  def run_installer_reconciliation!(client_root, options) do
+    case reconcile(client_root, options) do
+      {:ok, paths} -> paths
+      {:error, failure} -> Mix.raise(Failure.render(failure))
     end
   end
 
@@ -674,10 +689,59 @@ defmodule Rekindle.ClientGenerator do
 
   defp path_depth(path), do: path |> Path.split() |> length()
 
-  @doc false
+  defp contain_install(function) do
+    {:ok, function.()}
+  rescue
+    error in InstallError ->
+      sanitize_failure(error.failure)
+
+    _exception ->
+      {:error, install_failure()}
+  catch
+    _kind, _reason ->
+      {:error, install_failure()}
+  end
+
+  defp sanitize_failure(%Failure{} = failure) do
+    case Failure.sanitize(failure) do
+      {:ok, sanitized} -> {:error, sanitized}
+      {:error, _reason} -> {:error, install_failure()}
+    end
+  end
+
+  defp lock_failure(%Failure{} = failure) do
+    case Failure.sanitize(failure) do
+      {:ok, sanitized} -> sanitized
+      {:error, _reason} -> cargo_failure(nil)
+    end
+  end
+
+  defp lock_failure({_output, status}) when is_integer(status), do: cargo_failure(status)
+  defp lock_failure(_reason), do: cargo_failure(nil)
+
+  defp cargo_failure(status) do
+    suffix = if is_integer(status), do: " with status #{status}", else: ""
+
+    Failure.new!(
+      target: nil,
+      stage: :execution,
+      code: :cargo_failed,
+      message: "Cargo.lock generation failed#{suffix}"
+    )
+  end
+
+  defp install_failure do
+    Failure.new!(
+      target: nil,
+      stage: :configuration,
+      code: :install_conflict,
+      message: "generated client installation failed"
+    )
+  end
+
   @spec generate_lock(Path.t()) ::
           :ok | {:error, Rekindle.Failure.t() | atom() | {binary(), non_neg_integer()}}
-  def generate_lock(client_root) do
+  defp generate_lock(client_root) do
     manifest = client_root |> Path.expand() |> Path.join("Cargo.toml")
 
     with {:ok, rustup} <- Rustup.resolve(),

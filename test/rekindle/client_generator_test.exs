@@ -1,7 +1,7 @@
 defmodule Rekindle.ClientGeneratorTest do
   use ExUnit.Case, async: false
 
-  alias Rekindle.ClientGenerator
+  alias Rekindle.{ClientGenerator, Failure}
 
   test "renders a byte-stable shared client with target-specific entry glue" do
     options = options(generate_lock: false)
@@ -379,6 +379,38 @@ defmodule Rekindle.ClientGeneratorTest do
              ClientGenerator.render(options(generate_lock: false))["Cargo.toml"]
   end
 
+  test "manual generation returns a bounded typed failure without command output" do
+    base =
+      Path.join(
+        System.tmp_dir!(),
+        "rekindle-client-failure-#{System.unique_integer([:positive])}"
+      )
+
+    rustup = Path.join(base, "rustup")
+    client = Path.join(base, "client")
+    secret = "manual-lock-secret"
+    File.mkdir_p!(base)
+
+    File.write!(
+      rustup,
+      "#!/bin/sh\nprintf '%s\\n' '#{secret} /private/build/path' >&2\nexit 41\n"
+    )
+
+    File.chmod!(rustup, 0o700)
+    on_exit(fn -> File.rm_rf!(base) end)
+
+    with_env("REKINDLE_RUSTUP", rustup, fn ->
+      assert {:error, %Failure{} = failure} = ClientGenerator.write(client, options([]))
+      assert failure.stage == :execution
+      assert failure.code == :cargo_failed
+      assert failure.message == "Cargo.lock generation failed with status 41"
+      refute failure.message =~ secret
+      refute failure.message =~ "/private/build/path"
+      assert byte_size(failure.message) < 512
+      refute File.exists?(client)
+    end)
+  end
+
   defp options(extra) do
     [
       application_id: "sample_app",
@@ -413,5 +445,16 @@ defmodule Rekindle.ClientGeneratorTest do
     File.cp!(Path.join(source, "Cargo.toml"), Path.join(destination, "Cargo.toml"))
     File.cp!(Path.join(source, "Cargo.lock"), Path.join(destination, "Cargo.lock"))
     File.cp_r!(Path.join(source, "src"), Path.join(destination, "src"))
+  end
+
+  defp with_env(name, value, function) do
+    previous = System.get_env(name)
+    System.put_env(name, value)
+
+    try do
+      function.()
+    after
+      if previous, do: System.put_env(name, previous), else: System.delete_env(name)
+    end
   end
 end

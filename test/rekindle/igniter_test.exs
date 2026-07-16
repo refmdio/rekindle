@@ -6,6 +6,16 @@ defmodule Rekindle.IgniterTest do
   alias Rekindle.ClientGenerator
   alias Rekindle.Igniter, as: RekindleIgniter
 
+  test "public Mix command inventory excludes installer-owned client lock machinery" do
+    Mix.Task.load_all()
+
+    assert Mix.Task.get("rekindle.install") == Mix.Tasks.Rekindle.Install
+    assert Mix.Task.get("rekindle.setup") == Mix.Tasks.Rekindle.Setup
+    assert Mix.Task.get("rekindle.client.lock") == nil
+    refute File.exists?("lib/mix/tasks/rekindle.client.lock.ex")
+    refute function_exported?(ClientGenerator, :generate_lock, 1)
+  end
+
   test "production alias preserves its prefix and replaces one terminal digest" do
     assert {:ok, ["cmd npm deploy", "rekindle.phoenix.deploy"]} =
              RekindleIgniter.transform_assets_deploy(["cmd npm deploy", "phx.digest"])
@@ -259,27 +269,31 @@ defmodule Rekindle.IgniterTest do
     assert snapshot.application_children =~ "Rekindle"
 
     root = temp_dir!("rekindle-manual-equivalence")
+    automatic_project = Path.join(root, "automatic")
     automatic_root = Path.join(root, "automatic/client")
     manual_root = Path.join(root, "manual/client")
     fixture_client = Path.join(root, "registry-fixture/rekindle-client")
     cargo_home = Path.join(root, "cargo-home")
     copy_client_fixture!(fixture_client)
     prepare_cargo_home!(cargo_home, fixture_client)
-    materialize_client!(automatic, automatic_root)
-    materialize_client!(manual, manual_root)
-
     assert_client_reconciliation_task(automatic, "client")
+    {"run", ["--no-compile", "-e", expression]} = client_reconciliation_task(automatic)
+    File.mkdir_p!(automatic_project)
 
     with_env("CARGO_HOME", cargo_home, fn ->
       with_env("CARGO_NET_OFFLINE", "true", fn ->
-        Mix.Tasks.Rekindle.Client.Lock.run([automatic_root])
-        Mix.Tasks.Rekindle.Client.Lock.run([manual_root])
+        File.cd!(automatic_project, fn ->
+          {paths, _binding} = Code.eval_string(expression)
+          assert Path.join(automatic_root, "Cargo.lock") in paths
+        end)
+
+        assert {:ok, paths} = ClientGenerator.write(manual_root, client_generator_options())
+        assert Path.join(manual_root, "Cargo.lock") in paths
       end)
     end)
 
+    assert directory_snapshot(automatic_root) == directory_snapshot(manual_root)
     automatic_lock = File.read!(Path.join(automatic_root, "Cargo.lock"))
-    manual_lock = File.read!(Path.join(manual_root, "Cargo.lock"))
-    assert automatic_lock == manual_lock
     assert automatic_lock =~ ~s(name = "rekindle-client")
   end
 
@@ -380,11 +394,43 @@ defmodule Rekindle.IgniterTest do
 
       {"run", ["--no-compile", "-e", expression]} = client_reconciliation_task(proposal)
 
-      assert_raise ArgumentError, ~r/no-follow directory path/, fn ->
-        Code.eval_string(expression)
-      end
+      error = assert_raise Mix.Error, fn -> Code.eval_string(expression) end
+      assert error.message == "install_conflict: generated client installation failed"
 
       assert directory_snapshot(outside) == baseline
+    end)
+  end
+
+  test "installer lock failures are typed, bounded, and do not expose command output" do
+    root = temp_dir!("rekindle-igniter-lock-failure")
+    rustup = Path.join(root, "rustup")
+    secret = "installer-lock-secret"
+
+    File.write!(
+      rustup,
+      "#!/bin/sh\nprintf '%s\\n' '#{secret} /private/build/path' >&2\nexit 37\n"
+    )
+
+    File.chmod!(rustup, 0o700)
+
+    proposal =
+      RekindleIgniter.install(project(),
+        client_path: "client",
+        targets: [:web],
+        endpoint: SampleAppWeb.Endpoint
+      )
+
+    {"run", ["--no-compile", "-e", expression]} = client_reconciliation_task(proposal)
+
+    with_env("REKINDLE_RUSTUP", rustup, fn ->
+      File.cd!(root, fn ->
+        error = assert_raise Mix.Error, fn -> Code.eval_string(expression) end
+        assert error.message == "cargo_failed: Cargo.lock generation failed with status 37"
+        refute error.message =~ secret
+        refute error.message =~ "/private/build/path"
+        assert byte_size(error.message) < 512
+        refute File.exists?(Path.join(root, "client"))
+      end)
     end)
   end
 
@@ -403,45 +449,45 @@ defmodule Rekindle.IgniterTest do
         endpoint: SampleAppWeb.Endpoint
       )
 
-    installed = apply_igniter!(proposal)
-    materialize_client!(installed, client_root)
-    assert File.read!(Path.join(client_root, "Cargo.lock")) == ""
     assert_client_reconciliation_task(proposal, "client")
+    {"run", ["--no-compile", "-e", expression]} = client_reconciliation_task(proposal)
 
     with_env("CARGO_HOME", cargo_home, fn ->
-      Mix.Tasks.Rekindle.Client.Lock.run([client_root])
-      lock = File.read!(Path.join(client_root, "Cargo.lock"))
-      assert lock =~ ~s(name = "rekindle-client")
+      with_env("CARGO_NET_OFFLINE", "true", fn ->
+        File.cd!(root, fn -> Code.eval_string(expression) end)
+        lock = File.read!(Path.join(client_root, "Cargo.lock"))
+        assert lock =~ ~s(name = "rekindle-client")
 
-      assert_cargo!(client_root, "1.95.0", [
-        "metadata",
-        "--locked",
-        "--format-version",
-        "1",
-        "--no-deps"
-      ])
+        assert_cargo!(client_root, "1.95.0", [
+          "metadata",
+          "--locked",
+          "--format-version",
+          "1",
+          "--no-deps"
+        ])
 
-      assert_cargo!(client_root, "1.95.0", [
-        "check",
-        "--locked",
-        "--no-default-features",
-        "--features",
-        "desktop",
-        "--bin",
-        "sample_app"
-      ])
+        assert_cargo!(client_root, "1.95.0", [
+          "check",
+          "--locked",
+          "--no-default-features",
+          "--features",
+          "desktop",
+          "--bin",
+          "sample_app"
+        ])
 
-      assert_cargo!(client_root, "nightly-2026-04-01", [
-        "check",
-        "--locked",
-        "--target",
-        "wasm32-unknown-unknown",
-        "--no-default-features",
-        "--features",
-        "web",
-        "--bin",
-        "sample_app-web"
-      ])
+        assert_cargo!(client_root, "nightly-2026-04-01", [
+          "check",
+          "--locked",
+          "--target",
+          "wasm32-unknown-unknown",
+          "--no-default-features",
+          "--features",
+          "web",
+          "--bin",
+          "sample_app-web"
+        ])
+      end)
     end)
 
     reinstalled =
@@ -1158,24 +1204,21 @@ defmodule Rekindle.IgniterTest do
 
   defp assert_client_reconciliation_task(igniter, client_path) do
     assert {"run", ["--no-compile", "-e", expression]} = client_reconciliation_task(igniter)
-    assert expression =~ "Rekindle.ClientGenerator.reconcile!(#{inspect(client_path)},"
+
+    assert expression =~
+             "Rekindle.ClientGenerator.run_installer_reconciliation!(#{inspect(client_path)},"
   end
 
   defp client_reconciliation_task(igniter) do
     Enum.find(igniter.tasks, fn
       {"run", ["--no-compile", "-e", expression]} ->
-        String.starts_with?(expression, "Rekindle.ClientGenerator.reconcile!(")
+        String.starts_with?(
+          expression,
+          "Rekindle.ClientGenerator.run_installer_reconciliation!("
+        )
 
       _other ->
         false
-    end)
-  end
-
-  defp materialize_client!(igniter, client_root) do
-    Enum.each(client_paths(), fn relative ->
-      path = Path.join(client_root, relative)
-      File.mkdir_p!(Path.dirname(path))
-      File.write!(path, virtual_file(igniter, Path.join("client", relative)))
     end)
   end
 
@@ -1193,13 +1236,17 @@ defmodule Rekindle.IgniterTest do
   end
 
   defp current_client do
-    ClientGenerator.render(
+    ClientGenerator.render(client_generator_options())
+  end
+
+  defp client_generator_options do
+    [
       application_id: "sample_app",
       package: "sample_app_ui",
       web_binary: "sample_app-web",
       desktop_binary: "sample_app",
       targets: [:web, :desktop]
-    )
+    ]
   end
 
   defp prior_client do

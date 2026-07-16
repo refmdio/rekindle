@@ -42,13 +42,12 @@ end
 mix deps.get
 ```
 
-Generate the canonical GPUI client. The destination must be absent or empty.
-Then generate `Cargo.lock` with Rekindle's pinned Web toolchain, matching the
-Igniter installation path.
+Generate the canonical GPUI client and `Cargo.lock` with Rekindle's pinned Web
+toolchain. The destination must be absent or empty. This uses the same typed
+generation path as the Igniter installer.
 
 ```sh
-mix run -e 'Rekindle.ClientGenerator.write!("client", application_id: "my_app", package: "my_app_ui", web_binary: "my_app-web", desktop_binary: "my_app", targets: [:web, :desktop], generate_lock: false)'
-mix rekindle.client.lock client
+mix run -e '{:ok, _files} = Rekindle.ClientGenerator.write("client", application_id: "my_app", package: "my_app_ui", web_binary: "my_app-web", desktop_binary: "my_app", targets: [:web, :desktop])'
 ```
 
 Add the build configuration to `config/config.exs` before the final

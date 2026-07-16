@@ -218,7 +218,7 @@ if Code.ensure_loaded?(Igniter) do
 
     defp queue_client_reconciliation(igniter, client_path, options) do
       expression =
-        "Rekindle.ClientGenerator.reconcile!(#{inspect(client_path)}, #{inspect(options)})"
+        "Rekindle.ClientGenerator.run_installer_reconciliation!(#{inspect(client_path)}, #{inspect(options)})"
 
       Igniter.add_task(igniter, "run", ["--no-compile", "-e", expression])
     end
