@@ -64,6 +64,65 @@ defmodule Rekindle.CommandTest do
     accepted = Command.run("rekindle.example", ["--target=web"], target_grammar, handler)
     assert accepted.exit_status == 0
     assert_receive {:called, %{options: %{target: "web"}}}
+
+    for argv <- [["web", "--json", "--json"], ["web", "-j", "-j"]] do
+      outcome = Command.run("rekindle.example", argv, alias_grammar, handler)
+      assert outcome.exit_status == 2
+      assert outcome.stderr == ""
+      assert String.split(outcome.stdout, "\n", trim: true) |> length() == 1
+
+      assert outcome.stdout ==
+               Rekindle.CanonicalValue.encode!(Jason.decode!(outcome.stdout)) <> "\n"
+
+      assert Jason.decode!(outcome.stdout)["failure"]["code"] == "config_invalid"
+      refute_received {:called, _}
+    end
+
+    value_json_grammar = [
+      switches: [output: :string, json: :boolean],
+      aliases: [j: :json],
+      positionals: 0
+    ]
+
+    missing_value =
+      Command.run("rekindle.example", ["--output", "-j"], value_json_grammar, handler)
+
+    assert missing_value.exit_status == 2
+    assert missing_value.stderr == ""
+    assert Jason.decode!(missing_value.stdout)["failure"]["code"] == "config_invalid"
+    refute_received {:called, _}
+  end
+
+  test "preserves canonical separated and assigned numeric option values" do
+    parent = self()
+
+    grammar = [
+      switches: [number: :integer, ratio: :float],
+      aliases: [n: :number, r: :ratio],
+      positionals: 0
+    ]
+
+    cases = [
+      {["--number", "-1"], %{number: -1}},
+      {["-n", "-1"], %{number: -1}},
+      {["--ratio", "-1.5"], %{ratio: -1.5}},
+      {["-r", "-1.5"], %{ratio: -1.5}},
+      {["--number=-1"], %{number: -1}},
+      {["-n=-1"], %{number: -1}},
+      {["--ratio=-1.5"], %{ratio: -1.5}},
+      {["-r=-1.5"], %{ratio: -1.5}}
+    ]
+
+    for {argv, expected} <- cases do
+      outcome =
+        Command.run("rekindle.example", argv, grammar, fn invocation ->
+          send(parent, {:options, invocation.options})
+          {:ok, %{}}
+        end)
+
+      assert outcome.exit_status == 0, inspect(argv)
+      assert_receive {:options, ^expected}
+    end
   end
 
   test "human success uses stdout and expected failure uses stderr" do

@@ -69,6 +69,12 @@ defmodule Rekindle.Command do
   end
 
   defp validate_raw_options(argv, switches, aliases) do
+    {long, short} = raw_option_maps(switches, aliases)
+
+    scan_raw_options(argv, long, short, MapSet.new())
+  end
+
+  defp raw_option_maps(switches, aliases) do
     specifications = Map.new(switches)
 
     long =
@@ -84,7 +90,7 @@ defmodule Rekindle.Command do
         end
       end)
 
-    scan_raw_options(argv, long, short, MapSet.new())
+    {long, short}
   end
 
   defp scan_raw_options([], _long, _short, _seen), do: :ok
@@ -92,15 +98,21 @@ defmodule Rekindle.Command do
 
   defp scan_raw_options(["--" <> _rest = token | rest], long, short, seen) do
     case raw_long_option(token, long) do
-      {:ok, name, type} -> continue_raw_options(rest, long, short, seen, token, name, type)
-      :error -> {:error, "unknown or invalid option: #{token}"}
+      {:ok, name, type, consume_value?} ->
+        continue_raw_options(rest, long, short, seen, token, name, type, consume_value?)
+
+      :error ->
+        {:error, "unknown or invalid option: #{token}"}
     end
   end
 
   defp scan_raw_options(["-" <> rest = token | tail], long, short, seen) when rest != "" do
     case raw_short_option(token, short) do
-      {:ok, name, type} -> continue_raw_options(tail, long, short, seen, token, name, type)
-      :error -> {:error, "unknown or invalid option: #{token}"}
+      {:ok, name, type, consume_value?} ->
+        continue_raw_options(tail, long, short, seen, token, name, type, consume_value?)
+
+      :error ->
+        {:error, "unknown or invalid option: #{token}"}
     end
   end
 
@@ -110,13 +122,13 @@ defmodule Rekindle.Command do
   defp raw_long_option(token, long) do
     case Map.fetch(long, token) do
       {:ok, {name, type}} ->
-        {:ok, name, type}
+        {:ok, name, type, value_option?(type)}
 
       :error ->
         with [spelling, _value] <- String.split(token, "=", parts: 2),
              {:ok, {name, type}} <- Map.fetch(long, spelling),
-             false <- type == :boolean do
-          {:ok, name, type}
+             true <- value_option?(type) do
+          {:ok, name, type, false}
         else
           _ -> :error
         end
@@ -126,28 +138,47 @@ defmodule Rekindle.Command do
   defp raw_short_option(token, short) do
     case Map.fetch(short, token) do
       {:ok, {name, type}} ->
-        {:ok, name, type}
+        {:ok, name, type, value_option?(type)}
 
       :error ->
         with [spelling, _value] <- String.split(token, "=", parts: 2),
              {:ok, {name, type}} <- Map.fetch(short, spelling),
-             false <- type == :boolean do
-          {:ok, name, type}
+             true <- value_option?(type) do
+          {:ok, name, type, false}
         else
           _ -> :error
         end
     end
   end
 
-  defp continue_raw_options(rest, long, short, seen, token, name, type) do
+  defp continue_raw_options(rest, long, short, seen, token, name, type, consume_value?) do
     if not repeatable_option?(type) and MapSet.member?(seen, name) do
       {:error, "duplicate option: #{token}"}
     else
+      rest = if consume_value?, do: drop_option_value(rest, type), else: rest
       scan_raw_options(rest, long, short, MapSet.put(seen, name))
     end
   end
 
   defp repeatable_option?(type), do: type in [:count, :keep]
+  defp value_option?(type), do: type in [:float, :integer, :keep, :string]
+
+  defp drop_option_value([], _type), do: []
+
+  defp drop_option_value([value | tail] = values, _type) do
+    if separated_option_value?(value), do: tail, else: values
+  end
+
+  defp separated_option_value?("-"), do: true
+
+  defp separated_option_value?("-" <> _rest = value) do
+    case Float.parse(value) do
+      {_number, ""} -> true
+      _ -> false
+    end
+  end
+
+  defp separated_option_value?(_value), do: true
 
   defp execute(command, invocation, handler) do
     case handler.(invocation) do
@@ -246,13 +277,47 @@ defmodule Rekindle.Command do
   end
 
   defp invocation_failure(command, argv, grammar, message) do
-    json? = Keyword.has_key?(Keyword.fetch!(grammar, :switches), :json) and "--json" in argv
+    json? = json_intent?(argv, grammar)
 
     failure =
       Failure.new!(target: nil, stage: :configuration, code: :config_invalid, message: message)
 
     failure_outcome(command, json?, failure, [], 2)
   end
+
+  defp json_intent?(argv, grammar) do
+    switches = Keyword.fetch!(grammar, :switches)
+
+    if Keyword.get(switches, :json) == :boolean do
+      {long, short} = raw_option_maps(switches, Keyword.get(grammar, :aliases, []))
+      scan_json_intent?(argv, long, short)
+    else
+      false
+    end
+  end
+
+  defp scan_json_intent?([], _long, _short), do: false
+  defp scan_json_intent?(["--" | _rest], _long, _short), do: false
+
+  defp scan_json_intent?(["--" <> _rest = token | tail], long, short) do
+    json_option_or_continue?(raw_long_option(token, long), tail, long, short)
+  end
+
+  defp scan_json_intent?(["-" <> rest = token | tail], long, short) when rest != "" do
+    json_option_or_continue?(raw_short_option(token, short), tail, long, short)
+  end
+
+  defp scan_json_intent?([_value | tail], long, short),
+    do: scan_json_intent?(tail, long, short)
+
+  defp json_option_or_continue?({:ok, :json, :boolean, false}, _tail, _long, _short),
+    do: true
+
+  defp json_option_or_continue?({:ok, _name, type, true}, tail, long, short),
+    do: scan_json_intent?(drop_option_value(tail, type), long, short)
+
+  defp json_option_or_continue?(_option, tail, long, short),
+    do: scan_json_intent?(tail, long, short)
 
   defp failure_outcome(command, true, failure, _progress, exit_status) do
     envelope = envelope(command, "error", nil, Failure.to_map(failure))
