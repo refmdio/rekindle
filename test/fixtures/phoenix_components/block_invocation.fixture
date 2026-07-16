@@ -1,0 +1,14 @@
+defmodule Rekindle.ComponentCompileFixtures.BlockInvocation do
+  use Phoenix.Component
+
+  def render(assigns) do
+    ~H"""
+    <Rekindle.Phoenix.Components.gpui_page
+      otp_app={:fixture_app}
+      endpoint={Rekindle.ComponentCompileFixtures.Endpoint}
+    >
+      unsupported child content
+    </Rekindle.Phoenix.Components.gpui_page>
+    """
+  end
+end

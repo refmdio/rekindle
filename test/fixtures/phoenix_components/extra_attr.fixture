@@ -1,0 +1,13 @@
+defmodule Rekindle.ComponentCompileFixtures.ExtraAttr do
+  use Phoenix.Component
+
+  def render(assigns) do
+    ~H"""
+    <Rekindle.Phoenix.Components.gpui_page
+      otp_app={:fixture_app}
+      endpoint={Rekindle.ComponentCompileFixtures.Endpoint}
+      extra="not-owned"
+    />
+    """
+  end
+end

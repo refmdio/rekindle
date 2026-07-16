@@ -128,6 +128,48 @@ defmodule Rekindle.IgniterTest do
     assert Enum.count(ignore_lines, &(&1 == "/client/.rekindle/")) == 1
   end
 
+  test "layout parsing admits exactly one owned marker and rejects a second marker" do
+    noisy_layout = """
+    <!doctype html>
+    <html>
+      <body>
+        <!-- gpui_page data-rekindle-page -->
+        <p>host-owned gpui_page data-rekindle-page text</p>
+      </body>
+    </html>
+    """
+
+    installed =
+      project(layout: noisy_layout)
+      |> RekindleIgniter.install(targets: [:web], endpoint: SampleAppWeb.Endpoint)
+
+    assert installed.issues == []
+
+    assert count(
+             source(installed, "lib/sample_app_web/components/layouts/root.html.heex"),
+             "<Rekindle.Phoenix.Components.gpui_page"
+           ) == 1
+
+    marker =
+      "<Rekindle.Phoenix.Components.gpui_page otp_app={:sample_app} endpoint={SampleAppWeb.Endpoint} />"
+
+    duplicate_layout = "<html><body>#{marker}\n#{marker}</body></html>\n"
+    initial = project(layout: duplicate_layout)
+
+    rejected =
+      RekindleIgniter.install(initial, targets: [:web], endpoint: SampleAppWeb.Endpoint)
+
+    layout_path = "lib/sample_app_web/components/layouts/root.html.heex"
+    assert source_issues(rejected, layout_path) != []
+    assert source(rejected, layout_path) == source(initial, layout_path)
+
+    foreign =
+      project(layout: ~s(<html><body><script data-rekindle-page="v1"></script></body></html>))
+      |> RekindleIgniter.install(targets: [:web], endpoint: SampleAppWeb.Endpoint)
+
+    assert source_issues(foreign, layout_path) != []
+  end
+
   test "documented manual installation is semantically equivalent on every owned surface" do
     automatic =
       project(deps: ~s([{:rekindle, "~> 0.1"}]))

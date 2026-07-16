@@ -707,28 +707,147 @@ if Code.ensure_loaded?(Igniter) do
           marker =
             "<Rekindle.Phoenix.Components.gpui_page otp_app={#{inspect(otp_app)}} endpoint={#{inspect(endpoint)}} />"
 
-          cond do
-            String.contains?(contents, marker) ->
+          case classify_page_marker(contents, otp_app, endpoint) do
+            {:ok, :owned} ->
               source
 
-            length(Regex.scan(~r/data-rekindle-page|gpui_page/, contents)) > 0 ->
-              {:error,
-               "the selected root layout already contains a foreign GPUI/Rekindle page marker"}
-
-            String.contains?(contents, "</body>") ->
+            {:ok, {:absent, body_close}} ->
               Rewrite.Source.update(
                 source,
                 :content,
-                &String.replace(&1, "</body>", "  #{marker}\n</body>")
+                &insert_at(&1, body_close, "  #{marker}\n")
               )
 
-            true ->
-              {:error, "the selected root layout has no literal closing body tag"}
+            {:error, message} ->
+              {:error, message}
           end
         end)
       else
         igniter
       end
+    end
+
+    defp classify_page_marker(contents, otp_app, endpoint) do
+      with {:ok, parsed} <-
+             Phoenix.LiveView.TagEngine.Parser.parse(contents,
+               tag_handler: Phoenix.LiveView.HTMLEngine
+             ) do
+        tags = collect_tags(parsed.nodes)
+        markers = Enum.filter(tags, &page_marker?/1)
+        bodies = Enum.filter(tags, &body_tag?/1)
+
+        case bodies do
+          [%{close: close}] when is_map(close) ->
+            classify_parsed_markers(markers, close, otp_app, endpoint)
+
+          _ ->
+            {:error, "the selected root layout must contain exactly one body element"}
+        end
+      else
+        {:error, _line, _column, _message} ->
+          {:error, "the selected root layout is not valid HEEx"}
+      end
+    rescue
+      _ -> {:error, "the selected root layout is not valid HEEx"}
+    end
+
+    defp classify_parsed_markers([], body_close, _otp_app, _endpoint),
+      do: {:ok, {:absent, body_close}}
+
+    defp classify_parsed_markers([marker], _body_close, otp_app, endpoint) do
+      if owned_page_marker?(marker, otp_app, endpoint),
+        do: {:ok, :owned},
+        else:
+          {:error,
+           "the selected root layout already contains a foreign GPUI/Rekindle page marker"}
+    end
+
+    defp classify_parsed_markers(_markers, _body_close, _otp_app, _endpoint),
+      do: {:error, "the selected root layout contains multiple GPUI/Rekindle page markers"}
+
+    defp collect_tags(nodes, inside_body \\ false) do
+      Enum.flat_map(nodes, fn
+        {:block, type, name, attrs, children, open, close} ->
+          child_inside_body = inside_body or (type == :tag and name == "body")
+
+          [
+            tag(:block, type, name, attrs, open, close, inside_body)
+            | collect_tags(children, child_inside_body)
+          ]
+
+        {:self_close, type, name, attrs, open} ->
+          [tag(:self_close, type, name, attrs, open, nil, inside_body)]
+
+        {:eex_block, _expression, clauses, _meta} ->
+          Enum.flat_map(clauses, fn {children, _expression, _meta} ->
+            collect_tags(children, inside_body)
+          end)
+
+        _ ->
+          []
+      end)
+    end
+
+    defp tag(kind, type, name, attrs, open, close, inside_body),
+      do: %{
+        kind: kind,
+        type: type,
+        name: name,
+        attrs: attrs,
+        open: open,
+        close: close,
+        inside_body: inside_body
+      }
+
+    defp page_marker?(tag) do
+      tag.name == "Rekindle.Phoenix.Components.gpui_page" or
+        String.ends_with?(tag.name, "gpui_page") or
+        Enum.any?(tag.attrs, fn
+          {"data-rekindle-page", _value, _meta} -> true
+          _ -> false
+        end)
+    end
+
+    defp body_tag?(%{kind: :block, type: :tag, name: "body"}), do: true
+    defp body_tag?(_tag), do: false
+
+    defp owned_page_marker?(marker, otp_app, endpoint) do
+      marker.inside_body and marker.kind == :self_close and marker.type == :remote_component and
+        marker.name == "Rekindle.Phoenix.Components.gpui_page" and
+        length(marker.attrs) == 2 and
+        normalized_attrs(marker.attrs) == %{
+          "otp_app" => normalize_expression(inspect(otp_app)),
+          "endpoint" => normalize_expression(inspect(endpoint))
+        }
+    end
+
+    defp normalized_attrs(attrs) do
+      Map.new(attrs, fn
+        {name, {:expr, expression, _meta}, _attr_meta} ->
+          {name, normalize_expression(expression)}
+
+        {name, _value, _attr_meta} ->
+          {name, :invalid}
+      end)
+    end
+
+    defp normalize_expression(expression) do
+      case Code.string_to_quoted(expression) do
+        {:ok, quoted} -> Macro.to_string(quoted)
+        {:error, _reason} -> :invalid
+      end
+    end
+
+    defp insert_at(contents, %{line: line, column: column}, insertion) do
+      lines = String.split(contents, "\n", trim: false)
+      {before, [current | after_lines]} = Enum.split(lines, line - 1)
+
+      byte_offset =
+        current |> String.to_charlist() |> Enum.take(column - 1) |> to_string() |> byte_size()
+
+      <<prefix::binary-size(^byte_offset), suffix::binary>> = current
+
+      Enum.join(before ++ [prefix <> insertion <> suffix | after_lines], "\n")
     end
 
     defp install_ignores(igniter, client_path) do

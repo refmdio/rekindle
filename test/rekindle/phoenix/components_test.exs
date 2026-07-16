@@ -110,7 +110,51 @@ defmodule Rekindle.Phoenix.ComponentsTest do
     refute Enum.any?(functions, fn {name, _arity} -> name in [:mount, :host, :gpui_mount] end)
   end
 
+  test "compile fixtures enforce the exact remote component contract" do
+    assert {:ok, modules} = compile_fixture("positive.fixture")
+    assert modules != []
+
+    cases = [
+      {"missing_otp_app.fixture", ~s(missing required attribute "otp_app")},
+      {"missing_endpoint.fixture", ~s(missing required attribute "endpoint")},
+      {"wrong_otp_app_type.fixture", ~s(attribute "otp_app")},
+      {"wrong_endpoint_type.fixture", ~s(attribute "endpoint")},
+      {"extra_attr.fixture", ~s(undefined attribute "extra")},
+      {"block_invocation.fixture", ~s(undefined slot "inner_block")},
+      {"local_invocation.fixture", "undefined function gpui_page/1"}
+    ]
+
+    for {fixture, expected} <- cases do
+      assert {:error, diagnostics} = compile_fixture(fixture)
+      assert Enum.any?(diagnostics, &String.contains?(&1.message, expected))
+    end
+  end
+
   defp count(value, pattern), do: value |> String.split(pattern) |> length() |> Kernel.-(1)
+
+  defp compile_fixture(name) do
+    path = Path.expand("../../fixtures/phoenix_components/#{name}", __DIR__)
+
+    {{result, diagnostics}, _captured} =
+      ExUnit.CaptureIO.with_io(:stderr, fn ->
+        Code.with_diagnostics(
+          [log: false],
+          fn ->
+            try do
+              {:ok, Code.compile_file(path)}
+            rescue
+              error -> {:error, error}
+            end
+          end
+        )
+      end)
+
+    case {result, diagnostics} do
+      {{:ok, modules}, []} -> {:ok, modules}
+      {_result, diagnostics} when diagnostics != [] -> {:error, diagnostics}
+      {{:error, error}, []} -> {:error, [%{message: Exception.message(error)}]}
+    end
+  end
 
   defp restore_env(key, nil), do: Application.delete_env(@otp_app, key)
   defp restore_env(key, value), do: Application.put_env(@otp_app, key, value)
