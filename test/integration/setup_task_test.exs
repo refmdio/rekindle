@@ -162,7 +162,7 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     end
   end
 
-  test "source-built and offline-cached real helpers both negotiate", context do
+  test "source-built and offline-cached real helpers complete verification sessions", context do
     File.rm_rf!(Path.join(context.root, "rekindle/helpers"))
     real_rustup = Path.join(System.user_home!(), ".cargo/bin/rustup")
     System.put_env("REKINDLE_RUSTUP", real_rustup)

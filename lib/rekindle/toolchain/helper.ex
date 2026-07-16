@@ -13,23 +13,48 @@ defmodule Rekindle.Toolchain.Helper do
     "web_manifest" => 1,
     "native_manifest" => 1
   }
+  @verification_executables ["/usr/bin/true", "/bin/true"]
 
   @spec compatibility() :: map()
   def compatibility, do: @compatibility
 
   @spec verify(Path.t(), keyword()) :: :ok | {:error, Failure.t()}
   def verify(executable, options \\ []) do
-    case start(executable, "web-v1", Keyword.put(options, :stderr_to_stdout, true)) do
-      {:ok, port, <<>>} ->
-        close(port)
-        :ok
-
-      {:ok, port, _unexpected} ->
-        close(port)
-        verification_failure()
-
-      _error ->
-        verification_failure()
+    with {:ok, verification_executable} <- verification_executable(),
+         {:ok, spawn, state} <-
+           Exec.spawn_request(
+             executable: verification_executable.path,
+             argv: [],
+             cwd: "/",
+             env_mode: :replace,
+             env_set: [],
+             env_unset: [],
+             terminate_grace_ms: 0,
+             kill_grace_ms: 100,
+             output_bytes_per_stream: 1_048_576
+           ),
+         {:ok,
+          %{
+            outcome: :exited,
+            code: 0,
+            signal: nil,
+            cleanup: :confirmed,
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            discarded_stdout: 0,
+            discarded_stderr: 0
+          }, <<>>, <<>>} <-
+           run_exec(
+             executable,
+             spawn,
+             state,
+             options
+             |> Keyword.put(:stderr_to_stdout, true)
+             |> Keyword.put(:cleanup_timeout_ms, Keyword.get(options, :timeout_ms, 30_000))
+           ) do
+      :ok
+    else
+      _ -> verification_failure()
     end
   rescue
     _ -> verification_failure()
@@ -335,6 +360,19 @@ defmodule Rekindle.Toolchain.Helper do
 
   defp deadline(options),
     do: monotonic_ms() + Keyword.get(options, :timeout_ms, 30_000)
+
+  defp verification_executable do
+    Enum.find_value(
+      @verification_executables,
+      {:error, :verification_executable_missing},
+      fn path ->
+        case Executable.qualify(path) do
+          {:ok, executable} -> {:ok, executable}
+          {:error, _reason} -> false
+        end
+      end
+    )
+  end
 
   defp verification_failure do
     {:error,
