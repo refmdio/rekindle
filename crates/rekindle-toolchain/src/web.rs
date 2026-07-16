@@ -532,7 +532,7 @@ fn validate_root(value: &Value, mode: &str) -> OpResult<Root> {
         if !marker_metadata.file_type().is_file()
             || marker_metadata.uid() != metadata.uid()
             || marker_metadata.dev() != metadata.dev()
-            || marker_metadata.permissions().mode() & 0o077 != 0
+            || marker_metadata.permissions().mode() & 0o777 != 0o600
             || bytes != expected
         {
             return Err(OpError::new("invalid_request", "invalid attempt marker"));

@@ -458,7 +458,7 @@ defmodule Rekindle.Toolchain.Web do
     with {:ok, [@marker]} <- File.ls(path),
          {:ok, stat} <- File.lstat(marker),
          true <- stat.type == :regular and stat.uid == root_stat.uid,
-         true <- Bitwise.band(stat.mode, 0o077) == 0,
+         true <- Bitwise.band(stat.mode, 0o777) == 0o600,
          true <- stat.major_device == root_stat.major_device,
          {:ok, bytes} <- File.read(marker),
          true <- bytes == marker_bytes(id) do

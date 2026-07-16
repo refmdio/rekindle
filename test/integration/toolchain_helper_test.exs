@@ -207,21 +207,18 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     assert {:ok, bindgen_root} = Web.prepare_output_root(bindgen_output, id: id(2))
     limits = limits()
 
-    assert {:ok, request, state} =
-             Web.operation(
-               "bindgen_web",
-               %{
-                 input_root: input_root,
-                 input_wasm: wasm,
-                 output_root: bindgen_root,
-                 output_stem: "app",
-                 debug: false,
-                 source_maps: :none,
-                 expected_wasm_bindgen: "0.2.121",
-                 limits: limits
-               },
-               request_id: @request
-             )
+    marker = Path.join(bindgen_output, Web.marker())
+    File.chmod!(marker, 0o700)
+
+    assert {:ok, rejected_request, rejected_state} =
+             bindgen_operation(input_root, wasm, bindgen_root, limits)
+
+    assert {:ok, %{"type" => "operation_error", "code" => "invalid_request"}, []} =
+             Helper.run_web(helper, rejected_request, rejected_state)
+
+    File.chmod!(marker, 0o600)
+
+    assert {:ok, request, state} = bindgen_operation(input_root, wasm, bindgen_root, limits)
 
     assert {:ok, %{"type" => "operation_ok", "op" => "bindgen_web"} = bound, []} =
              Helper.run_web(helper, request, state)
@@ -298,6 +295,23 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       )
 
     limits
+  end
+
+  defp bindgen_operation(input_root, wasm, output_root, limits) do
+    Web.operation(
+      "bindgen_web",
+      %{
+        input_root: input_root,
+        input_wasm: wasm,
+        output_root: output_root,
+        output_stem: "app",
+        debug: false,
+        source_maps: :none,
+        expected_wasm_bindgen: "0.2.121",
+        limits: limits
+      },
+      request_id: @request
+    )
   end
 
   defp manifest_base do

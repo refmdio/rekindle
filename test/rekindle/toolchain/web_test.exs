@@ -122,6 +122,13 @@ defmodule Rekindle.Toolchain.WebTest do
                id: "22222222222222222222222222222222"
              )
 
+    File.chmod!(marker, 0o700)
+
+    assert {:error, :invalid_root} =
+             Web.root(roots.output, :write_empty, id: "22222222222222222222222222222222")
+
+    File.chmod!(marker, 0o600)
+
     assert {:error, :invalid_root} =
              Web.root(roots.output, :write_empty, id: "33333333333333333333333333333333")
   end
