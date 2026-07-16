@@ -839,6 +839,17 @@ defmodule Rekindle.Toolchain.Web do
     end
   end
 
+  defp take_template_expression(<<?/, rest::binary>>, depth, chunks, nested) do
+    if template_regex_allowed?(chunks) do
+      case take_regex_literal(rest, false) do
+        {:ok, rest} -> take_template_expression(rest, depth, ["/(?:)/" | chunks], nested)
+        :error -> :error
+      end
+    else
+      take_template_expression(rest, depth, ["/" | chunks], nested)
+    end
+  end
+
   defp take_template_expression(<<?{, rest::binary>>, depth, chunks, nested),
     do: take_template_expression(rest, depth + 1, ["{" | chunks], nested)
 
@@ -864,6 +875,15 @@ defmodule Rekindle.Toolchain.Web do
           {:halt, {:error, reason}}
       end
     end)
+  end
+
+  defp template_regex_allowed?(chunks) do
+    partial = chunks |> Enum.reverse() |> IO.iodata_to_binary()
+
+    case javascript_tokens(partial) do
+      {:ok, tokens, _comments} -> regex_literal_allowed?(Enum.reverse(tokens))
+      {:error, _reason} -> false
+    end
   end
 
   defp take_identifier(<<byte, rest::binary>>, bytes)
