@@ -122,7 +122,8 @@ if Code.ensure_loaded?(Igniter) do
         Enum.reduce(files, igniter, fn {relative, contents}, acc ->
           path = Path.join(client_path, relative)
 
-          if relative in ["src/app.rs", "public/.gitkeep"] and Igniter.exists?(acc, path) do
+          if relative in ["Cargo.lock", "src/app.rs", "public/.gitkeep"] and
+               Igniter.exists?(acc, path) do
             acc
           else
             create_owned_file(acc, path, contents)

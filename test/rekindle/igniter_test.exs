@@ -1,5 +1,5 @@
 defmodule Rekindle.IgniterTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   import Igniter.Test
 
@@ -84,7 +84,6 @@ defmodule Rekindle.IgniterTest do
       )
 
     assert reinstalled.issues == []
-    refute {"rekindle.client.lock", ["client"]} in reinstalled.tasks
     assert source(reinstalled, "mix.exs") == source(installed, "mix.exs")
     assert source(reinstalled, "lib/sample_app_web/endpoint.ex") == endpoint
     assert count(source(reinstalled, "lib/sample_app_web.ex"), ~s("rekindle")) == 1
@@ -97,6 +96,79 @@ defmodule Rekindle.IgniterTest do
     ignore_lines = String.split(source(reinstalled, ".gitignore"), "\n")
     assert Enum.count(ignore_lines, &(&1 == "/.rekindle/")) == 1
     assert Enum.count(ignore_lines, &(&1 == "/client/.rekindle/")) == 1
+  end
+
+  test "applied canonical client generates a lock and checks both declared toolchains" do
+    root = temp_dir!("rekindle-igniter-applied")
+    client_root = Path.join(root, "client")
+    fixture_client = Path.join(root, "registry-fixture/rekindle-client")
+    cargo_home = Path.join(root, "cargo-home")
+    copy_client_fixture!(fixture_client)
+    prepare_cargo_home!(cargo_home, fixture_client)
+
+    proposal =
+      RekindleIgniter.install(project(),
+        client_path: "client",
+        targets: [:web, :desktop],
+        endpoint: SampleAppWeb.Endpoint
+      )
+
+    installed = apply_igniter!(proposal)
+    materialize_client!(installed, client_root)
+    assert File.read!(Path.join(client_root, "Cargo.lock")) == ""
+    assert {"rekindle.client.lock", ["client"]} in proposal.tasks
+
+    with_env("CARGO_HOME", cargo_home, fn ->
+      Mix.Tasks.Rekindle.Client.Lock.run([client_root])
+      lock = File.read!(Path.join(client_root, "Cargo.lock"))
+      assert lock =~ ~s(name = "rekindle-client")
+
+      assert_cargo!(client_root, "1.95.0", [
+        "metadata",
+        "--locked",
+        "--format-version",
+        "1",
+        "--no-deps"
+      ])
+
+      assert_cargo!(client_root, "1.95.0", [
+        "check",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "desktop",
+        "--bin",
+        "sample_app"
+      ])
+
+      assert_cargo!(client_root, "nightly-2026-04-01", [
+        "check",
+        "--locked",
+        "--target",
+        "wasm32-unknown-unknown",
+        "--no-default-features",
+        "--features",
+        "web",
+        "--bin",
+        "sample_app-web"
+      ])
+    end)
+
+    reinstalled =
+      client_root
+      |> client_files()
+      |> Enum.reduce(project(), fn {relative, contents}, igniter ->
+        Igniter.create_new_file(igniter, Path.join("client", relative), contents)
+      end)
+      |> apply_igniter!()
+      |> RekindleIgniter.install(
+        client_path: "client",
+        targets: [:web, :desktop],
+        endpoint: SampleAppWeb.Endpoint
+      )
+
+    assert reinstalled.issues == []
+    refute {"rekindle.client.lock", ["client"]} in reinstalled.tasks
   end
 
   test "modified template-owned files conflict while application UI remains owned by the app" do
@@ -364,6 +436,91 @@ defmodule Rekindle.IgniterTest do
     igniter.rewrite
     |> Rewrite.source!(path)
     |> Rewrite.Source.get(:content)
+  end
+
+  defp materialize_client!(igniter, client_root) do
+    Enum.each(client_paths(), fn relative ->
+      path = Path.join(client_root, relative)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, virtual_file(igniter, Path.join("client", relative)))
+    end)
+  end
+
+  defp virtual_file(igniter, path) do
+    case Rewrite.source(igniter.rewrite, path) do
+      {:ok, source} -> Rewrite.Source.get(source, :content)
+      {:error, _} -> Map.fetch!(igniter.assigns.test_files, path)
+    end
+  end
+
+  defp client_files(client_root) do
+    Map.new(client_paths(), fn relative ->
+      {relative, File.read!(Path.join(client_root, relative))}
+    end)
+  end
+
+  defp client_paths do
+    Rekindle.ClientGenerator.render(
+      application_id: "sample_app",
+      package: "sample_app_ui",
+      targets: [:web, :desktop]
+    )
+    |> Map.keys()
+  end
+
+  defp copy_client_fixture!(destination) do
+    source = Path.expand("crates/rekindle-client")
+    File.mkdir_p!(destination)
+    File.cp!(Path.join(source, "Cargo.toml"), Path.join(destination, "Cargo.toml"))
+    File.cp!(Path.join(source, "Cargo.lock"), Path.join(destination, "Cargo.lock"))
+    File.cp_r!(Path.join(source, "src"), Path.join(destination, "src"))
+  end
+
+  defp prepare_cargo_home!(cargo_home, fixture_client) do
+    File.mkdir_p!(cargo_home)
+    upstream = Path.join(System.user_home!(), ".cargo")
+
+    for name <- ["registry", "git"], File.exists?(Path.join(upstream, name)) do
+      File.ln_s!(Path.join(upstream, name), Path.join(cargo_home, name))
+    end
+
+    File.write!(
+      Path.join(cargo_home, "config.toml"),
+      """
+      [patch.crates-io]
+      rekindle-client = { path = #{inspect(fixture_client)} }
+      """
+    )
+  end
+
+  defp assert_cargo!(client_root, toolchain, argv) do
+    {rustc, 0} = System.cmd("rustup", ["which", "--toolchain", toolchain, "rustc"])
+    target_dir = Path.expand("_build/test/generated-client-cargo/igniter/#{toolchain}")
+
+    assert {_, 0} =
+             System.cmd("rustup", ["run", toolchain, "cargo" | argv],
+               cd: client_root,
+               env: [{"RUSTC", String.trim(rustc)}, {"CARGO_TARGET_DIR", target_dir}],
+               stderr_to_stdout: true
+             )
+  end
+
+  defp with_env(name, value, function) do
+    previous = System.get_env(name)
+    System.put_env(name, value)
+
+    try do
+      function.()
+    after
+      if previous, do: System.put_env(name, previous), else: System.delete_env(name)
+    end
+  end
+
+  defp temp_dir!(prefix) do
+    path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(path)
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
   end
 
   defp count(value, pattern), do: value |> String.split(pattern) |> length() |> Kernel.-(1)
