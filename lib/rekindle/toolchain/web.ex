@@ -495,9 +495,11 @@ defmodule Rekindle.Toolchain.Web do
   end
 
   defp javascript_tokens(<<?`, rest::binary>>, tokens, comments) do
-    case take_quoted(rest, ?`, [], false) do
-      {:ok, _value, _escaped?, rest} -> javascript_tokens(rest, [:template | tokens], comments)
-      :error -> {:error, :unterminated_template}
+    with {:ok, expressions, rest} <- take_template(rest, []),
+         {:ok, tokens, comments} <- tokenize_template_expressions(expressions, tokens, comments) do
+      javascript_tokens(rest, [:template | tokens], comments)
+    else
+      _ -> {:error, :unterminated_template}
     end
   end
 
@@ -785,6 +787,84 @@ defmodule Rekindle.Toolchain.Web do
 
   defp css_name_byte?(byte),
     do: byte in ?A..?Z or byte in ?a..?z or byte in ?0..?9 or byte in [?_, ?-]
+
+  defp take_template(<<>>, _expressions), do: :error
+
+  defp take_template(<<?\\, _byte, rest::binary>>, expressions),
+    do: take_template(rest, expressions)
+
+  defp take_template(<<?`, rest::binary>>, expressions),
+    do: {:ok, Enum.reverse(expressions), rest}
+
+  defp take_template(<<"${", rest::binary>>, expressions) do
+    with {:ok, expression, nested, rest} <- take_template_expression(rest, 1, [], []) do
+      take_template(rest, Enum.reverse(nested, [expression | expressions]))
+    end
+  end
+
+  defp take_template(<<_codepoint::utf8, rest::binary>>, expressions),
+    do: take_template(rest, expressions)
+
+  defp take_template_expression(<<>>, _depth, _chunks, _nested), do: :error
+
+  defp take_template_expression(<<"//", rest::binary>>, depth, chunks, nested) do
+    {comment, rest} = take_until_line_end(rest)
+    take_template_expression(rest, depth, [["//", comment, "\n"] | chunks], nested)
+  end
+
+  defp take_template_expression(<<"/*", rest::binary>>, depth, chunks, nested) do
+    case take_until_marker(rest, "*/") do
+      {:ok, comment, rest} ->
+        take_template_expression(rest, depth, [["/*", comment, "*/"] | chunks], nested)
+
+      :error ->
+        :error
+    end
+  end
+
+  defp take_template_expression(<<quote, rest::binary>>, depth, chunks, nested)
+       when quote in [?", ?'] do
+    case take_quoted(rest, quote, [], false) do
+      {:ok, value, _escaped?, rest} ->
+        take_template_expression(rest, depth, [[<<quote>>, value, <<quote>>] | chunks], nested)
+
+      :error ->
+        :error
+    end
+  end
+
+  defp take_template_expression(<<?`, rest::binary>>, depth, chunks, nested) do
+    with {:ok, expressions, rest} <- take_template(rest, []) do
+      take_template_expression(rest, depth, ["``" | chunks], Enum.reverse(expressions, nested))
+    end
+  end
+
+  defp take_template_expression(<<?{, rest::binary>>, depth, chunks, nested),
+    do: take_template_expression(rest, depth + 1, ["{" | chunks], nested)
+
+  defp take_template_expression(<<?}, rest::binary>>, 1, chunks, nested),
+    do: {:ok, chunks |> Enum.reverse() |> IO.iodata_to_binary(), nested, rest}
+
+  defp take_template_expression(<<?}, rest::binary>>, depth, chunks, nested),
+    do: take_template_expression(rest, depth - 1, ["}" | chunks], nested)
+
+  defp take_template_expression(<<codepoint::utf8, rest::binary>>, depth, chunks, nested),
+    do: take_template_expression(rest, depth, [<<codepoint::utf8>> | chunks], nested)
+
+  defp tokenize_template_expressions(expressions, tokens, comments) do
+    Enum.reduce_while(expressions, {:ok, tokens, comments}, fn expression,
+                                                               {:ok, tokens, comments} ->
+      case javascript_tokens(expression) do
+        {:ok, expression_tokens, expression_comments} ->
+          {:cont,
+           {:ok, Enum.reverse(expression_tokens, tokens),
+            Enum.reverse(expression_comments, comments)}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
 
   defp take_identifier(<<byte, rest::binary>>, bytes)
        when byte in ?A..?Z or byte in ?a..?z or byte in ?0..?9 or byte in [?_, ?$],

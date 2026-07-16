@@ -423,7 +423,9 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       const wasm = new URL("./app_bg.wasm", import.meta.url);
       export const matcher = / from "\.\/missing.js"/;
       export const template = `from "./also-missing.js"; import("./ghost.js")`;
-      export default async function init() { return [lazy, wasm, matcher, template]; }
+      export const interpolated = `${import("./modules/interpolated.js")}`;
+      export const nested = `${`raw ${import("./modules/nested-template.js")}`}`;
+      export default async function init() { return [lazy, wasm, matcher, template, interpolated, nested]; }
       //# sourceMappingURL=app.js.map
       """,
       "app.js.map" => ~s({"version":3}),
@@ -433,7 +435,9 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     write_tree(public, %{
       "modules/static.js" => ~s(import "./nested.js"; export const value = 1;),
       "modules/exported.js" => "export const value = 2;",
+      "modules/interpolated.js" => "export const value = 5;",
       "modules/lazy.js" => "export const value = 3;",
+      "modules/nested-template.js" => "export const value = 6;",
       "modules/nested.js" => "export const value = 4;",
       "styles/app.css" => """
       @import "./theme.css";
@@ -474,7 +478,9 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       {"app.js", "app.js.map", "source_map"},
       {"app.js", "app_bg.wasm", "wasm_url"},
       {"app.js", "modules/exported.js", "esm_import"},
+      {"app.js", "modules/interpolated.js", "dynamic_import"},
       {"app.js", "modules/lazy.js", "dynamic_import"},
+      {"app.js", "modules/nested-template.js", "dynamic_import"},
       {"app.js", "modules/static.js", "esm_import"},
       {"entry.js", "app.js", "dynamic_import"},
       {"entry.js", "app_bg.wasm", "wasm_url"},
