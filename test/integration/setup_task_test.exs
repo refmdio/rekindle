@@ -65,11 +65,11 @@ defmodule Rekindle.SetupTaskIntegrationTest do
   test "the public Mix task preserves success status", context do
     output =
       capture_io(fn ->
-        assert :ok = Mix.Tasks.Rekindle.Setup.run(["--target", "web", "--json"])
+        assert :ok = Mix.Tasks.Rekindle.Setup.run(["--target", "web"])
       end)
 
-    assert output == Rekindle.CanonicalValue.encode!(Jason.decode!(output)) <> "\n"
-    assert Jason.decode!(output)["status"] == "ok"
+    assert output =~ "web target verified"
+    assert output =~ "helper verified"
 
     assert File.read!(context.rustup_log) ==
              "toolchain install 1.95.0 --profile minimal\n" <>
@@ -86,42 +86,29 @@ defmodule Rekindle.SetupTaskIntegrationTest do
       {:backend_specific, %{"custom_error" => true}}
     ]
 
-    for {family, options} <- cases,
-        argv <- [[], ["--json"]] do
+    for {family, options} <- cases do
       Application.put_env(
         :rekindle,
         :rekindle_build,
         external_build_config(__MODULE__.ConfigErrorBackend, options)
       )
 
-      outcome = Mix.Tasks.Rekindle.Setup.run_outcome(argv)
-      assert outcome.exit_status == 1, inspect({family, argv, outcome})
+      outcome = Mix.Tasks.Rekindle.Setup.run_outcome([])
+      assert outcome.exit_status == 1, inspect({family, outcome})
       assert outcome.value |> elem(1) |> Map.fetch!(:code) == :config_invalid
       refute File.exists?(context.rustup_log)
-
-      if argv == ["--json"] do
-        assert outcome.stderr == ""
-        assert Jason.decode!(outcome.stdout)["failure"]["code"] == "config_invalid"
-      else
-        assert outcome.stdout == ""
-        assert outcome.stderr =~ "config_invalid"
-      end
+      assert outcome.stdout == ""
+      assert outcome.stderr =~ "config_invalid"
     end
 
     Application.delete_env(:rekindle, :rekindle_build)
 
-    for malformed <- [:malformed, ["a" | :bad]],
-        argv <- [[], ["--json"]] do
+    for malformed <- [:malformed, ["a" | :bad]] do
       Application.put_env(:rekindle, :redact_values, malformed)
-      outcome = Mix.Tasks.Rekindle.Setup.run_outcome(argv)
+      outcome = Mix.Tasks.Rekindle.Setup.run_outcome([])
       assert outcome.exit_status == 1
       assert outcome.value |> elem(1) |> Map.fetch!(:code) == :config_missing
-
-      if argv == ["--json"] do
-        assert Jason.decode!(outcome.stdout)["failure"]["code"] == "config_missing"
-      else
-        assert outcome.stderr =~ "config_missing"
-      end
+      assert outcome.stderr =~ "config_missing"
     end
   end
 
@@ -148,18 +135,18 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     assert expected_output =~ "config_missing"
     refute expected_output =~ "** (Mix)"
 
-    for {argv, status, code} <- [
-          {["rekindle.setup", "--json"], 1, "config_missing"},
-          {["rekindle.setup", "--target", "mobile", "--json"], 2, "config_invalid"}
-        ] do
-      {output, actual_status} =
-        System.cmd(mix, argv, env: [{"MIX_ENV", "test"}], stderr_to_stdout: true)
+    {json_output, json_status} =
+      System.cmd(mix, ["rekindle.setup", "--json"],
+        env: [{"MIX_ENV", "test"}],
+        stderr_to_stdout: true
+      )
 
-      assert actual_status == status
-      assert output == Rekindle.CanonicalValue.encode!(Jason.decode!(output)) <> "\n"
-      assert Jason.decode!(output)["failure"]["code"] == code
-      refute output =~ "** (Mix)"
-    end
+    assert json_status == 2
+    assert json_output =~ "config_invalid"
+    assert json_output =~ "--json"
+    refute json_output =~ ~s("status":"error")
+    refute json_output =~ "config_missing"
+    refute json_output =~ "** (Mix)"
 
     assert_semantic_exit_boundary()
   end

@@ -68,9 +68,11 @@ defmodule Rekindle.SetupTest do
       ensure_helper: fn _ -> {:ok, :present} end
     ]
 
-    for argv <- [["web"], ["--unknown"], ["--target", "mobile"]] do
+    for argv <- [["web"], ["--unknown"], ["--json"], ["--target", "mobile"]] do
       outcome = Setup.run(argv, adapters)
       assert outcome.exit_status == 2
+      assert outcome.stdout == ""
+      assert outcome.stderr =~ "config_invalid"
       refute_received :loaded
     end
   end
@@ -118,55 +120,23 @@ defmodule Rekindle.SetupTest do
     assert helper_outcome.stderr =~ "helper_checksum_mismatch"
   end
 
-  test "shares canonical JSON success, expected failure, and invocation failure output" do
+  test "rejects the undeclared JSON switch with the shared human invocation failure" do
+    parent = self()
+
     adapters = [
-      load_project: fn -> {:ok, project([:web])} end,
+      load_project: fn ->
+        send(parent, :loaded)
+        {:ok, project([:web])}
+      end,
       ensure_target: fn :web, _config -> {:ok, :present} end,
       ensure_helper: fn false -> {:ok, :present} end
     ]
 
-    success = Setup.run(["--json"], adapters)
-    assert success.exit_status == 0
-    assert success.stderr == ""
-
-    assert success.stdout ==
-             Rekindle.CanonicalValue.encode!(Jason.decode!(success.stdout)) <> "\n"
-
-    assert %{"status" => "ok", "result" => %{"source_build_helper" => false}} =
-             Jason.decode!(success.stdout)
-
-    expected_failure =
-      Setup.run(
-        ["--json"],
-        Keyword.replace!(adapters, :ensure_helper, fn false ->
-          {:error,
-           Failure.new!(
-             target: nil,
-             stage: :compatibility,
-             code: :helper_missing,
-             message: "missing helper"
-           )}
-        end)
-      )
-
-    assert expected_failure.exit_status == 1
-    assert expected_failure.stderr == ""
-    assert Jason.decode!(expected_failure.stdout)["failure"]["code"] == "helper_missing"
-
-    parent = self()
-
-    invocation_failure =
-      Setup.run(
-        ["--target", "mobile", "--json"],
-        Keyword.replace!(adapters, :load_project, fn ->
-          send(parent, :loaded)
-          {:ok, project([:web])}
-        end)
-      )
-
-    assert invocation_failure.exit_status == 2
-    assert invocation_failure.stderr == ""
-    assert Jason.decode!(invocation_failure.stdout)["failure"]["code"] == "config_invalid"
+    outcome = Setup.run(["--json"], adapters)
+    assert outcome.exit_status == 2
+    assert outcome.stdout == ""
+    assert outcome.stderr =~ "config_invalid"
+    assert outcome.stderr =~ "--json"
     refute_received :loaded
   end
 

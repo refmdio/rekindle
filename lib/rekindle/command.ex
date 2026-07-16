@@ -20,7 +20,7 @@ defmodule Rekindle.Command do
   def run(command, argv, grammar, handler) when is_function(handler, 1) do
     case parse(argv, grammar) do
       {:ok, invocation} -> execute(command, invocation, handler)
-      {:error, message} -> invocation_failure(command, argv, message)
+      {:error, message} -> invocation_failure(command, argv, grammar, message)
     end
   end
 
@@ -133,8 +133,8 @@ defmodule Rekindle.Command do
     end
   end
 
-  defp invocation_failure(command, argv, message) do
-    json? = "--json" in argv
+  defp invocation_failure(command, argv, grammar, message) do
+    json? = Keyword.has_key?(Keyword.fetch!(grammar, :switches), :json) and "--json" in argv
 
     failure =
       Failure.new!(target: nil, stage: :configuration, code: :config_invalid, message: message)

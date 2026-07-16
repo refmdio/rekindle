@@ -4,7 +4,7 @@ defmodule Rekindle.Setup do
   alias Rekindle.{Command, Failure}
 
   @grammar [
-    switches: [json: :boolean, target: :string, source_build_helper: :boolean],
+    switches: [target: :string, source_build_helper: :boolean],
     positionals: 0
   ]
 
