@@ -518,7 +518,7 @@ defmodule Rekindle.Toolchain.Web do
 
   defp valid_backend_version?(value) do
     is_binary(value) and byte_size(value) in 1..128 and
-      Enum.all?(:binary.bin_to_list(value), &(&1 <= 0x7F))
+      Enum.all?(:binary.bin_to_list(value), &(&1 in 0x20..0x7E))
   end
 
   defp manifest_string?(value) when is_binary(value) do

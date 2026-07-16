@@ -1823,7 +1823,7 @@ fn valid_backend_id(value: &str) -> bool {
 }
 
 fn valid_backend_version(value: &str) -> bool {
-    (1..=128).contains(&value.len()) && value.is_ascii()
+    (1..=128).contains(&value.len()) && value.bytes().all(|byte| matches!(byte, 0x20..=0x7e))
 }
 
 fn relative_strings_sorted_unique(value: &Value) -> bool {
@@ -2045,7 +2045,17 @@ mod graph_tests {
         assert!(valid_backend_id("example.backend"));
         assert!(!valid_backend_id("INVALID"));
         assert!(valid_backend_version("release-1"));
+        assert!(valid_backend_version(" "));
+        assert!(valid_backend_version("~"));
+        for byte in 0x00..=0x1f {
+            assert!(!valid_backend_version(
+                &String::from_utf8(vec![byte]).unwrap()
+            ));
+        }
+        assert!(!valid_backend_version("\u{7f}"));
         assert!(!valid_backend_version("é"));
+        assert!(!valid_backend_version(""));
+        assert!(!valid_backend_version(&"a".repeat(129)));
         assert!(valid_feature_list(&json!([])));
 
         let too_many = (0..129)

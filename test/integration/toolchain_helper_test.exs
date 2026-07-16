@@ -939,9 +939,34 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
          end}
       end
 
-    Enum.each(schema_mutations ++ metadata_mutations, fn {label, mutate} ->
+    version_control_mutations =
+      for byte <- Enum.to_list(0x00..0x1F) ++ [0x7F] do
+        {"extension backend version control 0x#{Integer.to_string(byte, 16)}",
+         fn value ->
+           Map.put(value, "producer", %{
+             "kind" => "extension",
+             "backend_id" => "example.backend",
+             "backend_version" => <<byte>>,
+             "options_digest" => String.duplicate("c", 64)
+           })
+         end}
+      end
+
+    Enum.each(schema_mutations ++ metadata_mutations ++ version_control_mutations, fn {label,
+                                                                                       mutate} ->
       assert_web_manifest_rejected(helper, artifact_root, output, mutate.(manifest), label)
     end)
+
+    assert_forged_manifest_success_rejected(
+      artifact_root,
+      output,
+      Map.put(manifest, "producer", %{
+        "kind" => "extension",
+        "backend_id" => "example.backend",
+        "backend_version" => "bad\nversion",
+        "options_digest" => String.duplicate("c", 64)
+      })
+    )
 
     case_collision =
       update_in(manifest["members"], fn members ->
@@ -992,6 +1017,16 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       extension_manifest,
       "extension Producer"
     )
+
+    for version <- [" ", "~", String.duplicate("~", 128)] do
+      assert_web_manifest_verified(
+        helper,
+        artifact_root,
+        output,
+        put_in(extension_manifest, ["producer", "backend_version"], version),
+        "extension Producer printable boundary #{inspect(version)}"
+      )
+    end
 
     File.write!(
       Path.join(output, "rekindle-web-manifest-v1.json"),
@@ -1727,6 +1762,51 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
                "manifest_digest" => manifest["manifest_digest"]
              }),
            label
+  end
+
+  defp assert_forged_manifest_success_rejected(root, output, manifest) do
+    manifest = with_web_manifest_digest(manifest)
+    path = Path.join(output, "rekindle-web-manifest-v1.json")
+    File.write!(path, CanonicalValue.encode!(manifest))
+    assert {:ok, descriptor} = Web.file(root, "rekindle-web-manifest-v1.json")
+
+    assert {:ok, request, state} =
+             Web.operation(
+               "verify_web",
+               %{
+                 artifact_root: root,
+                 manifest: descriptor,
+                 expected_manifest_digest: manifest["manifest_digest"],
+                 limits: limits()
+               },
+               request_id: @request
+             )
+
+    terminal = %{
+      "v" => 1,
+      "type" => "operation_ok",
+      "payload_len" => 0,
+      "op" => "verify_web",
+      "artifact_id" => manifest["artifact_id"],
+      "manifest_digest" => manifest["manifest_digest"],
+      "members_verified" => length(manifest["members"]),
+      "total_bytes" => Enum.sum(Enum.map(manifest["members"], & &1["size"]))
+    }
+
+    fake =
+      fake_web_helper(
+        Path.dirname(output),
+        "forged-manifest-#{System.unique_integer([:positive])}",
+        terminal
+      )
+
+    assert {:error, :helper_protocol} = Helper.run_web(fake, request, state)
+
+    assert {:error, :manifest_changed} =
+             Web.revalidate_manifest(root, %{
+               "artifact_id" => manifest["artifact_id"],
+               "manifest_digest" => manifest["manifest_digest"]
+             })
   end
 
   defp id(number),
