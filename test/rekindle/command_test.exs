@@ -28,6 +28,44 @@ defmodule Rekindle.CommandTest do
     refute_received {:called, _}
   end
 
+  test "rejects noncanonical booleans and duplicate options before invoking the handler" do
+    parent = self()
+
+    handler = fn invocation ->
+      send(parent, {:called, invocation})
+      {:ok, %{}}
+    end
+
+    alias_grammar = Keyword.put(@grammar, :aliases, j: :json, r: :release)
+    target_grammar = [switches: [target: :string], aliases: [t: :target], positionals: 0]
+
+    invalid = [
+      {@grammar, ["web", "--no-json"]},
+      {@grammar, ["web", "--json=false"]},
+      {@grammar, ["web", "--release=true"]},
+      {@grammar, ["web", "--json", "--json"]},
+      {@grammar, ["web", "--release", "--release"]},
+      {@grammar, ["web", "--json", "--no-json"]},
+      {alias_grammar, ["web", "-j=false"]},
+      {alias_grammar, ["web", "-j", "-j"]},
+      {alias_grammar, ["web", "--json", "-j"]},
+      {alias_grammar, ["web", "-jr"]},
+      {target_grammar, ["--target", "desktop", "--target", "web"]},
+      {target_grammar, ["--target=desktop", "-t", "web"]}
+    ]
+
+    for {grammar, argv} <- invalid do
+      outcome = Command.run("rekindle.example", argv, grammar, handler)
+      assert outcome.exit_status == 2, inspect(argv)
+      assert outcome.value |> elem(1) |> Map.fetch!(:code) == :config_invalid
+      refute_received {:called, _}
+    end
+
+    accepted = Command.run("rekindle.example", ["--target=web"], target_grammar, handler)
+    assert accepted.exit_status == 0
+    assert_receive {:called, %{options: %{target: "web"}}}
+  end
+
   test "human success uses stdout and expected failure uses stderr" do
     success =
       Command.run("rekindle.example", ["web"], @grammar, fn _ ->

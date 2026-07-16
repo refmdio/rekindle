@@ -70,7 +70,18 @@ defmodule Rekindle.SetupTest do
       ensure_helper: fn _ -> {:ok, :present} end
     ]
 
-    for argv <- [["web"], ["--unknown"], ["--json"], ["--target", "mobile"]] do
+    for argv <- [
+          ["web"],
+          ["--unknown"],
+          ["--json"],
+          ["--target", "mobile"],
+          ["--no-source-build-helper"],
+          ["--source-build-helper=false"],
+          ["--source-build-helper=true"],
+          ["--source-build-helper", "--source-build-helper"],
+          ["--target", "desktop", "--target", "web"],
+          ["--target=desktop", "--target", "web"]
+        ] do
       outcome = Setup.run(argv, adapters)
       assert outcome.exit_status == 2
       assert outcome.stdout == ""

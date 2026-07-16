@@ -127,6 +127,39 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     assert outcome.stderr =~ "helper_protocol_mismatch"
   end
 
+  test "noncanonical setup options exit before project or toolchain adapters", _context do
+    parent = self()
+
+    overrides = [
+      load_project: fn ->
+        send(parent, :loaded)
+        flunk("project must not load for invalid grammar")
+      end,
+      ensure_target: fn _, _ ->
+        send(parent, :target)
+        flunk("target installer must not run for invalid grammar")
+      end,
+      ensure_helper: fn _ ->
+        send(parent, :helper)
+        flunk("helper installer must not run for invalid grammar")
+      end
+    ]
+
+    for argv <- [
+          ["--no-source-build-helper"],
+          ["--source-build-helper=false"],
+          ["--source-build-helper", "--source-build-helper"],
+          ["--target", "desktop", "--target", "web"]
+        ] do
+      outcome = Mix.Tasks.Rekindle.Setup.run_outcome(argv, overrides)
+      assert outcome.exit_status == 2, inspect(argv)
+      assert {:error, %{code: :config_invalid}} = outcome.value
+      refute_received :loaded
+      refute_received :target
+      refute_received :helper
+    end
+  end
+
   test "source-built and offline-cached real helpers both negotiate", context do
     File.rm_rf!(Path.join(context.root, "rekindle/helpers"))
     real_rustup = Path.join(System.user_home!(), ".cargo/bin/rustup")

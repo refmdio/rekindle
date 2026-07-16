@@ -49,22 +49,105 @@ defmodule Rekindle.Command do
     aliases = Keyword.get(grammar, :aliases, [])
     positional_count = Keyword.get(grammar, :positionals, 0)
 
-    case OptionParser.parse(argv, strict: switches, aliases: aliases) do
-      {options, positionals, []} when length(positionals) == positional_count ->
-        {:ok,
-         %{
-           options: Map.new(options),
-           positionals: positionals,
-           json?: Keyword.get(options, :json, false)
-         }}
+    with :ok <- validate_raw_options(argv, switches, aliases) do
+      case OptionParser.parse(argv, strict: switches, aliases: aliases) do
+        {options, positionals, []} when length(positionals) == positional_count ->
+          {:ok,
+           %{
+             options: Map.new(options),
+             positionals: positionals,
+             json?: Keyword.get(options, :json, false)
+           }}
 
-      {_options, _positionals, invalid} when invalid != [] ->
-        {:error, "unknown or invalid option: #{format_invalid(invalid)}"}
+        {_options, _positionals, invalid} when invalid != [] ->
+          {:error, "unknown or invalid option: #{format_invalid(invalid)}"}
 
-      _ ->
-        {:error, "invalid positional arguments"}
+        _ ->
+          {:error, "invalid positional arguments"}
+      end
     end
   end
+
+  defp validate_raw_options(argv, switches, aliases) do
+    specifications = Map.new(switches)
+
+    long =
+      Map.new(switches, fn {name, type} ->
+        {"--" <> (name |> Atom.to_string() |> String.replace("_", "-")), {name, type}}
+      end)
+
+    short =
+      Enum.reduce(aliases, %{}, fn {alias_name, name}, result ->
+        case Map.fetch(specifications, name) do
+          {:ok, type} -> Map.put(result, "-" <> Atom.to_string(alias_name), {name, type})
+          :error -> result
+        end
+      end)
+
+    scan_raw_options(argv, long, short, MapSet.new())
+  end
+
+  defp scan_raw_options([], _long, _short, _seen), do: :ok
+  defp scan_raw_options(["--" | _rest], _long, _short, _seen), do: :ok
+
+  defp scan_raw_options(["--" <> _rest = token | rest], long, short, seen) do
+    case raw_long_option(token, long) do
+      {:ok, name, type} -> continue_raw_options(rest, long, short, seen, token, name, type)
+      :error -> {:error, "unknown or invalid option: #{token}"}
+    end
+  end
+
+  defp scan_raw_options(["-" <> rest = token | tail], long, short, seen) when rest != "" do
+    case raw_short_option(token, short) do
+      {:ok, name, type} -> continue_raw_options(tail, long, short, seen, token, name, type)
+      :error -> {:error, "unknown or invalid option: #{token}"}
+    end
+  end
+
+  defp scan_raw_options([_positional | rest], long, short, seen),
+    do: scan_raw_options(rest, long, short, seen)
+
+  defp raw_long_option(token, long) do
+    case Map.fetch(long, token) do
+      {:ok, {name, type}} ->
+        {:ok, name, type}
+
+      :error ->
+        with [spelling, _value] <- String.split(token, "=", parts: 2),
+             {:ok, {name, type}} <- Map.fetch(long, spelling),
+             false <- type == :boolean do
+          {:ok, name, type}
+        else
+          _ -> :error
+        end
+    end
+  end
+
+  defp raw_short_option(token, short) do
+    case Map.fetch(short, token) do
+      {:ok, {name, type}} ->
+        {:ok, name, type}
+
+      :error ->
+        with [spelling, _value] <- String.split(token, "=", parts: 2),
+             {:ok, {name, type}} <- Map.fetch(short, spelling),
+             false <- type == :boolean do
+          {:ok, name, type}
+        else
+          _ -> :error
+        end
+    end
+  end
+
+  defp continue_raw_options(rest, long, short, seen, token, name, type) do
+    if not repeatable_option?(type) and MapSet.member?(seen, name) do
+      {:error, "duplicate option: #{token}"}
+    else
+      scan_raw_options(rest, long, short, MapSet.put(seen, name))
+    end
+  end
+
+  defp repeatable_option?(type), do: type in [:count, :keep]
 
   defp execute(command, invocation, handler) do
     case handler.(invocation) do
