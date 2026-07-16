@@ -6,6 +6,7 @@ if Code.ensure_loaded?(Igniter) do
 
     alias Igniter.Code.{Common, Function}
     alias Igniter.Project.{Application, Config, TaskAliases}
+    alias Igniter.Project.Module, as: ProjectModule
     alias Rekindle.ClientGenerator
 
     @spec install(Igniter.t(), keyword()) :: Igniter.t()
@@ -698,33 +699,83 @@ if Code.ensure_loaded?(Igniter) do
     defp alias_command_reference?(_entry, _command), do: false
 
     defp install_page_marker(igniter, otp_app, endpoint, targets) do
-      layout = "lib/#{otp_app}_web/components/layouts/root.html.heex"
+      if :web in targets and is_atom(endpoint) and not is_nil(endpoint) do
+        case root_layout_candidates(igniter, endpoint) do
+          {igniter, [layout]} ->
+            update_page_marker(igniter, layout, otp_app, endpoint)
 
-      if :web in targets and is_atom(endpoint) and Igniter.exists?(igniter, layout) do
-        Igniter.update_file(igniter, layout, fn source ->
-          contents = Rewrite.Source.get(source, :content)
+          {igniter, []} ->
+            Igniter.add_issue(
+              igniter,
+              "selected endpoint #{inspect(endpoint)} has no supported root layout; expected exactly one root.html.heex below its source directory"
+            )
 
-          marker =
-            "<Rekindle.Phoenix.Components.gpui_page otp_app={#{inspect(otp_app)}} endpoint={#{inspect(endpoint)}} />"
+          {igniter, layouts} ->
+            paths = layouts |> Enum.sort() |> Enum.join(", ")
 
-          case classify_page_marker(contents, otp_app, endpoint) do
-            {:ok, :owned} ->
-              source
-
-            {:ok, {:absent, body_close}} ->
-              Rewrite.Source.update(
-                source,
-                :content,
-                &insert_at(&1, body_close, "  #{marker}\n")
-              )
-
-            {:error, message} ->
-              {:error, message}
-          end
-        end)
+            Igniter.add_issue(
+              igniter,
+              "selected endpoint #{inspect(endpoint)} has ambiguous root layouts: #{paths}"
+            )
+        end
       else
         igniter
       end
+    end
+
+    defp root_layout_candidates(igniter, endpoint) do
+      case ProjectModule.find_module(igniter, endpoint) do
+        {:ok, {igniter, source, _zipper}} ->
+          root = Path.dirname(source.path)
+
+          paths =
+            (rewrite_paths(igniter) ++ test_paths(igniter) ++ disk_layout_paths(root))
+            |> Enum.uniq()
+            |> Enum.filter(&supported_root_layout?(&1, root))
+            |> Enum.sort()
+
+          {igniter, paths}
+
+        {:error, igniter} ->
+          {igniter, []}
+      end
+    end
+
+    defp rewrite_paths(igniter), do: igniter.rewrite |> Rewrite.sources() |> Enum.map(& &1.path)
+
+    defp test_paths(%{assigns: %{test_files: files}}) when is_map(files), do: Map.keys(files)
+    defp test_paths(_igniter), do: []
+
+    defp disk_layout_paths(root), do: Path.wildcard(Path.join([root, "**", "root.html.heex"]))
+
+    defp supported_root_layout?(path, root) do
+      path = Path.expand(path)
+      root = Path.expand(root)
+      Path.basename(path) == "root.html.heex" and String.starts_with?(path, root <> "/")
+    end
+
+    defp update_page_marker(igniter, layout, otp_app, endpoint) do
+      Igniter.update_file(igniter, layout, fn source ->
+        contents = Rewrite.Source.get(source, :content)
+
+        marker =
+          "<Rekindle.Phoenix.Components.gpui_page otp_app={#{inspect(otp_app)}} endpoint={#{inspect(endpoint)}} />"
+
+        case classify_page_marker(contents, otp_app, endpoint) do
+          {:ok, :owned} ->
+            source
+
+          {:ok, {:absent, body_close}} ->
+            Rewrite.Source.update(
+              source,
+              :content,
+              &insert_at(&1, body_close, "  #{marker}\n")
+            )
+
+          {:error, message} ->
+            {:error, message}
+        end
+      end)
     end
 
     defp classify_page_marker(contents, otp_app, endpoint) do

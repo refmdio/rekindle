@@ -128,6 +128,71 @@ defmodule Rekindle.IgniterTest do
     assert Enum.count(ignore_lines, &(&1 == "/client/.rekindle/")) == 1
   end
 
+  test "discovers the selected endpoint root layout independently of the OTP app name" do
+    custom_layout = "lib/portal_ui/shell/layouts/root.html.heex"
+
+    installed =
+      project(
+        layout_path: nil,
+        extra_files: %{
+          "lib/portal_ui.ex" => """
+          defmodule PortalUI do
+            def static_paths, do: ~w(assets images favicon.ico)
+          end
+          """,
+          "lib/portal_ui/endpoint.ex" => """
+          defmodule PortalUI.Endpoint do
+            use Phoenix.Endpoint, otp_app: :sample_app
+            plug PortalUI.Router
+          end
+          """,
+          custom_layout => "<!doctype html>\n<html><body><p>portal-owned</p></body></html>\n"
+        }
+      )
+      |> RekindleIgniter.install(
+        client_path: "client",
+        targets: [:web],
+        endpoint: PortalUI.Endpoint
+      )
+
+    assert installed.issues == []
+    assert source(installed, custom_layout) =~ "Rekindle.Phoenix.Components.gpui_page"
+    assert source(installed, custom_layout) =~ "portal-owned"
+  end
+
+  test "rejects missing and ambiguous root layout sites for the selected endpoint" do
+    missing =
+      project(layout_path: nil)
+      |> RekindleIgniter.install(
+        client_path: "client",
+        targets: [:web],
+        endpoint: SampleAppWeb.Endpoint
+      )
+
+    assert Enum.any?(missing.issues, &String.contains?(to_string(&1), "no supported root layout"))
+
+    ambiguous =
+      project(
+        extra_files: %{
+          "lib/sample_app_web/alternate/root.html.heex" =>
+            "<!doctype html>\n<html><body><p>alternate</p></body></html>\n"
+        }
+      )
+      |> RekindleIgniter.install(
+        client_path: "client",
+        targets: [:web],
+        endpoint: SampleAppWeb.Endpoint
+      )
+
+    assert Enum.any?(ambiguous.issues, &String.contains?(to_string(&1), "ambiguous root layouts"))
+
+    refute source(ambiguous, "lib/sample_app_web/components/layouts/root.html.heex") =~
+             "Rekindle.Phoenix.Components.gpui_page"
+
+    refute source(ambiguous, "lib/sample_app_web/alternate/root.html.heex") =~
+             "Rekindle.Phoenix.Components.gpui_page"
+  end
+
   test "layout parsing admits exactly one owned marker and rejects a second marker" do
     noisy_layout = """
     <!doctype html>
@@ -794,63 +859,68 @@ defmodule Rekindle.IgniterTest do
         "<!doctype html>\n<html><body><p>host-owned</p></body></html>\n"
       )
 
+    layout_path =
+      Keyword.get(options, :layout_path, "lib/sample_app_web/components/layouts/root.html.heex")
+
     gitignore = Keyword.get(options, :gitignore, "/_build/\n")
     extra_files = Keyword.get(options, :extra_files, %{})
 
     assets_deploy =
       Keyword.get(options, :assets_deploy, ~s(["cmd host.deploy", "phx.digest"]))
 
+    files =
+      %{
+        "mix.exs" => """
+        defmodule SampleApp.MixProject do
+          use Mix.Project
+
+          def project do
+            [app: :sample_app, version: "0.1.0", elixir: "~> 1.17", deps: deps(), aliases: aliases()]
+          end
+
+          def application, do: [extra_applications: [:logger], mod: {SampleApp.Application, []}]
+          defp deps, do: #{deps}
+
+          defp aliases do
+            [
+              unrelated: ["cmd keep"],
+              "assets.build": #{assets_build},
+              "assets.deploy": #{assets_deploy}
+            ]
+          end
+        end
+        """,
+        "lib/sample_app/application.ex" => """
+        defmodule SampleApp.Application do
+          use Application
+          def start(_type, _args) do
+            children = #{children}
+            Supervisor.start_link(children, strategy: :one_for_one)
+          end
+        end
+        """,
+        "lib/sample_app_web.ex" => """
+        defmodule SampleAppWeb do
+          def static_paths, do: #{static_paths}
+        end
+        """,
+        "lib/sample_app_web/endpoint.ex" => """
+        defmodule SampleAppWeb.Endpoint do
+          use Phoenix.Endpoint, otp_app: :sample_app
+          #{endpoint_extra}
+          plug SampleAppWeb.Router
+        end
+        """,
+        ".gitignore" => gitignore
+      }
+      |> then(fn files ->
+        if layout_path, do: Map.put(files, layout_path, layout), else: files
+      end)
+      |> Map.merge(extra_files)
+
     test_project(
       app_name: :sample_app,
-      files:
-        Map.merge(
-          %{
-            "mix.exs" => """
-            defmodule SampleApp.MixProject do
-              use Mix.Project
-
-              def project do
-                [app: :sample_app, version: "0.1.0", elixir: "~> 1.17", deps: deps(), aliases: aliases()]
-              end
-
-              def application, do: [extra_applications: [:logger], mod: {SampleApp.Application, []}]
-              defp deps, do: #{deps}
-
-              defp aliases do
-                [
-                  unrelated: ["cmd keep"],
-                  "assets.build": #{assets_build},
-                  "assets.deploy": #{assets_deploy}
-                ]
-              end
-            end
-            """,
-            "lib/sample_app/application.ex" => """
-            defmodule SampleApp.Application do
-              use Application
-              def start(_type, _args) do
-                children = #{children}
-                Supervisor.start_link(children, strategy: :one_for_one)
-              end
-            end
-            """,
-            "lib/sample_app_web.ex" => """
-            defmodule SampleAppWeb do
-              def static_paths, do: #{static_paths}
-            end
-            """,
-            "lib/sample_app_web/endpoint.ex" => """
-            defmodule SampleAppWeb.Endpoint do
-              use Phoenix.Endpoint, otp_app: :sample_app
-              #{endpoint_extra}
-              plug SampleAppWeb.Router
-            end
-            """,
-            "lib/sample_app_web/components/layouts/root.html.heex" => layout,
-            ".gitignore" => gitignore
-          },
-          extra_files
-        )
+      files: files
     )
   end
 
