@@ -214,6 +214,25 @@ defmodule Rekindle.IgniterTest do
              mismatched.issues,
              &String.contains?(to_string(&1), "structurally adoptable")
            )
+
+    missing_public =
+      client
+      |> Map.delete("public/.gitkeep")
+      |> Enum.reduce(project(), fn {path, contents}, igniter ->
+        Igniter.create_new_file(igniter, Path.join("client", path), contents)
+      end)
+      |> apply_igniter!()
+      |> RekindleIgniter.install(
+        client_path: "client",
+        targets: [:web],
+        endpoint: SampleAppWeb.Endpoint,
+        no_client: true
+      )
+
+    assert Enum.any?(
+             missing_public.issues,
+             &String.contains?(to_string(&1), "structurally adoptable")
+           )
   end
 
   test "selects the only project endpoint and matches an explicit module string" do

@@ -631,7 +631,8 @@ if Code.ensure_loaded?(Igniter) do
            true <- Map.fetch!(expected, ".rekindle-client.json") == contents,
            true <- owned_files_valid?(igniter, client_path, owned_files),
            app when is_binary(app) <- read_file(igniter, Path.join(client_path, "src/app.rs")),
-           true <- String.trim(app) != "" do
+           true <- String.trim(app) != "",
+           true <- source_directory?(igniter, Path.join(client_path, "public")) do
         true
       else
         _ -> false
@@ -674,6 +675,15 @@ if Code.ensure_loaded?(Igniter) do
         _ ->
           File.read!(path)
       end
+    end
+
+    defp source_directory?(igniter, path) do
+      prefix = String.trim_trailing(path, "/") <> "/"
+
+      File.dir?(path) or
+        Enum.any?(Rewrite.sources(igniter.rewrite), &String.starts_with?(&1.path, prefix)) or
+        (is_map_key(igniter.assigns, :test_files) and
+           Enum.any?(Map.keys(igniter.assigns.test_files), &String.starts_with?(&1, prefix)))
     end
 
     defp count(value, pattern),
