@@ -744,7 +744,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
              }
            end)
 
-    assert {:ok, artifact_root} = Web.root(package_output, :read, id: id(5))
+    assert {:ok, artifact_root} = Web.root(package_output, :read, id: package_root["id"])
     assert {:ok, manifest} = Web.file(artifact_root, "rekindle-web-manifest-v1.json")
 
     assert {:ok, request, state} =
@@ -781,7 +781,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
        fn ->
          path = Path.join(package_output, Web.marker())
          original = File.read!(path)
-         File.write!(path, ~s({"root_id":"tampered","v":1}))
+         File.write!(path, ~s({"root_id":"ffffffffffffffffffffffffffffffff","v":1}))
 
          fn ->
            File.write!(path, original)

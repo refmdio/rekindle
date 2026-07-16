@@ -1470,7 +1470,7 @@ fn validate_artifact_marker(root: &Root) -> OpResult<()> {
         && metadata.permissions().mode() & 0o777 == 0o600
         && frame::exact_keys(&marker, &["root_id", "v"])
         && marker["v"] == 1
-        && frame::is_request_id(marker.get("root_id"))
+        && marker["root_id"] == root.id
         && canonical == bytes
     {
         Ok(())

@@ -327,7 +327,7 @@ defmodule Rekindle.Toolchain.Web do
          true <- CanonicalValue.encode!(marker) == bytes,
          true <- exact?(marker, ~w[root_id v]),
          true <- marker["v"] == 1,
-         :ok <- request_id(marker["root_id"]) do
+         true <- marker["root_id"] == root["id"] do
       :ok
     else
       _ -> {:error, :invalid_marker}
