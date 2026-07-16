@@ -888,10 +888,22 @@ defmodule Rekindle.Config do
   defp endpoint_url_config(endpoint_config, path) do
     url = Keyword.get(endpoint_config, :url, host: "localhost", path: "/")
 
-    with :ok <- closed_keyword(url, [:host, :scheme, :path, :port], path ++ [:endpoint, :url]) do
+    with :ok <- closed_keyword(url, [:host, :scheme, :path, :port], path ++ [:endpoint, :url]),
+         :ok <- endpoint_url_path(Keyword.get(url, :path, "/"), path) do
       {:ok, url}
     end
   end
+
+  defp endpoint_url_path(value, _path)
+       when is_binary(value) and byte_size(value) in 1..4_096 do
+    if String.valid?(value) and String.normalize(value, :nfc) == value and
+         String.starts_with?(value, "/") and
+         not Regex.match?(~r/[\x00-\x1F\x7F?#\\]/u, value),
+       do: :ok,
+       else: :error
+  end
+
+  defp endpoint_url_path(_value, _path), do: :error
 
   defp endpoint_transport(endpoint_config, path) do
     cond do

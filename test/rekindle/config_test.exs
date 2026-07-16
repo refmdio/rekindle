@@ -958,7 +958,7 @@ defmodule Rekindle.ConfigTest do
 
     Application.put_env(:demo_app, Endpoint,
       check_origin: true,
-      url: [host: "EXAMPLE.COM", scheme: "HTTPS", port: "443"]
+      url: [host: "EXAMPLE.COM", scheme: "HTTPS", port: "443", path: "/app"]
     )
 
     assert {:ok, project} = Config.normalize(:demo_app, web_build(), web_dev())
@@ -1033,7 +1033,14 @@ defmodule Rekindle.ConfigTest do
           [host: "example.com", scheme: :https],
           [host: "example.com", scheme: <<255>>],
           [host: "example.com", port: 0],
-          [host: "example.com", port: 65_536]
+          [host: "example.com", port: 65_536],
+          [host: "example.com", path: {:system, "PATH"}],
+          [host: "example.com", path: :root],
+          [host: "example.com", path: "relative"],
+          [host: "example.com", path: "/bad\npath"],
+          [host: "example.com", path: "/bad?query"],
+          [host: "example.com", path: "/bad#fragment"],
+          [host: "example.com", path: "/bad\\path"]
         ] do
       Application.put_env(:demo_app, Endpoint, check_origin: true, url: invalid_url)
       assert_error(Config.normalize(:demo_app, web_build(), web_dev()), :config_invalid)
