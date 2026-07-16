@@ -76,6 +76,56 @@ defmodule Rekindle.TargetBackend do
      ]}
   end
 
+  @doc false
+  @spec validate_plan_result(term()) ::
+          {:ok, ExternalPlan.t()} | {:error, ConfigError.t() | Rekindle.Failure.t()}
+  def validate_plan_result({:ok, %ExternalPlan{contract_version: 1} = plan}) do
+    cond do
+      not (is_binary(plan.executable) and Path.type(plan.executable) == :absolute) ->
+        {:error, error([:backend, :plan, :executable], "plan executable must be absolute")}
+
+      not (is_list(plan.argv) and Enum.all?(plan.argv, &is_binary/1)) ->
+        {:error, error([:backend, :plan, :argv], "plan argv is invalid")}
+
+      plan.env_mode != :replace or not valid_env_set?(plan.env_set) ->
+        {:error,
+         error([:backend, :plan, :env_set], "plan must supply a closed replacement environment")}
+
+      plan.diagnostic_mode not in [:opaque, :cargo_json] or
+          not (is_integer(plan.timeout_ms) and plan.timeout_ms > 0) ->
+        {:error, error([:backend, :plan], "plan diagnostic mode or timeout is invalid")}
+
+      not valid_cwd?(plan.cwd) or not is_binary(plan.expected_manifest) ->
+        {:error, error([:backend, :plan], "plan cwd or expected manifest is invalid")}
+
+      true ->
+        {:ok, plan}
+    end
+  end
+
+  def validate_plan_result({:error, %Rekindle.Failure{} = failure}), do: {:error, failure}
+
+  def validate_plan_result(_result),
+    do: {:error, error([:backend, :plan], "plan/2 returned an invalid union")}
+
+  @doc false
+  @spec validate_finalize_result(term()) ::
+          {:ok, ExternalArtifact.t()} | {:error, ConfigError.t() | Rekindle.Failure.t()}
+  def validate_finalize_result({:ok, %ExternalArtifact{contract_version: 1} = artifact}) do
+    if is_binary(artifact.manifest) and relative_path?(artifact.manifest) and
+         is_list(artifact.supplemental_diagnostics) and
+         Enum.all?(artifact.supplemental_diagnostics, &match?(%Rekindle.Diagnostic{}, &1)) do
+      {:ok, artifact}
+    else
+      {:error, error([:backend, :finalize], "finalize artifact is invalid")}
+    end
+  end
+
+  def validate_finalize_result({:error, %Rekindle.Failure{} = failure}), do: {:error, failure}
+
+  def validate_finalize_result(_result),
+    do: {:error, error([:backend, :finalize], "finalize/3 returned an invalid union")}
+
   defp ensure_backend(module) do
     case Code.ensure_loaded(module) do
       {:module, ^module} ->
@@ -150,4 +200,29 @@ defmodule Rekindle.TargetBackend do
   end
 
   defp error(path, message), do: ConfigError.new(path, :config_invalid, message)
+
+  defp valid_cwd?(%{root: root, path: path}) when root in [:project, :client, :staging],
+    do: is_binary(path) and relative_path?(path)
+
+  defp valid_cwd?(_cwd), do: false
+
+  defp valid_env_set?(entries) when is_list(entries) do
+    Enum.all?(entries, fn
+      %{name: name, value: value, secret: secret?} ->
+        is_binary(name) and Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]{0,127}\z/, name) and
+          is_binary(value) and is_boolean(secret?)
+
+      _ ->
+        false
+    end) and
+      entries == Enum.sort_by(entries, & &1.name) and
+      Enum.uniq_by(entries, & &1.name) == entries
+  end
+
+  defp valid_env_set?(_entries), do: false
+
+  defp relative_path?(path) do
+    path != "" and Path.type(path) != :absolute and
+      Enum.all?(String.split(path, "/"), &(&1 not in ["", ".", ".."]))
+  end
 end

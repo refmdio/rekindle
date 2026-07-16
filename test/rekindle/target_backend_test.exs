@@ -2,6 +2,7 @@ defmodule Rekindle.TargetBackendTest do
   use ExUnit.Case, async: true
 
   alias Rekindle.{ConfigError, TargetBackend}
+  alias Rekindle.{ExternalArtifact, ExternalPlan, Failure}
 
   defmodule ValidBackend do
     @behaviour TargetBackend
@@ -73,5 +74,66 @@ defmodule Rekindle.TargetBackendTest do
   test "publishes the exact behaviour callback surface" do
     assert TargetBackend.behaviour_info(:callbacks) |> Enum.sort() ==
              [backend_id: 0, backend_version: 0, finalize: 3, plan: 2, validate: 2]
+  end
+
+  test "validates the exact plan and finalize return unions" do
+    plan = %ExternalPlan{
+      executable: "/usr/bin/cargo",
+      argv: ["build"],
+      cwd: %{root: :client, path: "workspace"},
+      env_mode: :replace,
+      env_set: [%{name: "PATH", value: "/usr/bin", secret: false}],
+      diagnostic_mode: :cargo_json,
+      timeout_ms: 1_000,
+      expected_manifest: "rekindle-web-manifest-v1.json"
+    }
+
+    assert {:ok, ^plan} = TargetBackend.validate_plan_result({:ok, plan})
+
+    assert {:error, %ConfigError{}} =
+             TargetBackend.validate_plan_result({:ok, %{plan | env_mode: :inherit}})
+
+    assert {:error, %ConfigError{}} = TargetBackend.validate_plan_result({:ok, %{}})
+
+    failure =
+      Failure.new!(target: :web, stage: :internal, code: :internal, message: "backend failed")
+
+    assert {:error, ^failure} = TargetBackend.validate_plan_result({:error, failure})
+
+    artifact = %ExternalArtifact{
+      manifest: "rekindle-web-manifest-v1.json",
+      supplemental_diagnostics: []
+    }
+
+    assert {:ok, ^artifact} = TargetBackend.validate_finalize_result({:ok, artifact})
+
+    assert {:error, %ConfigError{}} =
+             TargetBackend.validate_finalize_result({:ok, %{artifact | manifest: "../escape"}})
+
+    assert {:error, %ConfigError{}} = TargetBackend.validate_finalize_result({:ok, %{}})
+  end
+
+  test "negative compile fixtures report missing callback and reject unknown struct fields" do
+    module = "MissingBackend#{System.unique_integer([:positive])}"
+
+    warning =
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        Code.compile_string("""
+        defmodule #{module} do
+          @behaviour Rekindle.TargetBackend
+          def backend_id, do: "missing"
+          def backend_version, do: "1"
+        end
+        """)
+      end)
+
+    assert warning =~ "required by behaviour Rekindle.TargetBackend"
+    assert warning =~ "validate/2"
+    assert warning =~ "plan/2"
+    assert warning =~ "finalize/3"
+
+    assert_raise KeyError, fn ->
+      Code.compile_string("%Rekindle.ExternalPlan{unknown_field: true}")
+    end
   end
 end
