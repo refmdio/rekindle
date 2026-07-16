@@ -12,7 +12,7 @@ defmodule Rekindle.Toolchain.Installer do
     source_build? = Keyword.get(options, :source_build, false)
     offline? = Keyword.get(options, :offline, false)
 
-    with :ok <- validate_asset(asset),
+    with :ok <- validate_asset(asset, source_build?),
          :ok <- validate_host(asset),
          destination = destination(cache_root, version, asset),
          result <- validate_cached(destination, asset),
@@ -46,11 +46,17 @@ defmodule Rekindle.Toolchain.Installer do
     with :ok <- validate_bytes(bytes, asset) do
       File.mkdir_p!(Path.dirname(destination))
       temporary = destination <> ".tmp-" <> Integer.to_string(System.unique_integer([:positive]))
-      File.write!(temporary, bytes, [:binary, :exclusive])
+
+      File.open!(temporary, [:write, :binary, :exclusive], fn io ->
+        IO.binwrite(io, bytes)
+        :ok = :file.sync(io)
+      end)
+
       File.chmod!(temporary, 0o700)
 
-      case File.rename(temporary, destination) do
+      case File.ln(temporary, destination) do
         :ok ->
+          File.rm!(temporary)
           {:ok, destination}
 
         {:error, :eexist} ->
@@ -65,21 +71,20 @@ defmodule Rekindle.Toolchain.Installer do
   end
 
   defp validate_cached(path, asset) do
-    case File.read(path) do
-      {:ok, bytes} ->
-        with :ok <- validate_bytes(bytes, asset),
-             {:ok, stat} <- File.stat(path),
-             true <- stat.type == :regular and Bitwise.band(stat.mode, 0o100) != 0 do
+    with {:ok, stat} <- File.lstat(path) do
+      if stat.type == :regular and Bitwise.band(stat.mode, 0o100) != 0 do
+        with {:ok, bytes} <- File.read(path),
+             :ok <- validate_bytes(bytes, asset) do
           {:ok, path}
         else
           _ -> {:corrupt, path}
         end
-
-      {:error, :enoent} ->
-        :missing
-
-      {:error, reason} ->
-        {:error, :io_failed, "helper cache read failed: #{reason}"}
+      else
+        {:corrupt, path}
+      end
+    else
+      {:error, :enoent} -> :missing
+      {:error, reason} -> {:error, :io_failed, "helper cache read failed: #{reason}"}
     end
   end
 
@@ -100,11 +105,18 @@ defmodule Rekindle.Toolchain.Installer do
     end
   end
 
-  defp validate_asset(asset) do
+  defp validate_asset(asset, source_build?) do
     required = ~w[os arch url size sha256]
 
-    if is_map(asset) and Map.keys(asset) |> Enum.sort() == Enum.sort(required) and
-         asset["url"] =~ ~r/\Ahttps:\/\// and is_integer(asset["size"]) and asset["size"] > 0 and
+    valid_url? =
+      if source_build?,
+        do:
+          is_nil(asset["url"]) or
+            (is_binary(asset["url"]) and asset["url"] =~ ~r/\Ahttps:\/\//),
+        else: is_binary(asset["url"]) and asset["url"] =~ ~r/\Ahttps:\/\//
+
+    if is_map(asset) and Map.keys(asset) |> Enum.sort() == Enum.sort(required) and valid_url? and
+         is_integer(asset["size"]) and asset["size"] > 0 and
          is_binary(asset["sha256"]) and Regex.match?(~r/\A[0-9a-f]{64}\z/, asset["sha256"]) do
       :ok
     else

@@ -521,14 +521,21 @@ fn validate_root(value: &Value, mode: &str) -> OpResult<Root> {
             .map_err(io_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(io_error)?;
-        if entries.iter().any(|entry| entry.file_name() != MARKER) {
+        if entries.len() != 1 || entries[0].file_name() != MARKER {
             return Err(OpError::new("invalid_request", "output root is not empty"));
         }
-        if let Some(marker) = entries.first() {
-            let metadata = marker.metadata().map_err(io_error)?;
-            if !metadata.file_type().is_file() || metadata.uid() != unsafe { libc::geteuid() } {
-                return Err(OpError::new("invalid_request", "invalid attempt marker"));
-            }
+        let marker = &entries[0];
+        let marker_metadata = fs::symlink_metadata(marker.path()).map_err(io_error)?;
+        let expected = serde_jcs::to_vec(&json!({"root_id": value["id"], "v": 1}))
+            .map_err(|error| OpError::new("internal", error.to_string()))?;
+        let bytes = fs::read(marker.path()).map_err(io_error)?;
+        if !marker_metadata.file_type().is_file()
+            || marker_metadata.uid() != metadata.uid()
+            || marker_metadata.dev() != metadata.dev()
+            || marker_metadata.permissions().mode() & 0o077 != 0
+            || bytes != expected
+        {
+            return Err(OpError::new("invalid_request", "invalid attempt marker"));
         }
     }
     Ok(Root {

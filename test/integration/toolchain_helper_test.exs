@@ -1,18 +1,21 @@
 defmodule Rekindle.ToolchainHelperIntegrationTest do
   use ExUnit.Case, async: false
 
-  alias Rekindle.Toolchain.{Exec, Frame, Handshake, Helper, Installer, Web}
+  alias Rekindle.Toolchain.{Exec, Frame, Handshake, Helper, Installer, Release, Web}
 
   @request "0123456789abcdef0123456789abcdef"
 
   setup_all do
-    manifest = Path.expand("crates/rekindle-toolchain/Cargo.toml")
+    cache = temp_root("installed")
+    source = Path.expand("crates/rekindle-toolchain")
+    on_exit(fn -> File.rm_rf!(cache) end)
 
-    assert {_, 0} =
-             System.cmd("cargo", ["build", "--manifest-path", manifest], stderr_to_stdout: true)
+    assert {:ok, helper} =
+             Release.ensure(true, cache_root: cache, source_root: source, offline: true)
 
-    helper = Path.expand("crates/rekindle-toolchain/target/debug/rekindle_toolchain")
+    refute String.contains?(helper, "/target/")
     assert File.regular?(helper)
+    assert Bitwise.band(File.stat!(helper).mode, 0o100) != 0
     %{helper: helper}
   end
 
@@ -73,6 +76,76 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     refute process_exists?(descendant)
   end
 
+  test "BEAM fallback removes the descendant group when the helper dies after started", %{
+    helper: helper
+  } do
+    root = temp_root("helper-death")
+    script = Path.join(root, "descendants")
+    descendant_file = Path.join(root, "descendant.pid")
+    File.mkdir_p!(root)
+    File.write!(script, "#!/bin/sh\nsleep 30 &\necho $! > #{descendant_file}\nwait\n")
+    File.chmod!(script, 0o700)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:ok, spawn, state} =
+             Exec.spawn_request(
+               request_id: @request,
+               executable: script,
+               cwd: root,
+               terminate_grace_ms: 100,
+               kill_grace_ms: 500
+             )
+
+    result =
+      Helper.run_exec(helper, spawn, state,
+        timeout_ms: 5_000,
+        cleanup_timeout_ms: 2_000,
+        started_hook: fn port, _state ->
+          assert wait_file(descendant_file, 1_000)
+          {:os_pid, helper_pid} = Port.info(port, :os_pid)
+          {_output, 0} = System.cmd("/usr/bin/kill", ["-KILL", Integer.to_string(helper_pid)])
+        end
+      )
+
+    assert {:error, _reason} = result
+    descendant = descendant_file |> File.read!() |> String.trim() |> String.to_integer()
+    assert wait_process_absent(descendant, 2_000)
+  end
+
+  test "parent-death protection closes the ownership race before started is admitted", %{
+    helper: helper
+  } do
+    root = temp_root("pre-start")
+    script = Path.join(root, "leader")
+    leader_file = Path.join(root, "leader.pid")
+    File.mkdir_p!(root)
+    File.write!(script, "#!/bin/sh\necho $$ > #{leader_file}\nsleep 30\n")
+    File.chmod!(script, 0o700)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    port = open_helper(helper, "exec-v1")
+    negotiate(port, "exec-v1")
+
+    assert {:ok, spawn, _state} =
+             Exec.spawn_request(
+               request_id: @request,
+               executable: script,
+               cwd: root,
+               terminate_grace_ms: 100,
+               kill_grace_ms: 500
+             )
+
+    assert {:ok, encoded} = Frame.encode(spawn)
+    assert Port.command(port, encoded)
+    assert wait_file(leader_file, 1_000)
+    {:os_pid, helper_pid} = Port.info(port, :os_pid)
+    {_output, 0} = System.cmd("/usr/bin/kill", ["-KILL", Integer.to_string(helper_pid)])
+    assert_receive {^port, {:exit_status, _status}}, 1_000
+
+    leader = leader_file |> File.read!() |> String.trim() |> String.to_integer()
+    assert wait_process_absent(leader, 1_000)
+  end
+
   test "exec-v1 bounds retained binary output and reports discarded bytes", %{helper: helper} do
     executable = System.find_executable("head") |> Path.expand()
 
@@ -131,7 +204,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
     assert {:ok, input_root} = Web.root(input, :read, id: id(1))
     assert {:ok, wasm} = Web.file(input_root, "app.wasm")
-    assert {:ok, bindgen_root} = Web.root(bindgen_output, :write_empty, id: id(2))
+    assert {:ok, bindgen_root} = Web.prepare_output_root(bindgen_output, id: id(2))
     limits = limits()
 
     assert {:ok, request, state} =
@@ -161,7 +234,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
         descriptor
       end)
 
-    assert {:ok, package_root} = Web.root(package_output, :write_empty, id: id(4))
+    assert {:ok, package_root} = Web.prepare_output_root(package_output, id: id(4))
 
     assert {:ok, request, state} =
              Web.operation(
@@ -258,9 +331,15 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
   defp id(number), do: number |> Integer.to_string(16) |> String.pad_leading(32, "0")
 
   defp process_exists?(pid) do
-    case System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true) do
-      {_, 0} -> true
-      {_, _} -> false
+    case File.read("/proc/#{pid}/status") do
+      {:ok, status} when is_binary(status) ->
+        not String.contains?(status, "\nState:\tZ")
+
+      _ ->
+        case System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true) do
+          {_, 0} -> true
+          {_, _} -> false
+        end
     end
   end
 
@@ -285,6 +364,47 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp negotiate(port, mode) do
+    host = Installer.host() |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+    hello = Handshake.hello(mode, Helper.compatibility(), host)
+    {:ok, encoded} = Frame.encode(hello)
+    true = Port.command(port, encoded)
+    {:ok, %{"type" => "hello_ok"}, <<>>} = receive_frame(port, <<>>)
+    :ok
+  end
+
+  defp wait_file(path, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    cond do
+      File.regular?(path) ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
+
+      true ->
+        Process.sleep(5)
+        wait_file(path, deadline - System.monotonic_time(:millisecond))
+    end
+  end
+
+  defp wait_process_absent(pid, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    cond do
+      not process_exists?(pid) ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
+
+      true ->
+        Process.sleep(5)
+        wait_process_absent(pid, deadline - System.monotonic_time(:millisecond))
     end
   end
 

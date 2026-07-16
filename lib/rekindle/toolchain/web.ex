@@ -42,7 +42,7 @@ defmodule Rekindle.Toolchain.Web do
     with :ok <- request_id(id),
          {:ok, stat} <- File.lstat(path),
          true <- stat.type == :directory,
-         :ok <- validate_empty(path, mode) do
+         :ok <- validate_empty(path, mode, id, stat) do
       {:ok,
        %{
          "id" => id,
@@ -50,6 +50,23 @@ defmodule Rekindle.Toolchain.Web do
          "mode" => Atom.to_string(mode),
          "device" => stat.major_device * 4_294_967_296 + stat.minor_device
        }}
+    else
+      _ -> {:error, :invalid_root}
+    end
+  end
+
+  @spec prepare_output_root(Path.t(), keyword()) :: {:ok, map()} | {:error, atom()}
+  def prepare_output_root(path, options \\ []) do
+    path = Path.expand(path)
+    id = Keyword.get_lazy(options, :id, &random_id/0)
+    marker = Path.join(path, @marker)
+
+    with :ok <- request_id(id),
+         {:ok, stat} <- File.lstat(path),
+         true <- stat.type == :directory,
+         :ok <- create_marker(marker, marker_bytes(id)),
+         {:ok, root} <- root(path, :write_empty, id: id) do
+      {:ok, root}
     else
       _ -> {:error, :invalid_root}
     end
@@ -433,15 +450,33 @@ defmodule Rekindle.Toolchain.Web do
     {:ok, paths}
   end
 
-  defp validate_empty(_path, :read), do: :ok
+  defp validate_empty(_path, :read, _id, _root_stat), do: :ok
 
-  defp validate_empty(path, :write_empty) do
-    case File.ls(path) do
-      {:ok, []} -> :ok
-      {:ok, [@marker]} -> :ok
-      _ -> {:error, :not_empty}
+  defp validate_empty(path, :write_empty, id, root_stat) do
+    marker = Path.join(path, @marker)
+
+    with {:ok, [@marker]} <- File.ls(path),
+         {:ok, stat} <- File.lstat(marker),
+         true <- stat.type == :regular and stat.uid == root_stat.uid,
+         true <- Bitwise.band(stat.mode, 0o077) == 0,
+         true <- stat.major_device == root_stat.major_device,
+         {:ok, bytes} <- File.read(marker),
+         true <- bytes == marker_bytes(id) do
+      :ok
+    else
+      _ -> {:error, :invalid_marker}
     end
   end
+
+  defp create_marker(path, bytes) do
+    case File.write(path, bytes, [:binary, :exclusive]) do
+      :ok -> File.chmod(path, 0o600)
+      {:error, :eexist} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp marker_bytes(id), do: CanonicalValue.encode!(%{"root_id" => id, "v" => 1})
 
   defp valid_diagnostic?(value) do
     exact?(value, ~w[severity code message path line]) and value["severity"] in ~w[info warning] and

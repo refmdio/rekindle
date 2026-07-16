@@ -74,10 +74,22 @@ pub fn run<R: Read>(mut input: R) -> Result<(), String> {
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
+                return Err(std::io::Error::last_os_error());
             }
+
+            #[cfg(target_os = "linux")]
+            {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() == 1 {
+                    return Err(std::io::Error::other(
+                        "helper parent died before child ownership transfer",
+                    ));
+                }
+            }
+
+            Ok(())
         });
     }
 

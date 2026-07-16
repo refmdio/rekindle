@@ -4,6 +4,7 @@ defmodule Mix.Tasks.Rekindle.Setup do
   use Mix.Task
 
   alias Rekindle.{Config, Failure, Setup}
+  alias Rekindle.Toolchain.Release
 
   @impl Mix.Task
   def run(argv) do
@@ -48,13 +49,5 @@ defmodule Mix.Tasks.Rekindle.Setup do
      )}
   end
 
-  defp ensure_helper(_source_build?) do
-    {:error,
-     Failure.new!(
-       target: nil,
-       stage: :compatibility,
-       code: :helper_missing,
-       message: "no release helper asset is configured"
-     )}
-  end
+  defp ensure_helper(source_build?), do: Release.ensure(source_build?)
 end

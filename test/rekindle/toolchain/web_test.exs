@@ -21,7 +21,9 @@ defmodule Rekindle.Toolchain.WebTest do
              Web.root(roots.input, :read, id: "11111111111111111111111111111111")
 
     assert {:ok, output_root} =
-             Web.root(roots.output, :write_empty, id: "22222222222222222222222222222222")
+             Web.prepare_output_root(roots.output,
+               id: "22222222222222222222222222222222"
+             )
 
     assert {:ok, wasm} = Web.file(input_root, "app.wasm")
 
@@ -80,10 +82,10 @@ defmodule Rekindle.Toolchain.WebTest do
 
   test "requires write-empty roots and rejects changed, escaping, symlink, and undeclared output",
        roots do
-    File.write!(Path.join(roots.output, Web.marker()), "attempt")
-
     assert {:ok, output_root} =
-             Web.root(roots.output, :write_empty, id: "22222222222222222222222222222222")
+             Web.prepare_output_root(roots.output,
+               id: "22222222222222222222222222222222"
+             )
 
     File.write!(Path.join(roots.output, "app.js"), "one")
     assert {:ok, descriptor} = Web.file(output_root, "app.js")
@@ -100,6 +102,28 @@ defmodule Rekindle.Toolchain.WebTest do
     symlink = Path.join(roots.output, "link")
     File.ln_s!(Path.join(roots.output, "app.js"), symlink)
     assert {:error, :invalid_file} = Web.file(output_root, "link")
+  end
+
+  test "requires an exact no-follow attempt marker bound to the output root id", roots do
+    assert {:error, :invalid_root} =
+             Web.root(roots.output, :write_empty, id: "22222222222222222222222222222222")
+
+    marker = Path.join(roots.output, Web.marker())
+    target = Path.join(roots.input, "app.wasm")
+    File.ln_s!(target, marker)
+
+    assert {:error, :invalid_root} =
+             Web.root(roots.output, :write_empty, id: "22222222222222222222222222222222")
+
+    File.rm!(marker)
+
+    assert {:ok, _root} =
+             Web.prepare_output_root(roots.output,
+               id: "22222222222222222222222222222222"
+             )
+
+    assert {:error, :invalid_root} =
+             Web.root(roots.output, :write_empty, id: "33333333333333333333333333333333")
   end
 
   test "enforces ordered progress, terminal union, and post-terminal rejection" do

@@ -39,7 +39,9 @@ defmodule Rekindle.Toolchain.Helper do
         <<>>,
         deadline(options),
         false,
-        Keyword.get(options, :cleanup_timeout_ms, 5_000)
+        Keyword.get(options, :cleanup_timeout_ms, 5_000),
+        Keyword.get(options, :started_hook),
+        false
       )
     end
   end
@@ -110,12 +112,17 @@ defmodule Rekindle.Toolchain.Helper do
          stderr,
          deadline,
          cancel_sent?,
-         cleanup_timeout
+         cleanup_timeout,
+         started_hook,
+         hook_called?
        ) do
     case next_frame(port, buffer, deadline) do
       {:ok, header, payload, remaining} ->
         case Exec.accept(state, header, payload) do
           {:ok, state} ->
+            hook_called? =
+              run_started_hook(started_hook, hook_called?, port, header, state)
+
             stdout = if header["type"] == "stdout", do: stdout <> payload, else: stdout
             stderr = if header["type"] == "stderr", do: stderr <> payload, else: stderr
 
@@ -127,7 +134,9 @@ defmodule Rekindle.Toolchain.Helper do
               stderr,
               deadline,
               cancel_sent?,
-              cleanup_timeout
+              cleanup_timeout,
+              started_hook,
+              hook_called?
             )
 
           {:terminal, terminal, _state} ->
@@ -152,7 +161,9 @@ defmodule Rekindle.Toolchain.Helper do
             stderr,
             monotonic_ms() + cleanup_timeout,
             true,
-            cleanup_timeout
+            cleanup_timeout,
+            started_hook,
+            hook_called?
           )
         else
           _ ->
@@ -167,6 +178,14 @@ defmodule Rekindle.Toolchain.Helper do
         {:error, :helper_protocol}
     end
   end
+
+  defp run_started_hook(hook, false, port, %{"type" => "started"}, state)
+       when is_function(hook, 2) do
+    hook.(port, state)
+    true
+  end
+
+  defp run_started_hook(_hook, called?, _port, _header, _state), do: called?
 
   defp revalidate_web_result(_operation, %{"type" => "operation_error"}), do: :ok
 
@@ -258,13 +277,13 @@ defmodule Rekindle.Toolchain.Helper do
   end
 
   defp fallback_cleanup(%Exec{process_group: group}, timeout) when is_integer(group) do
-    with executable when is_binary(executable) <- kill_executable() do
-      signal_group(executable, group, "TERM")
+    with {pkill, pgrep} <- process_group_tools() do
+      signal_group(pkill, group, "TERM")
       deadline = monotonic_ms() + timeout
 
-      unless wait_group_absent(executable, group, deadline) do
-        signal_group(executable, group, "KILL")
-        wait_group_absent(executable, group, deadline)
+      unless wait_group_absent(pgrep, group, deadline) do
+        signal_group(pkill, group, "KILL")
+        wait_group_absent(pgrep, group, deadline)
       end
     end
 
@@ -273,9 +292,9 @@ defmodule Rekindle.Toolchain.Helper do
 
   defp fallback_cleanup(_state, _timeout), do: :ok
 
-  defp wait_group_absent(executable, group, deadline) do
+  defp wait_group_absent(pgrep, group, deadline) do
     cond do
-      group_absent?(executable, group) ->
+      group_absent?(pgrep, group) ->
         true
 
       monotonic_ms() >= deadline ->
@@ -283,23 +302,31 @@ defmodule Rekindle.Toolchain.Helper do
 
       true ->
         Process.sleep(10)
-        wait_group_absent(executable, group, deadline)
+        wait_group_absent(pgrep, group, deadline)
     end
   end
 
-  defp group_absent?(executable, group) do
-    case System.cmd(executable, ["-0", "--", "-#{group}"], stderr_to_stdout: true) do
-      {_output, 0} -> false
-      {_output, _status} -> true
+  defp group_absent?(pgrep, group) do
+    case System.cmd(pgrep, ["-g", Integer.to_string(group)], stderr_to_stdout: true) do
+      {_output, 1} -> true
+      {_output, _status} -> false
     end
   end
 
-  defp signal_group(executable, group, signal) do
-    System.cmd(executable, ["-#{signal}", "--", "-#{group}"], stderr_to_stdout: true)
+  defp signal_group(pkill, group, signal) do
+    System.cmd(
+      pkill,
+      ["-#{signal}", "-g", Integer.to_string(group)],
+      stderr_to_stdout: true
+    )
+
     :ok
   end
 
-  defp kill_executable do
-    Enum.find(["/usr/bin/kill", "/bin/kill"], &File.regular?/1)
+  defp process_group_tools do
+    pkill = Enum.find(["/usr/bin/pkill", "/bin/pkill"], &File.regular?/1)
+    pgrep = Enum.find(["/usr/bin/pgrep", "/bin/pgrep"], &File.regular?/1)
+
+    if pkill && pgrep, do: {pkill, pgrep}, else: nil
   end
 end
