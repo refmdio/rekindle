@@ -1,0 +1,24 @@
+[package]
+name = "rekindle-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+description = "Target startup and portable state handoff facade for Rekindle GPUI clients."
+
+[features]
+default = []
+web = ["dep:gpui"]
+desktop = ["dep:gpui"]
+state-handoff = []
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "18f35ffac2da72ccdfb0e1bf756218fa1995162b", optional = true, default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"
