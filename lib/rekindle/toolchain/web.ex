@@ -341,7 +341,8 @@ defmodule Rekindle.Toolchain.Web do
   defp valid_success?("bindgen_web", header) do
     exact?(header, ~w[v type request_id payload_len op files javascript_entry wasm]) and
       files?(header["files"]) and relative?(header["javascript_entry"]) and
-      relative?(header["wasm"])
+      relative?(header["wasm"]) and file_path?(header["files"], header["javascript_entry"]) and
+      file_path?(header["files"], header["wasm"])
   end
 
   defp valid_success?("package_web", header) do
@@ -350,6 +351,7 @@ defmodule Rekindle.Toolchain.Web do
       ~w[v type request_id payload_len op files manifest artifact_id manifest_digest]
     ) and
       files?(header["files"]) and file_descriptor?(header["manifest"]) and
+      header["manifest"] in header["files"] and
       digest?(header["artifact_id"]) and digest?(header["manifest_digest"])
   end
 
@@ -384,8 +386,10 @@ defmodule Rekindle.Toolchain.Web do
          ~w[bindgen_root bindgen_files public_root public_files bootstrap_template output_root manifest_base limits]
        ) and
          read_root?(body["bindgen_root"]) and files?(body["bindgen_files"]) and
+         files_belong_to?(body["bindgen_files"], body["bindgen_root"]) and
          (is_nil(body["public_root"]) or read_root?(body["public_root"])) and
          files?(body["public_files"]) and
+         public_files_belong_to_root?(body["public_files"], body["public_root"]) and
          exact?(body["bootstrap_template"], ~w[id sha256]) and write_root?(body["output_root"]) and
          is_map(body["manifest_base"]) and limits?(body["limits"]),
        do: :ok,
@@ -396,6 +400,7 @@ defmodule Rekindle.Toolchain.Web do
     if exact?(body, ~w[artifact_root manifest expected_manifest_digest limits]) and
          read_root?(body["artifact_root"]) and
          file_descriptor?(body["manifest"]) and digest?(body["expected_manifest_digest"]) and
+         body["manifest"]["root_id"] == body["artifact_root"]["id"] and
          limits?(body["limits"]),
        do: :ok,
        else: {:error, :invalid_operation}
@@ -426,6 +431,18 @@ defmodule Rekindle.Toolchain.Web do
     do:
       is_list(files) and files == Enum.sort_by(files, & &1["path"]) and
         unique?(Enum.map(files, & &1["path"])) and Enum.all?(files, &file_descriptor?/1)
+
+  defp files_belong_to?(files, root),
+    do: Enum.all?(files, &(&1["root_id"] == root["id"]))
+
+  defp public_files_belong_to_root?([], nil), do: true
+
+  defp public_files_belong_to_root?(files, root) when is_map(root),
+    do: files_belong_to?(files, root)
+
+  defp public_files_belong_to_root?(_files, _root), do: false
+
+  defp file_path?(files, path), do: Enum.any?(files, &(&1["path"] == path))
 
   defp validate_descriptors(root, files) do
     if Enum.all?(files, fn descriptor ->

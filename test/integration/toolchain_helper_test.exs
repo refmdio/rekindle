@@ -191,6 +191,116 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     refute_receive {^port, {:data, _bytes}}, 50
   end
 
+  test "web-v1 applies every debug and source-map policy combination", %{helper: helper} do
+    root = temp_root("web-source-maps")
+    input = Path.join(root, "input")
+    File.mkdir_p!(input)
+    File.write!(Path.join(input, "app.wasm"), wasm_module())
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:ok, input_root} = Web.root(input, :read, id: id(10))
+    assert {:ok, wasm} = Web.file(input_root, "app.wasm")
+
+    for {debug, source_maps, number} <- [
+          {false, :none, 11},
+          {true, :none, 12},
+          {false, :external, 13},
+          {true, :external, 14}
+        ] do
+      output = Path.join(root, "output-#{number}")
+      File.mkdir_p!(output)
+      assert {:ok, output_root} = Web.prepare_output_root(output, id: id(number))
+
+      assert {:ok, request, state} =
+               bindgen_operation(input_root, wasm, output_root, limits(),
+                 debug: debug,
+                 source_maps: source_maps
+               )
+
+      assert {:ok, %{"type" => "operation_ok", "files" => files}, []} =
+               Helper.run_web(helper, request, state)
+
+      paths = Enum.map(files, & &1["path"])
+      javascript = File.read!(Path.join(output, "app.js"))
+
+      if source_maps == :external do
+        assert "app.js.map" in paths
+        assert String.ends_with?(javascript, "//# sourceMappingURL=app.js.map\n")
+        source_map = output |> Path.join("app.js.map") |> File.read!() |> Jason.decode!()
+
+        assert Map.keys(source_map) |> Enum.sort() ==
+                 ~w[file mappings names sources sourcesContent version]
+
+        assert source_map["version"] == 3
+        assert source_map["file"] == "app.js"
+        assert source_map["sources"] == ["wasm-bindgen://generated/app.js"]
+        assert source_map["names"] == []
+        assert [mapped_javascript] = source_map["sourcesContent"]
+        refute String.contains?(mapped_javascript, "sourceMappingURL=")
+        assert source_map["mappings"] != ""
+      else
+        refute "app.js.map" in paths
+        refute String.contains?(javascript, "sourceMappingURL=")
+      end
+    end
+  end
+
+  test "web-v1 rejects real bindgen schema, identity, Wasm, and limit failures", %{
+    helper: helper
+  } do
+    root = temp_root("web-errors")
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    cases = [
+      {:incompatible_schema, wasm_module(), "incompatible_schema",
+       fn request, _path ->
+         %{request | "expected_wasm_bindgen" => "9.9.9"}
+       end},
+      {:invalid_debug, wasm_module(), "invalid_request",
+       fn request, _path ->
+         %{request | "debug" => "false"}
+       end},
+      {:root_substitution, wasm_module(), "invalid_request",
+       fn request, _path ->
+         put_in(request, ["input_wasm", "root_id"], id(99))
+       end},
+      {:asset_escape, wasm_module(), "asset_escape",
+       fn request, _path ->
+         put_in(request, ["input_wasm", "path"], "../app.wasm")
+       end},
+      {:invalid_wasm, "not wasm", "invalid_wasm", fn request, _path -> request end},
+      {:bindgen_failed, wasm_module() <> <<1, 128>>, "bindgen_failed",
+       fn request, _path ->
+         request
+       end},
+      {:input_changed, wasm_module(), "input_changed",
+       fn request, path ->
+         File.write!(path, wasm_module() <> <<0>>)
+         request
+       end},
+      {:output_limit, wasm_module(), "output_limit",
+       fn request, _path ->
+         put_in(request, ["limits", "max_output_bytes"], 1)
+       end}
+    ]
+
+    for {{name, bytes, expected_code, mutate}, number} <- Enum.with_index(cases, 20) do
+      input = Path.join(root, "#{name}-input")
+      output = Path.join(root, "#{name}-output")
+      Enum.each([input, output], &File.mkdir_p!/1)
+      wasm_path = Path.join(input, "app.wasm")
+      File.write!(wasm_path, bytes)
+      assert {:ok, input_root} = Web.root(input, :read, id: id(number))
+      assert {:ok, wasm} = Web.file(input_root, "app.wasm")
+      assert {:ok, output_root} = Web.prepare_output_root(output, id: id(number + 100))
+      assert {:ok, request, state} = bindgen_operation(input_root, wasm, output_root, limits())
+      request = mutate.(request, wasm_path)
+
+      assert {:ok, %{"type" => "operation_error", "code" => ^expected_code}, []} =
+               Helper.run_web(helper, request, state)
+    end
+  end
+
   test "web-v1 performs bindgen, package, verify, and detects post-package tampering", %{
     helper: helper
   } do
@@ -218,7 +328,11 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
     File.chmod!(marker, 0o600)
 
-    assert {:ok, request, state} = bindgen_operation(input_root, wasm, bindgen_root, limits)
+    assert {:ok, request, state} =
+             bindgen_operation(input_root, wasm, bindgen_root, limits,
+               debug: true,
+               source_maps: :external
+             )
 
     assert {:ok, %{"type" => "operation_ok", "op" => "bindgen_web"} = bound, []} =
              Helper.run_web(helper, request, state)
@@ -253,6 +367,24 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
              Helper.run_web(helper, request, state)
 
     assert :ok = Web.revalidate_files(package_root, package["files"])
+
+    manifest_value =
+      package_output
+      |> Path.join("rekindle-web-manifest-v1.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    javascript_member = Enum.find(manifest_value["members"], &(&1["role"] == "javascript"))
+    assert javascript_member["source_map"] == javascript_member["path"] <> ".map"
+
+    assert Enum.any?(manifest_value["edges"], fn edge ->
+             edge == %{
+               "from" => javascript_member["path"],
+               "to" => javascript_member["source_map"],
+               "kind" => "source_map"
+             }
+           end)
+
     assert {:ok, artifact_root} = Web.root(package_output, :read, id: id(5))
     assert {:ok, manifest} = Web.file(artifact_root, "rekindle-web-manifest-v1.json")
 
@@ -297,7 +429,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     limits
   end
 
-  defp bindgen_operation(input_root, wasm, output_root, limits) do
+  defp bindgen_operation(input_root, wasm, output_root, limits, options \\ []) do
     Web.operation(
       "bindgen_web",
       %{
@@ -305,14 +437,16 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
         input_wasm: wasm,
         output_root: output_root,
         output_stem: "app",
-        debug: false,
-        source_maps: :none,
+        debug: Keyword.get(options, :debug, false),
+        source_maps: Keyword.get(options, :source_maps, :none),
         expected_wasm_bindgen: "0.2.121",
         limits: limits
       },
       request_id: @request
     )
   end
+
+  defp wasm_module, do: <<0, 97, 115, 109, 1, 0, 0, 0>>
 
   defp manifest_base do
     %{
@@ -342,7 +476,8 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     }
   end
 
-  defp id(number), do: number |> Integer.to_string(16) |> String.pad_leading(32, "0")
+  defp id(number),
+    do: number |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(32, "0")
 
   defp process_exists?(pid) do
     case File.read("/proc/#{pid}/status") do

@@ -119,6 +119,7 @@ fn bindgen(request: &Value) -> OpResult<Value> {
         return Err(OpError::new("invalid_request", "file root substitution"));
     }
     let input = validate_input_file(&input_root, &request["input_wasm"])?;
+    validate_wasm_header(&input.path)?;
     let output = validate_root(&request["output_root"], "write_empty")?;
     let limits = Limits::parse(&request["limits"])?;
     enforce_input_limits(&limits, &[input.size])?;
@@ -132,6 +133,9 @@ fn bindgen(request: &Value) -> OpResult<Value> {
     if !matches!(source_maps, "none" | "external") {
         return Err(OpError::new("invalid_request", "invalid source map policy"));
     }
+    let debug = request["debug"]
+        .as_bool()
+        .ok_or_else(|| OpError::new("invalid_request", "debug must be boolean"))?;
     let started = Instant::now();
     let mut bindgen = wasm_bindgen_cli_support::Bindgen::new();
     bindgen.input_path(&input.path);
@@ -139,11 +143,12 @@ fn bindgen(request: &Value) -> OpResult<Value> {
     bindgen
         .web(true)
         .map_err(|error| OpError::new("bindgen_failed", error.to_string()))?;
-    bindgen.debug(request["debug"].as_bool().unwrap_or(false));
-    bindgen.keep_debug(request["debug"].as_bool().unwrap_or(false));
+    bindgen.debug(debug);
+    bindgen.keep_debug(debug);
     bindgen
         .generate(&output.path)
         .map_err(|error| OpError::new("bindgen_failed", error.to_string()))?;
+    apply_source_map(&output, stem, source_maps)?;
     enforce_limits(&output.path, &limits, started)?;
     let files = describe_tree(&output, true)?;
     let js = files
@@ -169,6 +174,63 @@ fn bindgen(request: &Value) -> OpResult<Value> {
         "payload_len": 0, "op": "bindgen_web", "files": files,
         "javascript_entry": js, "wasm": wasm
     }))
+}
+
+fn validate_wasm_header(path: &Path) -> OpResult<()> {
+    let bytes = fs::read(path).map_err(io_error)?;
+    if bytes.len() < 8 || bytes[..8] != [0, 97, 115, 109, 1, 0, 0, 0] {
+        Err(OpError::new("invalid_wasm", "invalid WebAssembly header"))
+    } else {
+        Ok(())
+    }
+}
+
+fn apply_source_map(output: &Root, stem: &str, policy: &str) -> OpResult<()> {
+    let javascript_name = format!("{stem}.js");
+    let javascript_path = output.path.join(&javascript_name);
+    let javascript = fs::read_to_string(&javascript_path)
+        .map_err(|error| OpError::new("bindgen_failed", error.to_string()))?;
+
+    if policy == "none" {
+        if javascript.contains("sourceMappingURL=")
+            || output.path.join(format!("{javascript_name}.map")).exists()
+        {
+            return Err(OpError::new(
+                "bindgen_failed",
+                "source map output violates disabled policy",
+            ));
+        }
+        return Ok(());
+    }
+
+    let mappings = identity_mappings(&javascript);
+    let source_map = json!({
+        "version": 3,
+        "file": javascript_name,
+        "sources": [format!("wasm-bindgen://generated/{javascript_name}")],
+        "sourcesContent": [javascript],
+        "names": [],
+        "mappings": mappings
+    });
+    let source_map_bytes = serde_jcs::to_vec(&source_map)
+        .map_err(|error| OpError::new("internal", error.to_string()))?;
+    let source_map_name = format!("{javascript_name}.map");
+    fs::write(output.path.join(&source_map_name), source_map_bytes).map_err(io_error)?;
+
+    let mut mapped_javascript = source_map["sourcesContent"][0].as_str().unwrap().to_owned();
+    if !mapped_javascript.ends_with('\n') {
+        mapped_javascript.push('\n');
+    }
+    mapped_javascript.push_str(&format!("//# sourceMappingURL={source_map_name}\n"));
+    fs::write(javascript_path, mapped_javascript).map_err(io_error)
+}
+
+fn identity_mappings(source: &str) -> String {
+    let line_count = source.lines().count().max(1);
+    std::iter::once("AAAA")
+        .chain(std::iter::repeat_n("AACA", line_count.saturating_sub(1)))
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 fn package(request: &Value) -> OpResult<Value> {
@@ -486,6 +548,7 @@ fn require_operation(value: &Value, op: &str, keys: &[&str]) -> OpResult<()> {
     if frame::exact_keys(value, keys)
         && value["v"] == 1
         && value["type"] == "operation"
+        && frame::is_request_id(value.get("request_id"))
         && value["payload_len"] == 0
         && value["op"] == op
     {
@@ -575,7 +638,12 @@ fn validate_files(root: &Root, value: &Value) -> OpResult<Vec<InputFile>> {
 
 fn validate_file(root: &Root, value: &Value) -> OpResult<PathBuf> {
     const KEYS: &[&str] = &["root_id", "path", "sha256", "size", "mode"];
-    if !frame::exact_keys(value, KEYS) || value["root_id"] != root.id {
+    if !frame::exact_keys(value, KEYS)
+        || value["root_id"] != root.id
+        || !digest(value["sha256"].as_str())
+        || value["size"].as_u64().is_none()
+        || !matches!(value["mode"].as_str(), Some("data" | "executable"))
+    {
         return Err(OpError::new("invalid_request", "invalid file descriptor"));
     }
     let relative_path = value["path"].as_str().unwrap_or_default();
