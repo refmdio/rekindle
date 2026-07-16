@@ -21,6 +21,7 @@ defmodule Rekindle.ClientGenerator do
     "src/bin/web.rs",
     "src/bin/desktop.rs"
   ]
+  @application_owned_paths ["Cargo.lock", "src/app.rs", "public/.gitkeep"]
 
   @spec render(keyword()) :: %{required(String.t()) => binary()}
   def render(options) do
@@ -297,6 +298,85 @@ defmodule Rekindle.ClientGenerator do
   end
 
   @doc false
+  @spec reconcile!(Path.t(), keyword(), keyword()) :: [Path.t()]
+  def reconcile!(client_root, options, runtime_options \\ []) do
+    client_root = Path.expand(client_root)
+    files = render(options)
+    parent = Path.dirname(client_root)
+
+    ensure_directory!(parent)
+
+    case admit_root(client_root) do
+      :ok -> :ok
+      {:error, _reason} -> raise ArgumentError, "client root is not a no-follow directory path"
+    end
+
+    parent_identity = directory_identity!(parent)
+    {existing_files, existing_directories, client_identity} = snapshot_client!(client_root)
+    reconciled_files = reconcile_files!(existing_files, files, options)
+    staging = client_root <> ".rekindle-stage-" <> random_id()
+    File.mkdir!(staging)
+    staging_identity = directory_identity!(staging)
+
+    try do
+      existing_directories
+      |> Enum.sort_by(&path_depth/1)
+      |> Enum.each(fn relative ->
+        revalidate_client_snapshot!(client_root, client_identity)
+        ensure_directory!(Path.join(staging, relative), staging, staging_identity)
+      end)
+
+      reconciled_files
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.each(fn {relative, contents} ->
+        revalidate_client_snapshot!(client_root, client_identity)
+        revalidate_directory!(staging, staging_identity)
+        path = Path.join(staging, relative)
+        ensure_directory!(Path.dirname(path), staging, staging_identity)
+        File.write!(path, contents, [:binary, :exclusive])
+        revalidate_directory!(staging, staging_identity)
+      end)
+
+      if Keyword.get(runtime_options, :generate_lock, true) and
+           Map.get(reconciled_files, "Cargo.lock") == "" do
+        case generate_lock(staging) do
+          :ok ->
+            :ok
+
+          {:error, %Rekindle.Failure{} = failure} ->
+            raise failure.message
+
+          {:error, {output, status}} ->
+            raise "cargo generate-lockfile failed (#{status}): #{output}"
+
+          {:error, reason} ->
+            raise "cargo generate-lockfile failed: #{reason}"
+        end
+      end
+
+      if hook = Keyword.get(runtime_options, :before_publish) do
+        hook.(client_root, staging)
+      end
+
+      publish_reconciled!(
+        staging,
+        staging_identity,
+        client_root,
+        client_identity,
+        parent,
+        parent_identity
+      )
+
+      reconciled_files
+      |> Map.keys()
+      |> Enum.sort()
+      |> Enum.map(&Path.join(client_root, &1))
+    after
+      if lstat_type(staging) in [:directory, :symlink], do: File.rm_rf!(staging)
+    end
+  end
+
+  @doc false
   @spec admit_root(Path.t()) :: :ok | {:error, :unsafe_client_root}
   def admit_root(client_root) when is_binary(client_root) do
     client_root
@@ -312,6 +392,168 @@ defmodule Rekindle.ClientGenerator do
   end
 
   def admit_root(_client_root), do: {:error, :unsafe_client_root}
+
+  defp snapshot_client!(client_root) do
+    case File.lstat(client_root) do
+      {:error, :enoent} ->
+        {%{}, [], nil}
+
+      {:ok, %{type: :directory}} ->
+        identity = directory_identity!(client_root)
+        {files, directories} = snapshot_directory!(client_root, client_root, identity, "")
+        revalidate_directory!(client_root, identity)
+        {files, directories, identity}
+
+      _ ->
+        raise ArgumentError, "client root is not a no-follow directory path"
+    end
+  end
+
+  defp snapshot_directory!(path, client_root, client_identity, relative) do
+    revalidate_directory!(client_root, client_identity)
+
+    path
+    |> File.ls!()
+    |> Enum.sort()
+    |> Enum.reduce({%{}, if(relative == "", do: [], else: [relative])}, fn name,
+                                                                           {files, directories} ->
+      child = Path.join(path, name)
+      child_relative = if relative == "", do: name, else: Path.join(relative, name)
+      revalidate_directory!(client_root, client_identity)
+
+      case File.lstat(child) do
+        {:ok, %{type: :directory}} when relative == "" and name == ".rekindle" ->
+          {files, directories}
+
+        {:ok, %{type: :directory}} ->
+          {child_files, child_directories} =
+            snapshot_directory!(child, client_root, client_identity, child_relative)
+
+          {Map.merge(files, child_files), directories ++ child_directories}
+
+        {:ok, %{type: :regular}} ->
+          before = file_identity!(child)
+          contents = File.read!(child)
+
+          if file_identity!(child) != before do
+            raise ArgumentError, "client file authority changed while reconciling"
+          end
+
+          revalidate_directory!(client_root, client_identity)
+          {Map.put(files, child_relative, contents), directories}
+
+        _ ->
+          raise ArgumentError, "client root contains a symlink or special file"
+      end
+    end)
+  end
+
+  defp reconcile_files!(existing, current, _options) when map_size(existing) == 0,
+    do: current
+
+  defp reconcile_files!(existing, current, options) do
+    marker = Map.get(existing, ".rekindle-client.json")
+
+    cond do
+      marker == current[".rekindle-client.json"] ->
+        validate_current_owned_files!(existing, current)
+        overlay_generated_files(existing, current)
+
+      true ->
+        case recognize_prior(marker, options) do
+          {:ok, prior} ->
+            validate_prior_owned_files!(existing, prior)
+            overlay_generated_files(existing, current)
+
+          :error ->
+            raise ArgumentError, "client root is not an admitted Rekindle client"
+        end
+    end
+  end
+
+  defp validate_current_owned_files!(existing, current) do
+    Enum.each(@owned_paths, fn relative ->
+      if Map.get(existing, relative) != Map.fetch!(current, relative) do
+        raise ArgumentError, "Rekindle-owned client file conflicts: #{relative}"
+      end
+    end)
+  end
+
+  defp validate_prior_owned_files!(existing, prior) do
+    Enum.each(prior.recorded_digests, fn
+      {".rekindle-client.json", _recorded} ->
+        :ok
+
+      {relative, recorded} ->
+        current_digest = existing |> Map.fetch!(relative) |> sha256()
+        known_digest = prior.files |> Map.fetch!(relative) |> sha256()
+
+        if current_digest not in [recorded, known_digest] do
+          raise ArgumentError, "Rekindle-owned client file conflicts: #{relative}"
+        end
+    end)
+  rescue
+    KeyError -> raise ArgumentError, "Rekindle-owned client file is missing"
+  end
+
+  defp overlay_generated_files(existing, current) do
+    Enum.reduce(current, existing, fn {relative, contents}, acc ->
+      if relative in @application_owned_paths and Map.has_key?(acc, relative) do
+        acc
+      else
+        Map.put(acc, relative, contents)
+      end
+    end)
+  end
+
+  defp publish_reconciled!(
+         staging,
+         staging_identity,
+         client_root,
+         client_identity,
+         parent,
+         parent_identity
+       ) do
+    revalidate_directory!(parent, parent_identity)
+    revalidate_directory!(staging, staging_identity)
+    revalidate_client_snapshot!(client_root, client_identity)
+
+    case client_identity do
+      nil ->
+        File.rename!(staging, client_root)
+
+      _identity ->
+        backup = client_root <> ".rekindle-backup-" <> random_id()
+        File.rename!(client_root, backup)
+
+        try do
+          File.rename!(staging, client_root)
+          revalidate_directory!(parent, parent_identity)
+          revalidate_directory!(client_root, staging_identity)
+        rescue
+          error ->
+            if lstat_type(client_root) == nil and lstat_type(backup) == :directory do
+              File.rename!(backup, client_root)
+            end
+
+            reraise error, __STACKTRACE__
+        end
+
+        File.rm_rf!(backup)
+    end
+
+    revalidate_directory!(parent, parent_identity)
+    revalidate_directory!(client_root, staging_identity)
+  end
+
+  defp revalidate_client_snapshot!(client_root, nil) do
+    if lstat_type(client_root) != nil do
+      raise ArgumentError, "client root authority changed before publication"
+    end
+  end
+
+  defp revalidate_client_snapshot!(client_root, identity),
+    do: revalidate_directory!(client_root, identity)
 
   defp publish_staging!(staging, staging_identity, client_root, parent, parent_identity) do
     revalidate_directory!(parent, parent_identity)
@@ -391,6 +633,27 @@ defmodule Rekindle.ClientGenerator do
     end
   end
 
+  defp file_identity!(path) do
+    case File.lstat(path) do
+      {:ok, stat = %{type: :regular}} ->
+        Map.take(stat, [
+          :inode,
+          :uid,
+          :gid,
+          :major_device,
+          :minor_device,
+          :type,
+          :mode,
+          :size,
+          :mtime,
+          :ctime
+        ])
+
+      _ ->
+        raise ArgumentError, "client file is not an admitted regular file"
+    end
+  end
+
   defp directory?(path), do: lstat_type(path) == :directory
 
   defp lstat_type(path) do
@@ -408,6 +671,8 @@ defmodule Rekindle.ClientGenerator do
 
   defp random_id,
     do: :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+
+  defp path_depth(path), do: path |> Path.split() |> length()
 
   @doc false
   @spec generate_lock(Path.t()) ::

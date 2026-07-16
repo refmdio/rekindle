@@ -181,21 +181,46 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp generate_client(igniter, client_path, application_id, targets) do
-      lock_path = Path.join(client_path, "Cargo.lock")
-      generate_lock? = not Igniter.exists?(igniter, lock_path)
       options = client_template_options(application_id, targets)
       files = ClientGenerator.render(options)
 
-      igniter =
-        case classify_client(igniter, client_path, files, options) do
-          {:ok, :install} -> install_client_files(igniter, client_path, files)
-          {:ok, {:upgrade, prior}} -> upgrade_client_files(igniter, client_path, files, prior)
-          {:error, message} -> Igniter.add_issue(igniter, message)
-        end
+      case classify_client(igniter, client_path, files, options) do
+        {:ok, :install} ->
+          igniter
+          |> install_client_files(client_path, files)
+          |> defer_client_writes(client_path, files)
+          |> queue_client_reconciliation(client_path, options)
 
-      if generate_lock?,
-        do: Igniter.add_task(igniter, "rekindle.client.lock", [client_path]),
-        else: igniter
+        {:ok, {:upgrade, prior}} ->
+          igniter
+          |> upgrade_client_files(client_path, files, prior)
+          |> defer_client_writes(client_path, files)
+          |> queue_client_reconciliation(client_path, options)
+
+        {:error, message} ->
+          Igniter.add_issue(igniter, message)
+      end
+    end
+
+    defp defer_client_writes(igniter, client_path, files) do
+      sources =
+        Enum.reduce(files, igniter.rewrite.sources, fn {relative, _contents}, sources ->
+          path = Path.join(client_path, relative)
+
+          case Map.fetch(sources, path) do
+            {:ok, source} -> Map.put(sources, path, %{source | history: []})
+            :error -> sources
+          end
+        end)
+
+      %{igniter | rewrite: %{igniter.rewrite | sources: sources}}
+    end
+
+    defp queue_client_reconciliation(igniter, client_path, options) do
+      expression =
+        "Rekindle.ClientGenerator.reconcile!(#{inspect(client_path)}, #{inspect(options)})"
+
+      Igniter.add_task(igniter, "run", ["--no-compile", "-e", expression])
     end
 
     defp client_template_options(application_id, targets) do

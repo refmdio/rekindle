@@ -74,7 +74,7 @@ defmodule Rekindle.IgniterTest do
     assert source(proposal, ".gitignore") =~ "/client/.rekindle/"
     assert source(proposal, "client/Cargo.lock") == ""
     assert source(proposal, "client/rust-toolchain.toml") =~ ~s(channel = "nightly-2026-04-01")
-    assert {"rekindle.client.lock", ["client"]} in proposal.tasks
+    assert_client_reconciliation_task(proposal, "client")
 
     installed = apply_igniter!(proposal)
 
@@ -268,7 +268,7 @@ defmodule Rekindle.IgniterTest do
     materialize_client!(automatic, automatic_root)
     materialize_client!(manual, manual_root)
 
-    assert {"rekindle.client.lock", ["client"]} in automatic.tasks
+    assert_client_reconciliation_task(automatic, "client")
 
     with_env("CARGO_HOME", cargo_home, fn ->
       with_env("CARGO_NET_OFFLINE", "true", fn ->
@@ -322,7 +322,7 @@ defmodule Rekindle.IgniterTest do
     assert nested.issues == []
     assert source(nested, "clients/gpui/Cargo.toml") =~ ~s(name = "sample_app_ui")
     assert source(nested, "config/config.exs") =~ ~s(client: "clients/gpui")
-    assert {"rekindle.client.lock", ["clients/gpui"]} in nested.tasks
+    assert_client_reconciliation_task(nested, "clients/gpui")
   end
 
   test "symlinked client roots and ancestors fail before proposal or apply writes" do
@@ -355,6 +355,39 @@ defmodule Rekindle.IgniterTest do
     end)
   end
 
+  test "proposal-time client sources cannot follow a substituted client root" do
+    root = temp_dir!("rekindle-igniter-substituted-root")
+    outside = Path.join(root, "outside")
+    File.mkdir_p!(outside)
+    File.write!(Path.join(outside, "sentinel"), "outside-owned")
+    baseline = directory_snapshot(outside)
+
+    File.cd!(root, fn ->
+      proposal =
+        RekindleIgniter.install(project(),
+          client_path: "client",
+          targets: [:web],
+          endpoint: SampleAppWeb.Endpoint
+        )
+
+      assert proposal.issues == []
+      source = Rewrite.source!(proposal.rewrite, "client/Cargo.toml")
+      refute Rewrite.Source.updated?(source)
+      File.ln_s!(outside, "client")
+
+      assert {:ok, _source} = Rewrite.Source.write(source, force: true)
+      assert directory_snapshot(outside) == baseline
+
+      {"run", ["--no-compile", "-e", expression]} = client_reconciliation_task(proposal)
+
+      assert_raise ArgumentError, ~r/no-follow directory path/, fn ->
+        Code.eval_string(expression)
+      end
+
+      assert directory_snapshot(outside) == baseline
+    end)
+  end
+
   test "applied canonical client generates a lock and checks both declared toolchains" do
     root = temp_dir!("rekindle-igniter-applied")
     client_root = Path.join(root, "client")
@@ -373,7 +406,7 @@ defmodule Rekindle.IgniterTest do
     installed = apply_igniter!(proposal)
     materialize_client!(installed, client_root)
     assert File.read!(Path.join(client_root, "Cargo.lock")) == ""
-    assert {"rekindle.client.lock", ["client"]} in proposal.tasks
+    assert_client_reconciliation_task(proposal, "client")
 
     with_env("CARGO_HOME", cargo_home, fn ->
       Mix.Tasks.Rekindle.Client.Lock.run([client_root])
@@ -425,7 +458,7 @@ defmodule Rekindle.IgniterTest do
       )
 
     assert reinstalled.issues == []
-    refute {"rekindle.client.lock", ["client"]} in reinstalled.tasks
+    assert_client_reconciliation_task(reinstalled, "client")
   end
 
   test "modified template-owned files conflict while application UI remains owned by the app" do
@@ -1121,6 +1154,21 @@ defmodule Rekindle.IgniterTest do
     igniter.rewrite
     |> Rewrite.source!(path)
     |> Rewrite.Source.issues()
+  end
+
+  defp assert_client_reconciliation_task(igniter, client_path) do
+    assert {"run", ["--no-compile", "-e", expression]} = client_reconciliation_task(igniter)
+    assert expression =~ "Rekindle.ClientGenerator.reconcile!(#{inspect(client_path)},"
+  end
+
+  defp client_reconciliation_task(igniter) do
+    Enum.find(igniter.tasks, fn
+      {"run", ["--no-compile", "-e", expression]} ->
+        String.starts_with?(expression, "Rekindle.ClientGenerator.reconcile!(")
+
+      _other ->
+        false
+    end)
   end
 
   defp materialize_client!(igniter, client_root) do

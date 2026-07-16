@@ -335,6 +335,48 @@ defmodule Rekindle.ClientGeneratorTest do
     end
 
     assert directory_snapshot(outside) == baseline
+
+    reconciled = Path.join(base, "reconciled")
+    displaced = Path.join(base, "reconciled-displaced")
+    ClientGenerator.write!(reconciled, options(generate_lock: false))
+
+    assert_raise ArgumentError, fn ->
+      ClientGenerator.reconcile!(
+        reconciled,
+        options(generate_lock: false),
+        generate_lock: false,
+        before_publish: fn root, _staging ->
+          File.rename!(root, displaced)
+          File.ln_s!(outside, root)
+        end
+      )
+    end
+
+    assert directory_snapshot(outside) == baseline
+  end
+
+  test "reconciles admitted clients transactionally while preserving application files" do
+    base =
+      Path.join(
+        System.tmp_dir!(),
+        "rekindle-client-reconcile-#{System.unique_integer([:positive])}"
+      )
+
+    client = Path.join(base, "client")
+    on_exit(fn -> File.rm_rf!(base) end)
+    ClientGenerator.write!(client, options(generate_lock: false))
+    File.write!(Path.join(client, "Cargo.lock"), "application-lock\n")
+    File.write!(Path.join(client, "src/app.rs"), "application-ui\n")
+    File.write!(Path.join(client, "public/theme.css"), "application-theme\n")
+
+    ClientGenerator.reconcile!(client, options(generate_lock: false), generate_lock: false)
+
+    assert File.read!(Path.join(client, "Cargo.lock")) == "application-lock\n"
+    assert File.read!(Path.join(client, "src/app.rs")) == "application-ui\n"
+    assert File.read!(Path.join(client, "public/theme.css")) == "application-theme\n"
+
+    assert File.read!(Path.join(client, "Cargo.toml")) ==
+             ClientGenerator.render(options(generate_lock: false))["Cargo.toml"]
   end
 
   defp options(extra) do
