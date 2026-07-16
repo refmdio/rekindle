@@ -416,12 +416,14 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     on_exit(fn -> File.rm_rf!(root) end)
 
     write_tree(bindgen, %{
-      "app.js" => """
+      "app.js" => ~S"""
       import "./modules/static.js";
       export { value } from "./modules/exported.js";
       const lazy = import("./modules/lazy.js");
       const wasm = new URL("./app_bg.wasm", import.meta.url);
-      export default async function init() { return [lazy, wasm]; }
+      export const matcher = / from "\.\/missing.js"/;
+      export const template = `from "./also-missing.js"; import("./ghost.js")`;
+      export default async function init() { return [lazy, wasm, matcher, template]; }
       //# sourceMappingURL=app.js.map
       """,
       "app.js.map" => ~s({"version":3}),

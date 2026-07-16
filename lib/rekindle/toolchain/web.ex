@@ -472,6 +472,17 @@ defmodule Rekindle.Toolchain.Web do
     end
   end
 
+  defp javascript_tokens(<<?/, rest::binary>>, tokens, comments) do
+    if regex_literal_allowed?(tokens) do
+      case take_regex_literal(rest, false) do
+        {:ok, rest} -> javascript_tokens(rest, [:regex | tokens], comments)
+        :error -> {:error, :unterminated_regex}
+      end
+    else
+      javascript_tokens(rest, ["/" | tokens], comments)
+    end
+  end
+
   defp javascript_tokens(<<quote, rest::binary>>, tokens, comments) when quote in [?", ?'] do
     case take_quoted(rest, quote, [], false) do
       {:ok, value, escaped?, rest} ->
@@ -586,6 +597,68 @@ defmodule Rekindle.Toolchain.Web do
 
   defp literal_specifier(value) when is_binary(value), do: {:ok, value}
   defp literal_specifier(_value), do: {:error, :escaped_reference}
+
+  defp regex_literal_allowed?([]), do: true
+
+  defp regex_literal_allowed?([previous | _rest])
+       when previous in [
+              "(",
+              "[",
+              "{",
+              ",",
+              ";",
+              ":",
+              "=",
+              "!",
+              "?",
+              "&",
+              "|",
+              "+",
+              "-",
+              "*",
+              "%",
+              "^",
+              "~",
+              "<",
+              ">"
+            ],
+       do: true
+
+  defp regex_literal_allowed?([{:id, keyword} | _rest])
+       when keyword in ~w[return throw case delete void typeof instanceof in of yield await else do default new extends],
+       do: true
+
+  defp regex_literal_allowed?([")" | rest]), do: control_condition?(rest, 1)
+
+  defp regex_literal_allowed?(_tokens), do: false
+
+  defp control_condition?([], _depth), do: false
+  defp control_condition?([")" | rest], depth), do: control_condition?(rest, depth + 1)
+
+  defp control_condition?(["(" | [{:id, keyword} | _rest]], 1),
+    do: keyword in ~w[if while for with switch catch]
+
+  defp control_condition?(["(" | rest], depth), do: control_condition?(rest, depth - 1)
+  defp control_condition?([_token | rest], depth), do: control_condition?(rest, depth)
+
+  defp take_regex_literal(<<>>, _character_class?), do: :error
+
+  defp take_regex_literal(<<byte, _rest::binary>>, _character_class?) when byte in [?\n, ?\r],
+    do: :error
+
+  defp take_regex_literal(<<?\\, _byte, rest::binary>>, character_class?),
+    do: take_regex_literal(rest, character_class?)
+
+  defp take_regex_literal(<<?[, rest::binary>>, false), do: take_regex_literal(rest, true)
+  defp take_regex_literal(<<?], rest::binary>>, true), do: take_regex_literal(rest, false)
+
+  defp take_regex_literal(<<?/, rest::binary>>, false) do
+    {_flags, rest} = take_identifier(rest, [])
+    {:ok, rest}
+  end
+
+  defp take_regex_literal(<<_byte, rest::binary>>, character_class?),
+    do: take_regex_literal(rest, character_class?)
 
   defp css_references(bytes) when is_binary(bytes) do
     if String.valid?(bytes), do: css_references(bytes, false, []), else: {:error, :invalid_css}
