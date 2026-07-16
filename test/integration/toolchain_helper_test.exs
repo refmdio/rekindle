@@ -434,8 +434,15 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       const importObj = { import(value) { return value; } };
       importObj.import({ from: "./missing-import-member.js" });
       const importProperty = importObj.import;
-      class Loader { import(value) { return value; } }
-      export default async function init() { return [lazy, wasm, matcher, template, interpolated, nested, templateMatcher, objectKey, property, importKey, importProperty, Loader]; }
+      const asyncImportObj = { async import(value) { return value; } };
+      class Loader {
+        import(value) { return value; }
+        async import(value) { return value; }
+        *import(value) { yield value; }
+        get import() { return importProperty; }
+        set import(value) { this.value = value; }
+      }
+      export default async function init() { return [lazy, wasm, matcher, template, interpolated, nested, templateMatcher, objectKey, property, importKey, importProperty, asyncImportObj, Loader]; }
       //# sourceMappingURL=app.js.map
       """,
       "app.js.map" => ~s({"version":3}),

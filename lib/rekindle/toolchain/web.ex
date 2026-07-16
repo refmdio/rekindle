@@ -547,32 +547,13 @@ defmodule Rekindle.Toolchain.Web do
          previous,
          references
        )
-       when previous in ["{", ",", ";", "}"] do
+       when previous != "." do
     if method_definition_tail?(rest) do
       javascript_token_references(["(" | rest], {:id, "import"}, references)
     else
       dynamic_import_reference(rest, references)
     end
   end
-
-  defp javascript_token_references(
-         [{:id, "import"}, "(", {:string, specifier}, ")" | rest],
-         previous,
-         references
-       )
-       when previous != "." do
-    with {:ok, specifier} <- literal_specifier(specifier) do
-      javascript_token_references(
-        rest,
-        ")",
-        [{specifier, "dynamic_import", true} | references]
-      )
-    end
-  end
-
-  defp javascript_token_references([{:id, "import"}, "(" | _rest], previous, _references)
-       when previous != ".",
-       do: {:error, :nonliteral_dynamic_import}
 
   defp javascript_token_references(
          [{:id, "import"}, {:string, _specifier} | _rest] = tokens,
@@ -636,6 +617,7 @@ defmodule Rekindle.Toolchain.Web do
   defp method_definition_tail?([], _depth), do: false
   defp method_definition_tail?(["(" | rest], depth), do: method_definition_tail?(rest, depth + 1)
   defp method_definition_tail?([")", "{" | _rest], 1), do: true
+  defp method_definition_tail?([")" | _rest], 1), do: false
   defp method_definition_tail?([")" | rest], depth), do: method_definition_tail?(rest, depth - 1)
   defp method_definition_tail?([_token | rest], depth), do: method_definition_tail?(rest, depth)
 
