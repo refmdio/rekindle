@@ -47,6 +47,34 @@ defmodule Rekindle.TargetBackendTest do
     def finalize(_context, _options, _result), do: :ok
   end
 
+  defmodule EmptyValidateErrorsBackend do
+    def backend_id, do: "invalid.empty-errors"
+    def backend_version, do: "1"
+    def validate(_target, _options), do: {:error, []}
+    def plan(_context, _options), do: :ok
+    def finalize(_context, _options, _result), do: :ok
+  end
+
+  defmodule InvalidValidateErrorsBackend do
+    def backend_id, do: "invalid.malformed-errors"
+    def backend_version, do: "1"
+
+    def validate(_target, _options) do
+      {:error,
+       [
+         %Rekindle.ConfigError{
+           contract_version: 2,
+           path: [:backend],
+           code: :config_invalid,
+           message: "invalid"
+         }
+       ]}
+    end
+
+    def plan(_context, _options), do: :ok
+    def finalize(_context, _options, _result), do: :ok
+  end
+
   test "admits an existing conforming module and normalized options" do
     assert {:ok, admission} = TargetBackend.admit(ValidBackend, :web, %{"answer" => 42})
     assert admission.module == ValidBackend
@@ -80,6 +108,12 @@ defmodule Rekindle.TargetBackendTest do
 
     assert {:error, [%ConfigError{path: [:backend, :options]}]} =
              TargetBackend.admit(InvalidValidateResultBackend, :web, %{})
+
+    assert {:error, [%ConfigError{path: [:backend, :options]}]} =
+             TargetBackend.admit(EmptyValidateErrorsBackend, :web, %{})
+
+    assert {:error, [%ConfigError{path: [:backend, :options]}]} =
+             TargetBackend.admit(InvalidValidateErrorsBackend, :web, %{})
   end
 
   test "publishes the exact behaviour callback surface" do
@@ -116,12 +150,20 @@ defmodule Rekindle.TargetBackendTest do
 
     assert {:error, ^failure} = TargetBackend.validate_plan_result({:error, failure})
 
+    assert {:error, %ConfigError{path: [:backend, :plan]}} =
+             TargetBackend.validate_plan_result({:error, %{failure | contract_version: 2}})
+
     artifact = %ExternalArtifact{
       manifest: "rekindle-web-manifest-v1.json",
       supplemental_diagnostics: []
     }
 
     assert {:ok, ^artifact} = TargetBackend.validate_finalize_result({:ok, artifact})
+
+    assert {:error, ^failure} = TargetBackend.validate_finalize_result({:error, failure})
+
+    assert {:error, %ConfigError{path: [:backend, :finalize]}} =
+             TargetBackend.validate_finalize_result({:error, %{failure | contract_version: 2}})
 
     assert {:error, %ConfigError{}} =
              TargetBackend.validate_finalize_result({:ok, %{artifact | manifest: "../escape"}})

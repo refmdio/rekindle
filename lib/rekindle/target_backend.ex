@@ -103,7 +103,9 @@ defmodule Rekindle.TargetBackend do
     end
   end
 
-  def validate_plan_result({:error, %Rekindle.Failure{} = failure}), do: {:error, failure}
+  def validate_plan_result({:error, %Rekindle.Failure{} = failure}) do
+    validate_failure_arm(failure, :plan)
+  end
 
   def validate_plan_result(_result),
     do: {:error, error([:backend, :plan], "plan/2 returned an invalid union")}
@@ -121,7 +123,9 @@ defmodule Rekindle.TargetBackend do
     end
   end
 
-  def validate_finalize_result({:error, %Rekindle.Failure{} = failure}), do: {:error, failure}
+  def validate_finalize_result({:error, %Rekindle.Failure{} = failure}) do
+    validate_failure_arm(failure, :finalize)
+  end
 
   def validate_finalize_result(_result),
     do: {:error, error([:backend, :finalize], "finalize/3 returned an invalid union")}
@@ -169,7 +173,7 @@ defmodule Rekindle.TargetBackend do
   defp invoke_validate(module, target, options) do
     case module.validate(target, options) do
       {:ok, normalized} -> {:ok, normalized}
-      {:error, errors} when is_list(errors) -> {:error, errors}
+      {:error, errors} when is_list(errors) -> validate_error_arm(errors)
       _other -> {:error, error([:backend, :options], "validate/2 returned an invalid result")}
     end
   rescue
@@ -200,6 +204,44 @@ defmodule Rekindle.TargetBackend do
   end
 
   defp error(path, message), do: ConfigError.new(path, :config_invalid, message)
+
+  defp validate_error_arm([%ConfigError{} | _] = errors) do
+    if Enum.all?(errors, &valid_config_error?/1),
+      do: {:error, errors},
+      else: {:error, error([:backend, :options], "validate/2 returned invalid errors")}
+  end
+
+  defp validate_error_arm(_errors),
+    do: {:error, error([:backend, :options], "validate/2 returned invalid errors")}
+
+  defp valid_config_error?(%ConfigError{} = value) do
+    value.contract_version == 1 and is_list(value.path) and
+      Enum.all?(value.path, &valid_path_segment?/1) and is_atom(value.code) and
+      is_binary(value.message) and value.message != "" and String.valid?(value.message) and
+      byte_size(value.message) <= 8_192
+  end
+
+  defp valid_config_error?(_value), do: false
+
+  defp valid_path_segment?(value),
+    do: is_atom(value) or is_binary(value) or (is_integer(value) and value >= 0)
+
+  defp validate_failure_arm(failure, callback) do
+    case Rekindle.Failure.sanitize(failure) do
+      {:ok, sanitized} ->
+        {:error, sanitized}
+
+      {:error, _} ->
+        {:error,
+         error(
+           [:backend, callback],
+           "#{callback}/#{callback_arity(callback)} returned invalid failure"
+         )}
+    end
+  end
+
+  defp callback_arity(:plan), do: 2
+  defp callback_arity(:finalize), do: 3
 
   defp valid_cwd?(%{root: root, path: path}) when root in [:project, :client, :staging],
     do: is_binary(path) and relative_path?(path)
