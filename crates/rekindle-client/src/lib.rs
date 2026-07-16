@@ -87,6 +87,12 @@ impl std::error::Error for HandoffError {}
 pub mod web {
     use crate::{ClientError, ClientOptions};
 
+    /// Starts the GPUI Web application through the Rekindle runtime adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::PlatformInit`] until the Web runtime adapter is
+    /// installed by its owning implementation phase.
     pub fn run(build: fn(&mut gpui::App), options: ClientOptions) -> Result<(), ClientError> {
         let _ = (build, options);
         Err(ClientError::PlatformInit)
@@ -97,6 +103,12 @@ pub mod web {
 pub mod desktop {
     use crate::{ClientError, ClientOptions};
 
+    /// Starts the native GPUI application through the Rekindle runtime adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::PlatformInit`] until the desktop runtime adapter
+    /// is installed by its owning implementation phase.
     pub fn run(build: fn(&mut gpui::App), options: ClientOptions) -> Result<(), ClientError> {
         let _ = (build, options);
         Err(ClientError::PlatformInit)
