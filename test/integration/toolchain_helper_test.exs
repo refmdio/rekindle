@@ -571,6 +571,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       {"contract version", &Map.put(&1, "contract_version", 2)},
       {"Rekindle semver", &Map.put(&1, "rekindle_version", "01.0.0")},
       {"application identity", &Map.put(&1, "application_id", "cafe\u0301")},
+      {"non-ASCII application identity", &Map.put(&1, "application_id", "é")},
       {"target", &Map.put(&1, "target", "desktop")},
       {"artifact digest", &Map.put(&1, "artifact_id", "invalid")},
       {"build key", &put_in(&1, ["build", "build_key"], "invalid")},
@@ -590,6 +591,41 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       {"producer tuple", &put_in(&1, ["producer", "compatibility_tuple_id"], "")},
       {"producer extra field",
        &update_in(&1["producer"], fn producer -> Map.put(producer, "extra", 1) end)},
+      {"extension backend ID",
+       &Map.put(&1, "producer", %{
+         "kind" => "extension",
+         "backend_id" => "INVALID",
+         "backend_version" => "1",
+         "options_digest" => String.duplicate("c", 64)
+       })},
+      {"extension Unicode backend ID",
+       &Map.put(&1, "producer", %{
+         "kind" => "extension",
+         "backend_id" => "é",
+         "backend_version" => "1",
+         "options_digest" => String.duplicate("c", 64)
+       })},
+      {"extension Unicode version",
+       &Map.put(&1, "producer", %{
+         "kind" => "extension",
+         "backend_id" => "example.backend",
+         "backend_version" => "é",
+         "options_digest" => String.duplicate("c", 64)
+       })},
+      {"extension empty version",
+       &Map.put(&1, "producer", %{
+         "kind" => "extension",
+         "backend_id" => "example.backend",
+         "backend_version" => "",
+         "options_digest" => String.duplicate("c", 64)
+       })},
+      {"extension bounded version",
+       &Map.put(&1, "producer", %{
+         "kind" => "extension",
+         "backend_id" => "example.backend",
+         "backend_version" => String.duplicate("a", 129),
+         "options_digest" => String.duplicate("c", 64)
+       })},
       {"secure-context requirement", &put_in(&1, ["host_requirements", "secure_context"], false)},
       {"WebGPU requirement", &put_in(&1, ["host_requirements", "webgpu"], false)},
       {"host-requirement extra field",
@@ -634,12 +670,16 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
     case_collision =
       update_in(manifest["members"], fn members ->
-        duplicate =
+        source =
           members
-          |> Enum.find(&(&1["path"] == "app.js"))
-          |> Map.put("path", "APP.JS")
+          |> Enum.find(&(&1["path"] == "styles/image.png"))
 
-        Enum.sort_by([duplicate | members], & &1["path"])
+        collisions =
+          for path <- ["STRASSE.txt", "Straße.txt"] do
+            %{source | "path" => path, "mime" => "text/plain; charset=utf-8"}
+          end
+
+        Enum.sort_by(collisions ++ members, & &1["path"])
       end)
       |> with_web_artifact_id()
 
@@ -651,6 +691,16 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       "case-fold collision"
     )
 
+    empty_features_manifest = put_in(manifest, ["build", "features"], [])
+
+    assert_web_manifest_verified(
+      helper,
+      artifact_root,
+      output,
+      empty_features_manifest,
+      "empty feature list"
+    )
+
     extension_manifest =
       manifest
       |> Map.put("producer", %{
@@ -659,36 +709,14 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
         "backend_version" => "1",
         "options_digest" => String.duplicate("c", 64)
       })
-      |> with_web_manifest_digest()
 
-    File.write!(
-      Path.join(output, "rekindle-web-manifest-v1.json"),
-      CanonicalValue.encode!(extension_manifest)
+    assert_web_manifest_verified(
+      helper,
+      artifact_root,
+      output,
+      extension_manifest,
+      "extension Producer"
     )
-
-    assert :ok =
-             Web.revalidate_manifest(output_root, %{
-               "artifact_id" => extension_manifest["artifact_id"],
-               "manifest_digest" => extension_manifest["manifest_digest"]
-             })
-
-    assert {:ok, extension_descriptor} =
-             Web.file(artifact_root, "rekindle-web-manifest-v1.json")
-
-    assert {:ok, extension_request, extension_state} =
-             Web.operation(
-               "verify_web",
-               %{
-                 artifact_root: artifact_root,
-                 manifest: extension_descriptor,
-                 expected_manifest_digest: extension_manifest["manifest_digest"],
-                 limits: limits()
-               },
-               request_id: @request
-             )
-
-    assert {:ok, %{"type" => "operation_ok", "op" => "verify_web"}, []} =
-             Helper.run_web(helper, extension_request, extension_state)
 
     File.write!(
       Path.join(output, "rekindle-web-manifest-v1.json"),
@@ -1320,6 +1348,38 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       |> Base.encode16(case: :lower)
 
     Map.put(manifest, "artifact_id", artifact_id)
+  end
+
+  defp assert_web_manifest_verified(helper, root, output, manifest, label) do
+    manifest = with_web_manifest_digest(manifest)
+    path = Path.join(output, "rekindle-web-manifest-v1.json")
+    File.write!(path, CanonicalValue.encode!(manifest))
+
+    assert :ok ==
+             Web.revalidate_manifest(root, %{
+               "artifact_id" => manifest["artifact_id"],
+               "manifest_digest" => manifest["manifest_digest"]
+             }),
+           label
+
+    assert {:ok, descriptor} = Web.file(root, "rekindle-web-manifest-v1.json"), label
+
+    assert {:ok, request, state} =
+             Web.operation(
+               "verify_web",
+               %{
+                 artifact_root: root,
+                 manifest: descriptor,
+                 expected_manifest_digest: manifest["manifest_digest"],
+                 limits: limits()
+               },
+               request_id: @request
+             ),
+           label
+
+    assert {:ok, %{"type" => "operation_ok", "op" => "verify_web"}, []} =
+             Helper.run_web(helper, request, state),
+           label
   end
 
   defp assert_web_manifest_rejected(helper, root, output, manifest, label) do

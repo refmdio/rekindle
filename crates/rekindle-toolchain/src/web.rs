@@ -9,6 +9,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 use tree_sitter::{Node, Parser};
+use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
@@ -1155,7 +1156,7 @@ fn validate_manifest_base(value: &Value, allow_extension: bool) -> OpResult<()> 
         && value["rekindle_version"].as_str().is_some_and(valid_semver)
         && value["application_id"]
             .as_str()
-            .is_some_and(valid_manifest_string)
+            .is_some_and(valid_application_id)
         && valid_build(&value["build"])
         && (valid_canonical_web_producer(&value["producer"])
             || (allow_extension && valid_extension_producer(&value["producer"])))
@@ -1176,9 +1177,6 @@ fn valid_build(build: &Value) -> bool {
         && ["profile", "package", "binary"]
             .iter()
             .all(|key| build[*key].as_str().is_some_and(valid_manifest_string))
-        && build["features"]
-            .as_array()
-            .is_some_and(|values| !values.is_empty())
         && normalized_strings_sorted_unique(&build["features"])
 }
 
@@ -1220,10 +1218,10 @@ fn valid_extension_producer(producer: &Value) -> bool {
     ) && producer["kind"] == "extension"
         && producer["backend_id"]
             .as_str()
-            .is_some_and(valid_manifest_string)
+            .is_some_and(valid_backend_id)
         && producer["backend_version"]
             .as_str()
-            .is_some_and(valid_manifest_string)
+            .is_some_and(valid_backend_version)
         && digest(producer["options_digest"].as_str())
 }
 
@@ -1581,6 +1579,28 @@ fn valid_semver(value: &str) -> bool {
     valid_manifest_string(value) && Version::parse(value).is_ok()
 }
 
+fn valid_application_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (1..=128).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes[1..].iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+}
+
+fn valid_backend_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (1..=128).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes[1..].iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
+        })
+}
+
+fn valid_backend_version(value: &str) -> bool {
+    (1..=128).contains(&value.len()) && value.is_ascii()
+}
+
 fn relative_strings_sorted_unique(value: &Value) -> bool {
     value.as_array().is_some_and(|values| {
         values.windows(2).all(|pair| {
@@ -1609,7 +1629,7 @@ fn normalized_strings_sorted_unique(value: &Value) -> bool {
 }
 
 fn case_fold_path(value: &str) -> String {
-    value.chars().flat_map(char::to_lowercase).collect()
+    value.case_fold().collect()
 }
 
 fn no_symlink_components(path: &Path) -> bool {

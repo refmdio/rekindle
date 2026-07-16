@@ -153,10 +153,18 @@ defmodule Rekindle.Toolchain.WebTest do
 
     assert {:ok, _, %Web{op: "package_web"}} = Web.operation("package_web", body)
 
+    assert {:ok, _, %Web{op: "package_web"}} =
+             Web.operation(
+               "package_web",
+               put_in(body, [:manifest_base, :build, :features], [])
+             )
+
     invalid_bases = [
       Map.put(manifest_base(), :unknown, true),
       Map.put(manifest_base(), :rekindle_version, "01.0.0"),
       Map.put(manifest_base(), :application_id, "bad\napp"),
+      Map.put(manifest_base(), :application_id, "é"),
+      Map.put(manifest_base(), :application_id, "Uppercase"),
       Map.put(manifest_base(), :target, "desktop"),
       put_in(manifest_base(), [:build, :build_key], "invalid"),
       put_in(manifest_base(), [:build, :features], ["web", "alpha"]),

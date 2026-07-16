@@ -12,6 +12,8 @@ defmodule Rekindle.Toolchain.Web do
   @manifest "rekindle-web-manifest-v1.json"
   @max_manifest_string_bytes 4_096
   @max_path_bytes 4_096
+  @application_id_pattern ~r/\A[a-z][a-z0-9_-]{0,127}\z/
+  @backend_id_pattern ~r/\A[a-z][a-z0-9_.-]{0,127}\z/
   @bootstrap_template """
   export async function start(context) {
     if (!context || context.v !== 1) throw new Error("invalid Rekindle context");
@@ -218,7 +220,7 @@ defmodule Rekindle.Toolchain.Web do
       ~w[rekindle_version application_id target build producer host_requirements hot_styles]
     ) and
       valid_semver?(base["rekindle_version"]) and
-      manifest_string?(base["application_id"]) and
+      valid_application_id?(base["application_id"]) and
       base["target"] == "web" and
       valid_manifest_build?(base["build"]) and
       valid_web_producer?(base["producer"], producer_kinds) and
@@ -230,7 +232,7 @@ defmodule Rekindle.Toolchain.Web do
     exact?(build, ~w[build_key profile package binary features]) and
       digest?(build["build_key"]) and
       Enum.all?(~w[profile package binary], &manifest_string?(build[&1])) and
-      relative_strings_sorted_unique?(build["features"], false, &manifest_string?/1)
+      relative_strings_sorted_unique?(build["features"], true, &manifest_string?/1)
   end
 
   defp valid_web_producer?(%{"kind" => "canonical_web"} = producer, producer_kinds) do
@@ -249,8 +251,9 @@ defmodule Rekindle.Toolchain.Web do
   defp valid_web_producer?(%{"kind" => "extension"} = producer, producer_kinds) do
     "extension" in producer_kinds and
       exact?(producer, ~w[kind backend_id backend_version options_digest]) and
-      manifest_string?(producer["backend_id"]) and
-      manifest_string?(producer["backend_version"]) and digest?(producer["options_digest"])
+      valid_backend_id?(producer["backend_id"]) and
+      valid_backend_version?(producer["backend_version"]) and
+      digest?(producer["options_digest"])
   end
 
   defp valid_web_producer?(_producer, _producer_kinds), do: false
@@ -260,6 +263,17 @@ defmodule Rekindle.Toolchain.Web do
   end
 
   defp valid_semver?(_value), do: false
+
+  defp valid_application_id?(value),
+    do: is_binary(value) and Regex.match?(@application_id_pattern, value)
+
+  defp valid_backend_id?(value),
+    do: is_binary(value) and Regex.match?(@backend_id_pattern, value)
+
+  defp valid_backend_version?(value) do
+    is_binary(value) and byte_size(value) in 1..128 and
+      Enum.all?(:binary.bin_to_list(value), &(&1 <= 0x7F))
+  end
 
   defp manifest_string?(value) when is_binary(value) do
     value != "" and byte_size(value) <= @max_manifest_string_bytes and String.valid?(value) and
