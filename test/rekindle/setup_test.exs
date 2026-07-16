@@ -1,5 +1,5 @@
 defmodule Rekindle.SetupTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Rekindle.{Config, Failure, Setup}
 
