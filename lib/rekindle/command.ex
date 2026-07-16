@@ -102,6 +102,7 @@ defmodule Rekindle.Command do
   end
 
   defp expected_failure(command, %{json?: true}, failure, _progress) do
+    failure = sanitize_failure(failure)
     envelope = envelope(command, "error", nil, Failure.to_map(failure))
 
     %Outcome{
@@ -113,6 +114,8 @@ defmodule Rekindle.Command do
   end
 
   defp expected_failure(_command, %{json?: false}, failure, progress) do
+    failure = sanitize_failure(failure)
+
     %Outcome{
       exit_status: 1,
       stdout: lines(progress),
@@ -206,4 +209,19 @@ defmodule Rekindle.Command do
 
   defp format_invalid(values),
     do: Enum.map_join(values, ", ", fn {name, value} -> "#{name}=#{inspect(value)}" end)
+
+  defp sanitize_failure(failure) do
+    case Failure.sanitize(failure) do
+      {:ok, sanitized} ->
+        sanitized
+
+      {:error, _} ->
+        Failure.new!(
+          target: nil,
+          stage: :internal,
+          code: :contract_violation,
+          message: "unsafe failure payload"
+        )
+    end
+  end
 end

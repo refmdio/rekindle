@@ -1,5 +1,5 @@
 defmodule Rekindle.FailureTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Rekindle.{Diagnostic, Failure}
 
@@ -128,5 +128,55 @@ defmodule Rekindle.FailureTest do
     assert Map.keys(Diagnostic.__struct__()) |> Enum.sort() ==
              ~w[__struct__ code column contract_version file line message rendered severity stage target]a
              |> Enum.sort()
+  end
+
+  test "redacts registered secrets and absolute paths before every public sink" do
+    previous = Application.get_env(:rekindle, :redact_values)
+    Application.put_env(:rekindle, :redact_values, ["super-secret-token"])
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:rekindle, :redact_values, previous),
+        else: Application.delete_env(:rekindle, :redact_values)
+    end)
+
+    assert {:ok, failure} =
+             Failure.new(
+               target: :web,
+               stage: :execution,
+               code: :cargo_failed,
+               message: "super-secret-token failed in /home/user/private/source.rs"
+             )
+
+    assert failure.message == "<redacted> failed in <redacted-path>"
+    refute Failure.render(failure) =~ "super-secret-token"
+    refute Jason.encode!(Failure.to_map(failure)) =~ "/home/user"
+
+    unsafe = %{failure | message: "super-secret-token at /tmp/private"}
+
+    outcome =
+      Rekindle.Command.run("rekindle.test", [], [switches: [], positionals: 0], fn _ ->
+        {:error, unsafe}
+      end)
+
+    refute outcome.stderr =~ "super-secret-token"
+    refute outcome.stderr =~ "/tmp/private"
+  end
+
+  test "rejects stack-like, raw, and oversized public payloads" do
+    base = [target: nil, stage: :internal, code: :internal]
+    assert {:error, _} = Failure.new(base ++ [message: "stacktrace:\n secret"])
+    assert {:error, _} = Failure.new(base ++ [message: <<255, 254>>])
+    assert {:error, _} = Failure.new(base ++ [message: String.duplicate("x", 65_537)])
+
+    assert {:error, _} =
+             Diagnostic.new(
+               target: nil,
+               stage: :internal,
+               severity: :error,
+               code: :internal,
+               message: "safe",
+               rendered: "** (RuntimeError) leaked"
+             )
   end
 end

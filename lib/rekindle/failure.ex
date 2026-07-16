@@ -81,6 +81,7 @@ defmodule Rekindle.Failure do
 
     with :ok <- reject_unknown_keys(attributes),
          {:ok, expected_stage} <- fetch_stage(code),
+         {:ok, attributes} <- sanitize_attributes(attributes),
          :ok <- validate_fields(attributes, expected_stage),
          :ok <- validate_diagnostics(Map.get(attributes, :diagnostics, [])) do
       {:ok,
@@ -116,6 +117,9 @@ defmodule Rekindle.Failure do
       "retryable" => failure.retryable?
     }
   end
+
+  @spec sanitize(t()) :: {:ok, t()} | {:error, ConfigError.t()}
+  def sanitize(%__MODULE__{} = failure), do: failure |> Map.from_struct() |> new()
 
   @spec render(t()) :: String.t()
   def render(%__MODULE__{} = failure) do
@@ -165,9 +169,14 @@ defmodule Rekindle.Failure do
     error(:config_invalid, "failure diagnostics must be a list")
   end
 
-  defp safe_message?(message) when is_binary(message) do
-    String.valid?(message) and message != "" and not String.contains?(message, <<0>>)
+  defp sanitize_attributes(attributes) do
+    case Rekindle.Redactor.sanitize(Map.get(attributes, :message)) do
+      {:ok, message} -> {:ok, Map.put(attributes, :message, message)}
+      {:error, _} = error -> error
+    end
   end
+
+  defp safe_message?(message) when is_binary(message), do: byte_size(message) <= 8_192
 
   defp safe_message?(_message), do: false
 

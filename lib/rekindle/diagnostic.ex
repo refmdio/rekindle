@@ -34,6 +34,7 @@ defmodule Rekindle.Diagnostic do
     attributes = Map.new(attributes)
 
     with :ok <- reject_unknown_keys(attributes),
+         {:ok, attributes} <- sanitize_attributes(attributes),
          :ok <- validate_common(attributes),
          :ok <- validate_location(attributes) do
       {:ok,
@@ -107,6 +108,16 @@ defmodule Rekindle.Diagnostic do
     end
   end
 
+  defp sanitize_attributes(attributes) do
+    with {:ok, message} <- Rekindle.Redactor.sanitize(Map.get(attributes, :message)),
+         {:ok, rendered} <- sanitize_optional(Map.get(attributes, :rendered)) do
+      {:ok, attributes |> Map.put(:message, message) |> Map.put(:rendered, rendered)}
+    end
+  end
+
+  defp sanitize_optional(nil), do: {:ok, nil}
+  defp sanitize_optional(value), do: Rekindle.Redactor.sanitize(value)
+
   defp safe_file?("<external>"), do: true
 
   defp safe_file?(file) when is_binary(file) do
@@ -117,9 +128,7 @@ defmodule Rekindle.Diagnostic do
 
   defp safe_file?(_file), do: false
 
-  defp safe_text?(value) when is_binary(value) do
-    String.valid?(value) and value != "" and not String.contains?(value, <<0>>)
-  end
+  defp safe_text?(value) when is_binary(value), do: byte_size(value) <= 8_192
 
   defp safe_text?(_value), do: false
 
