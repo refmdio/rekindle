@@ -6,6 +6,7 @@ defmodule Rekindle.ClientGenerator do
   @template_version "1"
   @client_version "0.1.0"
   @gpui_revision "18f35ffac2da72ccdfb0e1bf756218fa1995162b"
+  @web_toolchain "nightly-2026-04-01"
 
   @spec render(keyword()) :: %{required(String.t()) => binary()}
   def render(options) do
@@ -21,6 +22,7 @@ defmodule Rekindle.ClientGenerator do
 
     files = %{
       "Cargo.toml" => cargo_toml(package, web_binary, desktop_binary, dependency),
+      "Cargo.lock" => "",
       "rust-toolchain.toml" => rust_toolchain(),
       ".cargo/config.toml" => cargo_config(),
       "src/app.rs" => app_rs(),
@@ -100,11 +102,7 @@ defmodule Rekindle.ClientGenerator do
       end
     end
 
-    written ++
-      if(Keyword.get(options, :generate_lock, true),
-        do: [Path.join(client_root, "Cargo.lock")],
-        else: []
-      )
+    written
   end
 
   defp validate!(application_id, package, web_binary, desktop_binary, targets) do
@@ -162,7 +160,7 @@ defmodule Rekindle.ClientGenerator do
   defp rust_toolchain do
     """
     [toolchain]
-    channel = "1.95.0"
+    channel = "#{@web_toolchain}"
     components = ["rust-src"]
     targets = ["wasm32-unknown-unknown"]
     profile = "minimal"

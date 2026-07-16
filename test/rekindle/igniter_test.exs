@@ -42,11 +42,15 @@ defmodule Rekindle.IgniterTest do
 
     assert source(proposal, ".gitignore") =~ "/.rekindle/"
     assert source(proposal, ".gitignore") =~ "/client/.rekindle/"
+    assert source(proposal, "client/Cargo.lock") == ""
+    assert source(proposal, "client/rust-toolchain.toml") =~ ~s(channel = "nightly-2026-04-01")
+    assert {"rekindle.client.lock", ["client"]} in proposal.tasks
 
     installed = apply_igniter!(proposal)
 
     assert Rewrite.source!(installed.rewrite, "client/Cargo.toml")
     assert source(installed, "client/src/lib.rs") =~ "rekindle_client::ClientOptions"
+    assert source(installed, "config/config.exs") =~ "nightly-2026-04-01"
 
     assert source(installed, "lib/sample_app_web/components/layouts/root.html.heex") =~
              "Rekindle.Phoenix.Components.gpui_page"
@@ -80,6 +84,7 @@ defmodule Rekindle.IgniterTest do
       )
 
     assert reinstalled.issues == []
+    refute {"rekindle.client.lock", ["client"]} in reinstalled.tasks
     assert source(reinstalled, "mix.exs") == source(installed, "mix.exs")
     assert source(reinstalled, "lib/sample_app_web/endpoint.ex") == endpoint
     assert count(source(reinstalled, "lib/sample_app_web.ex"), ~s("rekindle")) == 1

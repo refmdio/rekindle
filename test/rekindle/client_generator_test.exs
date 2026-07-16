@@ -9,6 +9,7 @@ defmodule Rekindle.ClientGeneratorTest do
     second = ClientGenerator.render(options)
 
     assert first == second
+    assert Map.fetch!(first, "Cargo.lock") == ""
     assert Map.has_key?(first, "src/app.rs")
     assert Map.has_key?(first, "src/bin/web.rs")
     assert Map.has_key?(first, "src/bin/desktop.rs")
@@ -33,21 +34,45 @@ defmodule Rekindle.ClientGeneratorTest do
     root = Path.join(System.tmp_dir!(), "rekindle-client-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(root) end)
 
-    written = ClientGenerator.write!(root, options())
+    fixture_client = Path.join(root, "fixture/rekindle-client")
+    copy_client_fixture!(fixture_client)
+
+    written =
+      ClientGenerator.write!(
+        Path.join(root, "client"),
+        options(rekindle_client: {:path, fixture_client})
+      )
+
+    root = Path.join(root, "client")
     assert Path.join(root, "Cargo.lock") in written
     assert File.exists?(Path.join(root, "Cargo.lock"))
-    cargo_target = Path.expand("_build/test/generated-client-cargo")
+    desktop_target = Path.expand("_build/test/generated-client-cargo/desktop")
+    web_target = Path.expand("_build/test/generated-client-cargo/web")
 
     assert {_, 0} =
-             System.cmd("cargo", ["metadata", "--locked", "--format-version", "1", "--no-deps"],
+             System.cmd(
+               "rustup",
+               [
+                 "run",
+                 "1.95.0",
+                 "cargo",
+                 "metadata",
+                 "--locked",
+                 "--format-version",
+                 "1",
+                 "--no-deps"
+               ],
                cd: root,
                stderr_to_stdout: true
              )
 
     assert {_, 0} =
              System.cmd(
-               "cargo",
+               "rustup",
                [
+                 "run",
+                 "1.95.0",
+                 "cargo",
                  "check",
                  "--locked",
                  "--no-default-features",
@@ -57,18 +82,19 @@ defmodule Rekindle.ClientGeneratorTest do
                  "sample_app"
                ],
                cd: root,
-               env: [{"CARGO_TARGET_DIR", cargo_target}],
+               env: [
+                 {"RUSTC", rustc!("1.95.0")},
+                 {"CARGO_TARGET_DIR", desktop_target}
+               ],
                stderr_to_stdout: true
              )
-
-    rustc = "/home/munenick/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustc"
 
     assert {_, 0} =
              System.cmd(
                "rustup",
                [
                  "run",
-                 "1.95.0",
+                 "nightly-2026-04-01",
                  "cargo",
                  "check",
                  "--locked",
@@ -81,7 +107,10 @@ defmodule Rekindle.ClientGeneratorTest do
                  "sample_app-web"
                ],
                cd: root,
-               env: [{"RUSTC", rustc}, {"CARGO_TARGET_DIR", cargo_target}],
+               env: [
+                 {"RUSTC", rustc!("nightly-2026-04-01")},
+                 {"CARGO_TARGET_DIR", web_target}
+               ],
                stderr_to_stdout: true
              )
   end
@@ -100,7 +129,7 @@ defmodule Rekindle.ClientGeneratorTest do
     assert File.exists?(Path.join(client, "Cargo.toml"))
   end
 
-  defp options(extra \\ []) do
+  defp options(extra) do
     [
       application_id: "sample_app",
       package: "sample_app_ui",
@@ -110,5 +139,18 @@ defmodule Rekindle.ClientGeneratorTest do
       rekindle_client: {:path, Path.expand("crates/rekindle-client")}
     ]
     |> Keyword.merge(extra)
+  end
+
+  defp rustc!(toolchain) do
+    {path, 0} = System.cmd("rustup", ["which", "--toolchain", toolchain, "rustc"])
+    String.trim(path)
+  end
+
+  defp copy_client_fixture!(destination) do
+    source = Path.expand("crates/rekindle-client")
+    File.mkdir_p!(destination)
+    File.cp!(Path.join(source, "Cargo.toml"), Path.join(destination, "Cargo.toml"))
+    File.cp!(Path.join(source, "Cargo.lock"), Path.join(destination, "Cargo.lock"))
+    File.cp_r!(Path.join(source, "src"), Path.join(destination, "src"))
   end
 end

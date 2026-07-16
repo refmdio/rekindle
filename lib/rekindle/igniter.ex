@@ -106,6 +106,9 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp generate_client(igniter, client_path, application_id, targets) do
+      lock_path = Path.join(client_path, "Cargo.lock")
+      generate_lock? = not Igniter.exists?(igniter, lock_path)
+
       files =
         ClientGenerator.render(
           application_id: application_id,
@@ -115,15 +118,20 @@ if Code.ensure_loaded?(Igniter) do
           targets: targets
         )
 
-      Enum.reduce(files, igniter, fn {relative, contents}, acc ->
-        path = Path.join(client_path, relative)
+      igniter =
+        Enum.reduce(files, igniter, fn {relative, contents}, acc ->
+          path = Path.join(client_path, relative)
 
-        if relative in ["src/app.rs", "public/.gitkeep"] and Igniter.exists?(acc, path) do
-          acc
-        else
-          create_owned_file(acc, path, contents)
-        end
-      end)
+          if relative in ["src/app.rs", "public/.gitkeep"] and Igniter.exists?(acc, path) do
+            acc
+          else
+            create_owned_file(acc, path, contents)
+          end
+        end)
+
+      if generate_lock?,
+        do: Igniter.add_task(igniter, "rekindle.client.lock", [client_path]),
+        else: igniter
     end
 
     defp create_owned_file(igniter, path, contents) do
@@ -166,7 +174,7 @@ if Code.ensure_loaded?(Igniter) do
              [
                package: application_id <> "_ui",
                binary: application_id <> "-web",
-               toolchain: [kind: :rustup, name: "1.95.0"],
+               toolchain: [kind: :rustup, name: "nightly-2026-04-01"],
                rust_target: "wasm32-unknown-unknown",
                features: ["web"],
                default_features: false,
