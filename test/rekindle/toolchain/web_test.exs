@@ -282,6 +282,84 @@ defmodule Rekindle.Toolchain.WebTest do
     assert {:error, :invalid_file} = Web.file(output_root, "link")
   end
 
+  test "qualifies every root and file component and revalidates root authority", roots do
+    base = Path.dirname(roots.input)
+    aliased_base = base <> "-alias"
+    linked_input = Path.join(base, "linked-input")
+    on_exit(fn -> File.rm(aliased_base) end)
+    File.ln_s!(base, aliased_base)
+    File.ln_s!(roots.input, linked_input)
+
+    assert {:error, :invalid_root} =
+             Web.root(Path.join(aliased_base, "input"), :read,
+               id: "11111111111111111111111111111111"
+             )
+
+    assert {:error, :invalid_root} =
+             Web.prepare_output_root(Path.join(aliased_base, "output"),
+               id: "22222222222222222222222222222222"
+             )
+
+    assert {:error, :invalid_root} =
+             Web.root(linked_input, :read, id: "33333333333333333333333333333333")
+
+    File.rm!(aliased_base)
+    File.rm!(linked_input)
+
+    assert {:ok, input_root} =
+             Web.root(roots.input, :read, id: "44444444444444444444444444444444")
+
+    assert {:error, :invalid_file} =
+             Web.file(%{input_root | "device" => input_root["device"] + 1}, "app.wasm")
+
+    nested = Path.join(roots.input, "nested")
+    moved_nested = Path.join(roots.input, "nested-real")
+    File.mkdir!(nested)
+    File.write!(Path.join(nested, "member.js"), "member")
+    File.rename!(nested, moved_nested)
+    File.ln_s!(moved_nested, nested)
+
+    try do
+      assert {:error, :invalid_file} = Web.file(input_root, "nested/member.js")
+    after
+      File.rm!(nested)
+      File.rename!(moved_nested, nested)
+    end
+
+    authority = Path.join(base, "authority")
+    moved_authority = Path.join(base, "authority-real")
+    authority_input = Path.join(authority, "input")
+    File.mkdir_p!(authority_input)
+    File.write!(Path.join(authority_input, "member.js"), "member")
+
+    assert {:ok, authority_root} =
+             Web.root(authority_input, :read, id: "55555555555555555555555555555555")
+
+    File.rename!(authority, moved_authority)
+    File.ln_s!(moved_authority, authority)
+
+    try do
+      assert {:error, :invalid_file} = Web.file(authority_root, "member.js")
+    after
+      File.rm!(authority)
+      File.rename!(moved_authority, authority)
+    end
+
+    assert {:ok, output_root} =
+             Web.prepare_output_root(roots.output,
+               id: "66666666666666666666666666666666"
+             )
+
+    File.write!(Path.join(roots.output, "app.js"), "app")
+    assert {:ok, descriptor} = Web.file(output_root, "app.js")
+
+    assert {:error, :output_changed} =
+             Web.revalidate_files(
+               %{output_root | "device" => output_root["device"] + 1},
+               [descriptor]
+             )
+  end
+
   test "requires an exact no-follow attempt marker bound to the output root id", roots do
     assert {:error, :invalid_root} =
              Web.root(roots.output, :write_empty, id: "22222222222222222222222222222222")

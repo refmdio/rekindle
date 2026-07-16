@@ -431,8 +431,31 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     forged_helper = fake_web_helper(root, "forged", forged)
     assert {:error, :helper_protocol} = Helper.run_web(forged_helper, request, state)
 
+    wrong_device_request =
+      put_in(request, ["output_root", "device"], output_root["device"] + 1)
+
+    wrong_device_helper = fake_web_helper(root, "wrong-device", terminal)
+
+    assert {:error, :helper_protocol} =
+             Helper.run_web(wrong_device_helper, wrong_device_request, state)
+
     extra_helper = fake_web_helper(root, "extra", terminal, extra: true)
     assert {:error, :post_terminal_frame} = Helper.run_web(extra_helper, request, state)
+
+    helper_root = temp_root("web-forged-helper-executable")
+    File.mkdir_p!(helper_root)
+    on_exit(fn -> File.rm_rf!(helper_root) end)
+    ancestor_helper = fake_web_helper(helper_root, "root-ancestor", terminal)
+    moved_root = root <> "-real"
+    File.rename!(root, moved_root)
+    File.ln_s!(moved_root, root)
+
+    try do
+      assert {:error, :helper_protocol} = Helper.run_web(ancestor_helper, request, state)
+    after
+      File.rm!(root)
+      File.rename!(moved_root, root)
+    end
 
     internal = %{
       "v" => 1,
@@ -1093,6 +1116,16 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       |> Path.wildcard()
       |> Enum.find(&File.regular?/1)
 
+    replace_with_symlink = fn path, backup ->
+      File.rename!(path, backup)
+      File.ln_s!(backup, path)
+
+      fn ->
+        File.rm!(path)
+        File.rename!(backup, path)
+      end
+    end
+
     mutations = [
       {"root extra file",
        fn ->
@@ -1135,6 +1168,25 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
          File.ln_s!(Path.join(package_output, "members"), path)
          fn -> File.rm!(path) end
        end},
+      {"declared member symlink",
+       fn ->
+         replace_with_symlink.(member_file, Path.join(root, "member-backup"))
+       end},
+      {"declared member ancestor symlink",
+       fn ->
+         directory = Path.join(package_output, "members")
+         replace_with_symlink.(directory, Path.join(root, "member-directory-backup"))
+       end},
+      {"manifest symlink",
+       fn ->
+         path = Path.join(package_output, "rekindle-web-manifest-v1.json")
+         replace_with_symlink.(path, Path.join(root, "manifest-backup"))
+       end},
+      {"marker symlink",
+       fn ->
+         path = Path.join(package_output, Web.marker())
+         replace_with_symlink.(path, Path.join(root, "marker-backup"))
+       end},
       {"FIFO",
        fn ->
          path = Path.join(package_output, "unexpected-fifo")
@@ -1152,6 +1204,17 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
            :ok = :gen_tcp.close(socket)
            File.rm!(path)
          end
+       end},
+      {"root ancestor symlink",
+       fn ->
+         moved_root = root <> "-real"
+         File.rename!(root, moved_root)
+         File.ln_s!(moved_root, root)
+
+         fn ->
+           File.rm!(root)
+           File.rename!(moved_root, root)
+         end
        end}
     ]
 
@@ -1162,9 +1225,11 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
         assert {:error, :manifest_changed} = Web.revalidate_manifest(artifact_root, verified),
                label
 
-        assert {:ok, %{"type" => "operation_error", "code" => "input_changed"}, []} =
+        assert {:ok, %{"type" => "operation_error", "code" => code}, []} =
                  Helper.run_web(helper, request, state),
                label
+
+        assert code in ["input_changed", "asset_escape"], label
       after
         cleanup.()
       end

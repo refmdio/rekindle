@@ -46,7 +46,7 @@ defmodule Rekindle.Toolchain.Web do
     id = Keyword.get_lazy(options, :id, &random_id/0)
 
     with :ok <- request_id(id),
-         {:ok, stat} <- File.lstat(path),
+         {:ok, stat} <- no_follow_stat(path),
          true <- stat.type == :directory,
          :ok <- validate_empty(path, mode, id, stat) do
       {:ok,
@@ -68,7 +68,7 @@ defmodule Rekindle.Toolchain.Web do
     marker = Path.join(path, @marker)
 
     with :ok <- request_id(id),
-         {:ok, stat} <- File.lstat(path),
+         {:ok, stat} <- no_follow_stat(path),
          true <- stat.type == :directory,
          :ok <- create_marker(marker, marker_bytes(id)),
          {:ok, root} <- root(path, :write_empty, id: id) do
@@ -82,11 +82,7 @@ defmodule Rekindle.Toolchain.Web do
   def file(root, relative, mode \\ :data) when mode in [:data, :executable] do
     with :ok <- validate_root(root),
          :ok <- relative_path(relative),
-         path = Path.expand(relative, root["path"]),
-         true <- contained?(path, root["path"]),
-         {:ok, stat} <- File.lstat(path),
-         true <- stat.type == :regular,
-         {:ok, bytes} <- File.read(path),
+         {:ok, bytes, stat} <- read_root_file(root, relative),
          true <- mode == :data or Bitwise.band(stat.mode, 0o100) != 0 do
       {:ok,
        %{
@@ -168,10 +164,11 @@ defmodule Rekindle.Toolchain.Web do
 
     with :ok <- validate_root(root),
          true <- root["mode"] == "write_empty",
+         {:ok, _root_stat} <- revalidate_root(root),
          true <- files == Enum.sort_by(files, & &1["path"]),
          true <- unique?(Enum.map(files, & &1["path"])),
          :ok <- validate_descriptors(root, files),
-         {:ok, actual} <- actual_files(root["path"], allow_marker?),
+         {:ok, actual} <- actual_files(root, allow_marker?),
          true <- actual == Enum.map(files, & &1["path"]) do
       :ok
     else
@@ -192,7 +189,7 @@ defmodule Rekindle.Toolchain.Web do
     with :ok <- validate_root(root),
          {:ok, descriptor} <- file(root, @manifest),
          :ok <- terminal_manifest_descriptor(terminal, descriptor),
-         {:ok, bytes} <- File.read(Path.join(root["path"], @manifest)),
+         {:ok, bytes, _stat} <- read_root_file(root, @manifest),
          {:ok, manifest} <- Jason.decode(bytes),
          true <- CanonicalValue.encode!(manifest) == bytes,
          :ok <- manifest_shape(manifest),
@@ -464,12 +461,14 @@ defmodule Rekindle.Toolchain.Web do
         end)
       end)
 
-    with {:ok, root_stat} <- File.lstat(root["path"]),
-         true <- root_stat.type == :directory,
-         true <- root["device"] == device_identity(root_stat),
+    with {:ok, root_stat} <- revalidate_root(root),
          {:ok, actual} <- artifact_nodes(root["path"]),
          true <- actual == expected,
-         :ok <- artifact_marker(root, root_stat) do
+         {:ok, final_root_stat} <- revalidate_root(root),
+         true <- same_file_identity?(root_stat, final_root_stat),
+         :ok <- artifact_marker(root, root_stat),
+         {:ok, sealed_root_stat} <- revalidate_root(root),
+         true <- same_file_identity?(root_stat, sealed_root_stat) do
       :ok
     else
       _ -> {:error, :artifact_tree}
@@ -487,38 +486,42 @@ defmodule Rekindle.Toolchain.Web do
   defp artifact_nodes(root), do: artifact_nodes(root, "", %{})
 
   defp artifact_nodes(path, prefix, nodes) do
-    with {:ok, entries} <- File.ls(path) do
-      Enum.reduce_while(entries, {:ok, nodes}, fn entry, {:ok, nodes} ->
-        relative = if prefix == "", do: entry, else: prefix <> "/" <> entry
-        child = Path.join(path, entry)
+    with {:ok, before_stat} <- no_follow_stat(path),
+         true <- before_stat.type == :directory,
+         {:ok, entries} <- File.ls(path),
+         {:ok, nodes} <-
+           Enum.reduce_while(entries, {:ok, nodes}, fn entry, {:ok, nodes} ->
+             relative = if prefix == "", do: entry, else: prefix <> "/" <> entry
+             child = Path.join(path, entry)
 
-        case File.lstat(child) do
-          {:ok, %{type: :regular}} ->
-            {:cont, {:ok, Map.put(nodes, relative, :regular)}}
+             case no_follow_stat(child) do
+               {:ok, %{type: :regular}} ->
+                 {:cont, {:ok, Map.put(nodes, relative, :regular)}}
 
-          {:ok, %{type: :directory}} ->
-            case artifact_nodes(child, relative, Map.put(nodes, relative, :directory)) do
-              {:ok, nodes} -> {:cont, {:ok, nodes}}
-              {:error, _reason} = error -> {:halt, error}
-            end
+               {:ok, %{type: :directory}} ->
+                 case artifact_nodes(child, relative, Map.put(nodes, relative, :directory)) do
+                   {:ok, nodes} -> {:cont, {:ok, nodes}}
+                   {:error, _reason} = error -> {:halt, error}
+                 end
 
-          _ ->
-            {:halt, {:error, :non_regular_node}}
-        end
-      end)
+               _ ->
+                 {:halt, {:error, :non_regular_node}}
+             end
+           end),
+         {:ok, after_stat} <- no_follow_stat(path),
+         true <- same_file_identity?(before_stat, after_stat) do
+      {:ok, nodes}
+    else
+      _ -> {:error, :non_regular_node}
     end
   end
 
   defp artifact_marker(root, root_stat) do
-    path = Path.join(root["path"], @marker)
-
-    with {:ok, stat} <- File.lstat(path),
-         true <- stat.type == :regular,
+    with {:ok, bytes, stat} <- read_root_file(root, @marker),
          true <- stat.uid == root_stat.uid,
          true <- stat.major_device == root_stat.major_device,
          true <- stat.minor_device == root_stat.minor_device,
          true <- Bitwise.band(stat.mode, 0o777) == 0o600,
-         {:ok, bytes} <- File.read(path),
          {:ok, marker} <- Jason.decode(bytes),
          true <- CanonicalValue.encode!(marker) == bytes,
          true <- exact?(marker, ~w[root_id v]),
@@ -605,7 +608,7 @@ defmodule Rekindle.Toolchain.Web do
           _ -> fn _ -> {:ok, []} end
         end
 
-      with {:ok, bytes} <- File.read(Path.join([root["path"], "members", path])),
+      with {:ok, bytes, _stat} <- read_root_file(root, "members/" <> path),
            {:ok, references} <- parser.(bytes),
            {:ok, next_edges, next_maps} <-
              resolve_graph_references(path, references, roles, edges, maps) do
@@ -1386,7 +1389,8 @@ defmodule Rekindle.Toolchain.Web do
 
   defp validate_root(root) do
     if exact?(root, @root_keys) and request_id(root["id"]) == :ok and
-         Path.type(root["path"] || "") == :absolute and
+         is_binary(root["path"]) and Path.type(root["path"]) == :absolute and
+         Path.expand(root["path"]) == root["path"] and
          root["mode"] in ~w[read write_empty] and nonnegative?(root["device"]),
        do: :ok,
        else: {:error, :invalid_root}
@@ -1433,16 +1437,19 @@ defmodule Rekindle.Toolchain.Web do
   end
 
   defp actual_files(root, allow_marker?) do
-    paths =
-      root
-      |> Path.join("**/*")
-      |> Path.wildcard(match_dot: true)
-      |> Enum.reject(&File.dir?/1)
-      |> Enum.map(&Path.relative_to(&1, root))
-      |> Enum.reject(&(allow_marker? and &1 == @marker))
-      |> Enum.sort()
+    with {:ok, root_stat} <- revalidate_root(root),
+         {:ok, nodes} <- artifact_nodes(root["path"]),
+         {:ok, final_root_stat} <- revalidate_root(root),
+         true <- same_file_identity?(root_stat, final_root_stat) do
+      paths =
+        nodes
+        |> Enum.filter(fn {_path, type} -> type == :regular end)
+        |> Enum.map(&elem(&1, 0))
+        |> Enum.reject(&(allow_marker? and &1 == @marker))
+        |> Enum.sort()
 
-    {:ok, paths}
+      {:ok, paths}
+    end
   end
 
   defp validate_empty(_path, :read, _id, _root_stat), do: :ok
@@ -1451,12 +1458,11 @@ defmodule Rekindle.Toolchain.Web do
     marker = Path.join(path, @marker)
 
     with {:ok, [@marker]} <- File.ls(path),
-         {:ok, stat} <- File.lstat(marker),
-         true <- stat.type == :regular and stat.uid == root_stat.uid,
+         {:ok, bytes, stat} <- read_qualified_file(marker, root_stat),
          true <- Bitwise.band(stat.mode, 0o777) == 0o600,
-         true <- stat.major_device == root_stat.major_device,
-         {:ok, bytes} <- File.read(marker),
-         true <- bytes == marker_bytes(id) do
+         true <- bytes == marker_bytes(id),
+         {:ok, final_root_stat} <- no_follow_stat(path),
+         true <- same_file_identity?(root_stat, final_root_stat) do
       :ok
     else
       _ -> {:error, :invalid_marker}
@@ -1472,6 +1478,76 @@ defmodule Rekindle.Toolchain.Web do
   end
 
   defp marker_bytes(id), do: CanonicalValue.encode!(%{"root_id" => id, "v" => 1})
+
+  defp revalidate_root(root) do
+    with :ok <- validate_root(root),
+         {:ok, stat} <- no_follow_stat(root["path"]),
+         true <- stat.type == :directory,
+         true <- root["device"] == device_identity(stat) do
+      {:ok, stat}
+    else
+      _ -> {:error, :invalid_root}
+    end
+  end
+
+  defp read_root_file(root, relative) do
+    with {:ok, root_stat} <- revalidate_root(root),
+         :ok <- relative_path(relative),
+         path = Path.expand(relative, root["path"]),
+         true <- contained?(path, root["path"]),
+         {:ok, bytes, stat} <- read_qualified_file(path, root_stat),
+         {:ok, final_root_stat} <- revalidate_root(root),
+         true <- same_file_identity?(root_stat, final_root_stat) do
+      {:ok, bytes, stat}
+    else
+      _ -> {:error, :invalid_file}
+    end
+  end
+
+  defp read_qualified_file(path, root_stat) do
+    with {:ok, before_stat} <- no_follow_stat(path),
+         true <- before_stat.type == :regular,
+         true <- before_stat.uid == root_stat.uid,
+         true <- before_stat.major_device == root_stat.major_device,
+         true <- before_stat.minor_device == root_stat.minor_device,
+         {:ok, bytes} <- File.read(path),
+         true <- byte_size(bytes) == before_stat.size,
+         {:ok, after_stat} <- no_follow_stat(path),
+         true <- same_file_identity?(before_stat, after_stat) do
+      {:ok, bytes, before_stat}
+    else
+      _ -> {:error, :invalid_file}
+    end
+  end
+
+  defp no_follow_stat(path) when is_binary(path) do
+    with true <- Path.type(path) == :absolute,
+         true <- Path.expand(path) == path,
+         [_ | _] = components <- Path.split(path) do
+      no_follow_components("", components)
+    else
+      _ -> {:error, :invalid_path}
+    end
+  end
+
+  defp no_follow_stat(_path), do: {:error, :invalid_path}
+
+  defp no_follow_components(current, [component | rest]) do
+    path = if current == "", do: component, else: Path.join(current, component)
+
+    with {:ok, stat} <- File.lstat(path),
+         true <- stat.type != :symlink,
+         true <- rest == [] or stat.type == :directory do
+      if rest == [], do: {:ok, stat}, else: no_follow_components(path, rest)
+    else
+      _ -> {:error, :invalid_path}
+    end
+  end
+
+  defp same_file_identity?(left, right) do
+    fields = [:inode, :uid, :gid, :major_device, :minor_device, :size, :type, :mode]
+    Map.take(left, fields) == Map.take(right, fields)
+  end
 
   defp valid_diagnostic?(value) do
     exact?(value, ~w[severity code message path line]) and value["severity"] in ~w[info warning] and
