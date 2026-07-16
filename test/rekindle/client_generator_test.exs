@@ -292,6 +292,51 @@ defmodule Rekindle.ClientGeneratorTest do
     assert File.exists?(Path.join(client, "Cargo.toml"))
   end
 
+  test "rejects symlink roots, symlink ancestors, and publication substitution" do
+    base =
+      Path.join(System.tmp_dir!(), "rekindle-client-root-#{System.unique_integer([:positive])}")
+
+    outside = Path.join(base, "outside")
+    File.mkdir_p!(outside)
+    File.write!(Path.join(outside, "sentinel"), "outside-owned")
+    on_exit(fn -> File.rm_rf!(base) end)
+    baseline = directory_snapshot(outside)
+
+    final_link = Path.join(base, "client")
+    File.ln_s!(outside, final_link)
+
+    assert_raise ArgumentError, fn ->
+      ClientGenerator.write!(final_link, options(generate_lock: false))
+    end
+
+    assert directory_snapshot(outside) == baseline
+    File.rm!(final_link)
+
+    ancestor_link = Path.join(base, "clients")
+    File.ln_s!(outside, ancestor_link)
+
+    assert_raise ArgumentError, fn ->
+      ClientGenerator.write!(Path.join(ancestor_link, "gpui"), options(generate_lock: false))
+    end
+
+    assert directory_snapshot(outside) == baseline
+    File.rm!(ancestor_link)
+
+    substituted = Path.join(base, "substituted")
+
+    assert_raise ArgumentError, fn ->
+      ClientGenerator.write!(
+        substituted,
+        options(
+          generate_lock: false,
+          before_publish: fn root, _staging -> File.ln_s!(outside, root) end
+        )
+      )
+    end
+
+    assert directory_snapshot(outside) == baseline
+  end
+
   defp options(extra) do
     [
       application_id: "sample_app",
@@ -310,6 +355,15 @@ defmodule Rekindle.ClientGeneratorTest do
   end
 
   defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+
+  defp directory_snapshot(root) do
+    root
+    |> Path.join("**/*")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.reject(&File.dir?/1)
+    |> Enum.sort()
+    |> Map.new(fn path -> {Path.relative_to(path, root), File.read!(path)} end)
+  end
 
   defp copy_client_fixture!(destination) do
     source = Path.expand("crates/rekindle-client")

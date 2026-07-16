@@ -234,40 +234,180 @@ defmodule Rekindle.ClientGenerator do
 
   @spec write!(Path.t(), keyword()) :: [Path.t()]
   def write!(client_root, options) do
+    client_root = Path.expand(client_root)
     files = render(options)
+    parent = Path.dirname(client_root)
 
-    if File.exists?(client_root) and File.ls!(client_root) != [] do
+    ensure_directory!(parent)
+
+    case admit_root(client_root) do
+      :ok -> :ok
+      {:error, _reason} -> raise ArgumentError, "client root is not a no-follow directory path"
+    end
+
+    if directory?(client_root) and File.ls!(client_root) != [] do
       raise ArgumentError, "client root must not contain existing files"
     end
 
-    written =
+    parent_identity = directory_identity!(parent)
+    staging = client_root <> ".rekindle-stage-" <> random_id()
+    File.mkdir!(staging)
+    staging_identity = directory_identity!(staging)
+
+    try do
       files
       |> Enum.sort_by(&elem(&1, 0))
-      |> Enum.map(fn {relative, contents} ->
-        path = Path.join(client_root, relative)
-        File.mkdir_p!(Path.dirname(path))
+      |> Enum.each(fn {relative, contents} ->
+        revalidate_directory!(staging, staging_identity)
+        path = Path.join(staging, relative)
+        ensure_directory!(Path.dirname(path), staging, staging_identity)
         File.write!(path, contents, [:binary, :exclusive])
-        path
+        revalidate_directory!(staging, staging_identity)
       end)
 
-    if Keyword.get(options, :generate_lock, true) do
-      case generate_lock(client_root) do
-        :ok ->
-          :ok
+      if Keyword.get(options, :generate_lock, true) do
+        case generate_lock(staging) do
+          :ok ->
+            :ok
 
-        {:error, %Rekindle.Failure{} = failure} ->
-          raise failure.message
+          {:error, %Rekindle.Failure{} = failure} ->
+            raise failure.message
 
-        {:error, {output, status}} ->
-          raise "cargo generate-lockfile failed (#{status}): #{output}"
+          {:error, {output, status}} ->
+            raise "cargo generate-lockfile failed (#{status}): #{output}"
 
-        {:error, reason} ->
-          raise "cargo generate-lockfile failed: #{reason}"
+          {:error, reason} ->
+            raise "cargo generate-lockfile failed: #{reason}"
+        end
       end
+
+      if hook = Keyword.get(options, :before_publish) do
+        hook.(client_root, staging)
+      end
+
+      publish_staging!(staging, staging_identity, client_root, parent, parent_identity)
+
+      files
+      |> Map.keys()
+      |> Enum.sort()
+      |> Enum.map(&Path.join(client_root, &1))
+    after
+      if lstat_type(staging) in [:directory, :symlink], do: File.rm_rf!(staging)
+    end
+  end
+
+  @doc false
+  @spec admit_root(Path.t()) :: :ok | {:error, :unsafe_client_root}
+  def admit_root(client_root) when is_binary(client_root) do
+    client_root
+    |> Path.expand()
+    |> existing_components()
+    |> Enum.reduce_while(:ok, fn path, :ok ->
+      case File.lstat(path) do
+        {:ok, %{type: :directory}} -> {:cont, :ok}
+        {:error, :enoent} -> {:halt, :ok}
+        _ -> {:halt, {:error, :unsafe_client_root}}
+      end
+    end)
+  end
+
+  def admit_root(_client_root), do: {:error, :unsafe_client_root}
+
+  defp publish_staging!(staging, staging_identity, client_root, parent, parent_identity) do
+    revalidate_directory!(parent, parent_identity)
+    revalidate_directory!(staging, staging_identity)
+
+    case File.lstat(client_root) do
+      {:ok, %{type: :directory}} ->
+        if File.ls!(client_root) != [], do: raise(ArgumentError, "client root is no longer empty")
+
+      {:error, :enoent} ->
+        :ok
+
+      _ ->
+        raise ArgumentError, "client root authority changed before publication"
     end
 
-    written
+    revalidate_directory!(parent, parent_identity)
+    revalidate_directory!(staging, staging_identity)
+    File.rename!(staging, client_root)
+    revalidate_directory!(parent, parent_identity)
+    revalidate_directory!(client_root, staging_identity)
   end
+
+  defp ensure_directory!(path), do: ensure_directory!(path, nil, nil)
+
+  defp ensure_directory!(path, authority_root, authority_identity) do
+    case File.lstat(path) do
+      {:ok, %{type: :directory}} ->
+        :ok
+
+      {:error, :enoent} ->
+        parent = Path.dirname(path)
+        ensure_directory!(parent, authority_root, authority_identity)
+        maybe_revalidate_directory!(authority_root, authority_identity)
+
+        case File.mkdir(path) do
+          :ok ->
+            :ok
+
+          {:error, :eexist} ->
+            :ok
+
+          {:error, reason} ->
+            raise File.Error, reason: reason, action: "make directory", path: path
+        end
+
+        case File.lstat(path) do
+          {:ok, %{type: :directory}} -> :ok
+          _ -> raise ArgumentError, "generated client directory authority changed"
+        end
+
+        maybe_revalidate_directory!(authority_root, authority_identity)
+
+      _ ->
+        raise ArgumentError, "generated client path contains a non-directory component"
+    end
+  end
+
+  defp maybe_revalidate_directory!(nil, nil), do: :ok
+
+  defp maybe_revalidate_directory!(root, identity),
+    do: revalidate_directory!(root, identity)
+
+  defp revalidate_directory!(path, identity) do
+    if directory_identity!(path) != identity do
+      raise ArgumentError, "generated client directory authority changed"
+    end
+  end
+
+  defp directory_identity!(path) do
+    case File.lstat(path) do
+      {:ok, stat = %{type: :directory}} ->
+        Map.take(stat, [:inode, :uid, :gid, :major_device, :minor_device, :type, :mode])
+
+      _ ->
+        raise ArgumentError, "generated client path is not an admitted directory"
+    end
+  end
+
+  defp directory?(path), do: lstat_type(path) == :directory
+
+  defp lstat_type(path) do
+    case File.lstat(path) do
+      {:ok, stat} -> stat.type
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp existing_components(path) do
+    path
+    |> Path.split()
+    |> Enum.scan(fn component, current -> Path.join(current, component) end)
+  end
+
+  defp random_id,
+    do: :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
 
   @doc false
   @spec generate_lock(Path.t()) ::

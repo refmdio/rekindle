@@ -325,6 +325,36 @@ defmodule Rekindle.IgniterTest do
     assert {"rekindle.client.lock", ["clients/gpui"]} in nested.tasks
   end
 
+  test "symlinked client roots and ancestors fail before proposal or apply writes" do
+    root = temp_dir!("rekindle-igniter-symlink-root")
+    outside = Path.join(root, "outside")
+    File.mkdir_p!(outside)
+    File.write!(Path.join(outside, "sentinel"), "outside-owned")
+    baseline = directory_snapshot(outside)
+
+    File.cd!(root, fn ->
+      for {link, client_path} <- [{"client", "client"}, {"clients", "clients/gpui"}] do
+        File.ln_s!(outside, link)
+        initial = project()
+
+        rejected =
+          RekindleIgniter.install(initial,
+            client_path: client_path,
+            targets: [:web],
+            endpoint: SampleAppWeb.Endpoint
+          )
+
+        assert Enum.any?(rejected.issues, &String.contains?(to_string(&1), "symlink"))
+        assert rejected.tasks == initial.tasks
+        assert Rewrite.sources(rejected.rewrite) == Rewrite.sources(initial.rewrite)
+        assert rejected.assigns.test_files == initial.assigns.test_files
+        assert_raise RuntimeError, ~r/client_path.*symlink/, fn -> apply_igniter!(rejected) end
+        assert directory_snapshot(outside) == baseline
+        File.rm!(link)
+      end
+    end)
+  end
+
   test "applied canonical client generates a lock and checks both declared toolchains" do
     root = temp_dir!("rekindle-igniter-applied")
     client_root = Path.join(root, "client")
@@ -1194,6 +1224,15 @@ defmodule Rekindle.IgniterTest do
   end
 
   defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+
+  defp directory_snapshot(root) do
+    root
+    |> Path.join("**/*")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.reject(&File.dir?/1)
+    |> Enum.sort()
+    |> Map.new(fn path -> {Path.relative_to(path, root), File.read!(path)} end)
+  end
 
   defp client_paths do
     Rekindle.ClientGenerator.render(

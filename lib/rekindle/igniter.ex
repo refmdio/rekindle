@@ -11,12 +11,16 @@ if Code.ensure_loaded?(Igniter) do
 
     @spec install(Igniter.t(), keyword()) :: Igniter.t()
     def install(igniter, options \\ []) do
-      case normalize_client_path(Keyword.get(options, :client_path, "client")) do
-        {:ok, client_path} ->
-          install_with_client_path(igniter, options, client_path)
-
-        :error ->
-          Igniter.add_issue(igniter, "client_path must be normalized and project-relative")
+      with {:ok, client_path} <-
+             normalize_client_path(Keyword.get(options, :client_path, "client")),
+           :ok <- ClientGenerator.admit_root(client_path) do
+        install_with_client_path(igniter, options, client_path)
+      else
+        _ ->
+          Igniter.add_issue(
+            igniter,
+            "client_path must be normalized, project-relative, and contain no symlink components"
+          )
       end
     end
 
