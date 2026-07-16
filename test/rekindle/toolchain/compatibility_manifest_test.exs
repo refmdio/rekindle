@@ -20,15 +20,8 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
       "sha256" => sha256(bytes)
     }
 
-    manifest =
-      CompatibilityManifest.encode_helper_release!(%{
-        "rekindle_version" => "0.1.0",
-        "helper" => %{
-          "protocol" => 1,
-          "version" => Helper.compatibility()["helper_version"],
-          "assets" => [asset]
-        }
-      })
+    assert Helper.compatibility()["helper_version"] == "0.1.0"
+    manifest = Rekindle.CompatibilityFixture.encode(asset)
 
     File.write!(manifest_path, manifest)
 
@@ -49,6 +42,44 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
 
     assert {:error, %{code: :helper_missing}} =
              Release.ensure(false, manifest_path: manifest_path, cache_root: cache)
+  end
+
+  test "loads the full release schema and rejects tuple, evidence, template and helper tampering" do
+    root = temp_root()
+    path = Path.join(root, "compatibility.json")
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf!(root) end)
+    host = Installer.host()
+
+    asset = %{
+      "os" => host.os,
+      "arch" => host.arch,
+      "url" => "https://release.example/rekindle_toolchain",
+      "size" => 10,
+      "sha256" => String.duplicate("a", 64)
+    }
+
+    release = Rekindle.CompatibilityFixture.release(asset)
+    File.write!(path, CompatibilityManifest.encode_release!(release))
+    assert {:ok, manifest} = CompatibilityManifest.load(manifest_path: path)
+    assert manifest.root["targets"]["web"]["rust_toolchain"] == "nightly-2026-04-01"
+    assert length(manifest.root["tuples"]) == 2
+
+    tampered_values = [
+      put_in(release, ["client_template", "manifest_sha256"], String.duplicate("b", 64)),
+      put_in(release, ["helper", "assets", Access.at(0), "sha256"], String.duplicate("b", 64)),
+      update_in(release["evidence"], &tl/1),
+      update_in(release["tuples"], &Enum.reverse/1),
+      Map.put(release, "shadow_helper_manifest", %{}),
+      update_in(release["tuples"], fn [first | rest] ->
+        [%{first | "tuple_id" => String.duplicate("0", 64)} | rest]
+      end)
+    ]
+
+    for tampered <- tampered_values do
+      File.write!(path, CompatibilityManifest.encode_release!(tampered))
+      assert {:error, %{code: :helper_missing}} = CompatibilityManifest.load(manifest_path: path)
+    end
   end
 
   test "explicit source build derives its descriptor from built bytes without a URL" do

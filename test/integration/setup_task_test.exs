@@ -1,7 +1,7 @@
 defmodule Rekindle.SetupTaskIntegrationTest do
   use ExUnit.Case, async: false
 
-  alias Rekindle.Toolchain.{CompatibilityManifest, Installer, Release}
+  alias Rekindle.Toolchain.{Installer, Release}
 
   setup do
     root = temp_dir!()
@@ -82,23 +82,15 @@ defmodule Rekindle.SetupTaskIntegrationTest do
   defp manifest!(root, helper) do
     host = Installer.host()
 
-    bytes =
-      CompatibilityManifest.encode_helper_release!(%{
-        "rekindle_version" => "0.1.0",
-        "helper" => %{
-          "protocol" => 1,
-          "version" => "0.1.0",
-          "assets" => [
-            %{
-              "os" => host.os,
-              "arch" => host.arch,
-              "url" => "https://fixtures.invalid/rekindle_toolchain",
-              "size" => byte_size(helper),
-              "sha256" => sha256(helper)
-            }
-          ]
-        }
-      })
+    asset = %{
+      "os" => host.os,
+      "arch" => host.arch,
+      "url" => "https://fixtures.invalid/rekindle_toolchain",
+      "size" => byte_size(helper),
+      "sha256" => sha256(helper)
+    }
+
+    bytes = Rekindle.CompatibilityFixture.encode(asset)
 
     path = Path.join(root, "compatibility.json")
     File.write!(path, bytes)
