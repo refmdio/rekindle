@@ -149,7 +149,9 @@ defmodule Rekindle.SetupTaskIntegrationTest do
           ["--no-source-build-helper"],
           ["--source-build-helper=false"],
           ["--source-build-helper", "--source-build-helper"],
-          ["--target", "desktop", "--target", "web"]
+          ["--target", "desktop", "--target", "web"],
+          ["--"],
+          ["--target", "web", "--"]
         ] do
       outcome = Mix.Tasks.Rekindle.Setup.run_outcome(argv, overrides)
       assert outcome.exit_status == 2, inspect(argv)

@@ -21,6 +21,14 @@ defmodule Rekindle.CommandTest do
     assert outcome.stderr =~ "config_invalid"
     refute_received {:called, _}
 
+    for argv <- [["--"], ["web", "--"], ["--", "web"]] do
+      outcome = Command.run("rekindle.example", argv, @grammar, handler)
+      assert outcome.exit_status == 2, inspect(argv)
+      assert outcome.stdout == ""
+      assert outcome.stderr =~ "unknown or invalid option: --"
+      refute_received {:called, _}
+    end
+
     json = Command.run("rekindle.example", ["web", "--unknown", "x", "--json"], @grammar, handler)
     assert json.exit_status == 2
     assert Jason.decode!(json.stdout)["status"] == "error"
@@ -51,7 +59,8 @@ defmodule Rekindle.CommandTest do
       {alias_grammar, ["web", "--json", "-j"]},
       {alias_grammar, ["web", "-jr"]},
       {target_grammar, ["--target", "desktop", "--target", "web"]},
-      {target_grammar, ["--target=desktop", "-t", "web"]}
+      {target_grammar, ["--target=desktop", "-t", "web"]},
+      {target_grammar, ["--target", "web", "--"]}
     ]
 
     for {grammar, argv} <- invalid do

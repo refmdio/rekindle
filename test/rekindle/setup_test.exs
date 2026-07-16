@@ -80,7 +80,9 @@ defmodule Rekindle.SetupTest do
           ["--source-build-helper=true"],
           ["--source-build-helper", "--source-build-helper"],
           ["--target", "desktop", "--target", "web"],
-          ["--target=desktop", "--target", "web"]
+          ["--target=desktop", "--target", "web"],
+          ["--"],
+          ["--target", "web", "--"]
         ] do
       outcome = Setup.run(argv, adapters)
       assert outcome.exit_status == 2

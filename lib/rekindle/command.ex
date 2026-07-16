@@ -94,7 +94,9 @@ defmodule Rekindle.Command do
   end
 
   defp scan_raw_options([], _long, _short, _seen), do: :ok
-  defp scan_raw_options(["--" | _rest], _long, _short, _seen), do: :ok
+
+  defp scan_raw_options(["--" | _rest], _long, _short, _seen),
+    do: {:error, "unknown or invalid option: --"}
 
   defp scan_raw_options(["--" <> _rest = token | rest], long, short, seen) do
     case raw_long_option(token, long) do
