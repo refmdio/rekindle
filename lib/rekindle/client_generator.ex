@@ -2,6 +2,7 @@ defmodule Rekindle.ClientGenerator do
   @moduledoc false
 
   alias Rekindle.CanonicalValue
+  alias Rekindle.Toolchain.{Executable, Rustup}
 
   @template_version "1"
   @client_version "0.1.0"
@@ -92,17 +93,49 @@ defmodule Rekindle.ClientGenerator do
       end)
 
     if Keyword.get(options, :generate_lock, true) do
-      case System.cmd(
-             "cargo",
-             ["generate-lockfile", "--manifest-path", Path.join(client_root, "Cargo.toml")],
-             stderr_to_stdout: true
-           ) do
-        {_output, 0} -> :ok
-        {output, status} -> raise "cargo generate-lockfile failed (#{status}): #{output}"
+      case generate_lock(client_root) do
+        :ok ->
+          :ok
+
+        {:error, %Rekindle.Failure{} = failure} ->
+          raise failure.message
+
+        {:error, {output, status}} ->
+          raise "cargo generate-lockfile failed (#{status}): #{output}"
+
+        {:error, reason} ->
+          raise "cargo generate-lockfile failed: #{reason}"
       end
     end
 
     written
+  end
+
+  @doc false
+  @spec generate_lock(Path.t()) ::
+          :ok | {:error, Rekindle.Failure.t() | atom() | {binary(), non_neg_integer()}}
+  def generate_lock(client_root) do
+    manifest = client_root |> Path.expand() |> Path.join("Cargo.toml")
+
+    with {:ok, rustup} <- Rustup.resolve(),
+         {:ok, {_output, 0}} <-
+           Executable.run(
+             rustup,
+             [
+               "run",
+               @web_toolchain,
+               "cargo",
+               "generate-lockfile",
+               "--manifest-path",
+               manifest
+             ],
+             stderr_to_stdout: true
+           ) do
+      :ok
+    else
+      {:ok, {output, status}} -> {:error, {output, status}}
+      {:error, _reason} = error -> error
+    end
   end
 
   defp validate!(application_id, package, web_binary, desktop_binary, targets) do

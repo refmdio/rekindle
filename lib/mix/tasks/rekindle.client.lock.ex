@@ -3,32 +3,22 @@ defmodule Mix.Tasks.Rekindle.Client.Lock do
 
   use Mix.Task
 
-  alias Rekindle.Toolchain.Rustup
-
-  @web_toolchain "nightly-2026-04-01"
+  alias Rekindle.ClientGenerator
 
   @impl Mix.Task
   def run([client_root]) do
-    manifest = client_root |> Path.expand() |> Path.join("Cargo.toml")
+    case ClientGenerator.generate_lock(client_root) do
+      :ok ->
+        :ok
 
-    with {:ok, rustup} <- Rustup.resolve(),
-         {_output, 0} <-
-           System.cmd(
-             rustup,
-             [
-               "run",
-               @web_toolchain,
-               "cargo",
-               "generate-lockfile",
-               "--manifest-path",
-               manifest
-             ],
-             stderr_to_stdout: true
-           ) do
-      :ok
-    else
-      {:error, failure} -> Mix.raise(failure.message)
-      {output, status} -> Mix.raise("Cargo.lock generation failed (#{status}): #{output}")
+      {:error, %Rekindle.Failure{} = failure} ->
+        Mix.raise(failure.message)
+
+      {:error, {output, status}} ->
+        Mix.raise("Cargo.lock generation failed (#{status}): #{output}")
+
+      {:error, reason} ->
+        Mix.raise("Cargo.lock generation failed: #{reason}")
     end
   end
 
