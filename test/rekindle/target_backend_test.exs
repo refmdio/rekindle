@@ -39,6 +39,14 @@ defmodule Rekindle.TargetBackendTest do
     def finalize(_context, _options, _result), do: {:error, nil}
   end
 
+  defmodule InvalidValidateResultBackend do
+    def backend_id, do: "invalid.validate-result"
+    def backend_version, do: "1"
+    def validate(_target, _options), do: :ok
+    def plan(_context, _options), do: :ok
+    def finalize(_context, _options, _result), do: :ok
+  end
+
   test "admits an existing conforming module and normalized options" do
     assert {:ok, admission} = TargetBackend.admit(ValidBackend, :web, %{"answer" => 42})
     assert admission.module == ValidBackend
@@ -69,6 +77,9 @@ defmodule Rekindle.TargetBackendTest do
   test "rejects backend-normalized values outside CanonicalValue" do
     assert {:error, [%ConfigError{path: [:backend, :normalized_options]}]} =
              TargetBackend.admit(InvalidOptionsBackend, :web, %{})
+
+    assert {:error, [%ConfigError{path: [:backend, :options]}]} =
+             TargetBackend.admit(InvalidValidateResultBackend, :web, %{})
   end
 
   test "publishes the exact behaviour callback surface" do
@@ -94,6 +105,11 @@ defmodule Rekindle.TargetBackendTest do
              TargetBackend.validate_plan_result({:ok, %{plan | env_mode: :inherit}})
 
     assert {:error, %ConfigError{}} = TargetBackend.validate_plan_result({:ok, %{}})
+    assert {:error, %ConfigError{}} = TargetBackend.validate_plan_result(:ok)
+    assert {:error, %ConfigError{}} = TargetBackend.validate_plan_result({:error, :invalid})
+
+    assert {:error, %ConfigError{}} =
+             TargetBackend.validate_plan_result({:ok, %{plan | contract_version: 2}})
 
     failure =
       Failure.new!(target: :web, stage: :internal, code: :internal, message: "backend failed")
@@ -111,18 +127,26 @@ defmodule Rekindle.TargetBackendTest do
              TargetBackend.validate_finalize_result({:ok, %{artifact | manifest: "../escape"}})
 
     assert {:error, %ConfigError{}} = TargetBackend.validate_finalize_result({:ok, %{}})
+    assert {:error, %ConfigError{}} = TargetBackend.validate_finalize_result(:ok)
+    assert {:error, %ConfigError{}} = TargetBackend.validate_finalize_result({:error, :invalid})
+
+    assert {:error, %ConfigError{}} =
+             TargetBackend.validate_finalize_result({:ok, %{artifact | contract_version: 2}})
   end
 
-  test "negative compile fixtures report missing callback and reject unknown struct fields" do
-    module = "MissingBackend#{System.unique_integer([:positive])}"
+  test "negative compile fixtures report wrong callback arities and reject unknown struct fields" do
+    module = "WrongArityBackend#{System.unique_integer([:positive])}"
 
     warning =
       ExUnit.CaptureIO.capture_io(:stderr, fn ->
         Code.compile_string("""
         defmodule #{module} do
           @behaviour Rekindle.TargetBackend
-          def backend_id, do: "missing"
+          def backend_id, do: "wrong-arity"
           def backend_version, do: "1"
+          def validate(_target), do: {:ok, %{}}
+          def plan(_context), do: :invalid
+          def finalize(_context, _options), do: :invalid
         end
         """)
       end)
@@ -132,8 +156,15 @@ defmodule Rekindle.TargetBackendTest do
     assert warning =~ "plan/2"
     assert warning =~ "finalize/3"
 
-    assert_raise KeyError, fn ->
-      Code.compile_string("%Rekindle.ExternalPlan{unknown_field: true}")
+    for structure <- [
+          "Rekindle.BackendContext",
+          "Rekindle.ExternalPlan",
+          "Rekindle.ExecutionResult",
+          "Rekindle.ExternalArtifact"
+        ] do
+      assert_raise KeyError, fn ->
+        Code.compile_string("%#{structure}{unknown_field: true}")
+      end
     end
   end
 end
