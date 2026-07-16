@@ -44,7 +44,9 @@ defmodule Rekindle.Toolchain.WebTest do
                  source_maps: :none,
                  expected_wasm_bindgen: "0.2.121",
                  limits: limits
-               }, request_id: @request)
+               },
+               request_id: @request
+             )
 
     assert Map.keys(bindgen) |> Enum.sort() ==
              ~w[v type request_id payload_len op input_wasm output_root output_stem debug source_maps expected_wasm_bindgen limits]
