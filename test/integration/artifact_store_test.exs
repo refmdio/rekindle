@@ -1333,6 +1333,65 @@ defmodule Rekindle.ArtifactStoreTest do
     assert File.read!(path) == project_id
   end
 
+  test "preserves publication temporaries when their required phase is not proven" do
+    previous = Process.flag(:trap_exit, true)
+    on_exit(fn -> Process.flag(:trap_exit, previous) end)
+
+    for context <- [
+          :metadata_before_artifact,
+          :metadata_with_invalid_artifact,
+          :reference_without_metadata,
+          :reference_with_invalid_metadata
+        ] do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      {staging, descriptor} = stage_web(store, Atom.to_string(context))
+      crash_at = if context == :metadata_before_artifact, do: :journaled, else: :renamed
+
+      capture_log(fn ->
+        assert catch_exit(
+                 ArtifactStore.seal(staging, descriptor,
+                   checkpoint: fn
+                     ^crash_at -> exit(:injected_publication_crash)
+                     _other -> :ok
+                   end
+                 )
+               )
+
+        assert_receive {:EXIT, ^store, :injected_publication_crash}
+      end)
+
+      kind =
+        if context in [:metadata_before_artifact, :metadata_with_invalid_artifact],
+          do: :seal_metadata,
+          else: :generation_reference
+
+      if context == :metadata_with_invalid_artifact do
+        member = Path.join(artifact_path(root, :web, descriptor.artifact_id), "members/entry.js")
+        File.chmod!(member, 0o600)
+        File.write!(member, "changed")
+        File.chmod!(member, 0o400)
+      end
+
+      if context == :reference_with_invalid_metadata do
+        {metadata_path, _record} = recovery_record(root, :seal_metadata, staging, descriptor)
+        File.write!(metadata_path, Rekindle.CanonicalValue.encode!(%{"v" => 1}))
+        File.chmod!(metadata_path, 0o600)
+      end
+
+      {path, record} = recovery_record(root, kind, staging, descriptor)
+      temporary = write_state_temporary(path, record, kind)
+      before = File.read!(temporary)
+
+      {:ok, recovered} = start_store(root)
+      assert File.read!(temporary) == before
+      assert File.exists?(Path.dirname(staging.path))
+      assert File.regular?(Path.join(root, "quarantine-v1.json"))
+      assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
   defp start_store(root, options \\ []) do
     ArtifactStore.start_link(
       Keyword.merge(
@@ -1543,6 +1602,23 @@ defmodule Rekindle.ArtifactStoreTest do
           }
         end)
     }
+  end
+
+  defp write_state_temporary(path, record, kind) do
+    bytes = Rekindle.CanonicalValue.encode!(record)
+
+    name =
+      Filesystem.state_temporary_name(
+        kind,
+        Path.basename(path),
+        Filesystem.sha256_bytes(bytes),
+        "00000000000000000000000000000000"
+      )
+
+    temporary = Path.join(Path.dirname(path), name)
+    File.write!(temporary, bytes)
+    File.chmod!(temporary, 0o600)
+    temporary
   end
 
   defp state_root do

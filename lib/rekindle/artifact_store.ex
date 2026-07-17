@@ -1850,7 +1850,8 @@ defmodule Rekindle.ArtifactStore do
          true <- valid_marker?(marker, attempt_id),
          {:ok, journal} <- read_canonical(Path.join(attempt, "seal-v1.json")),
          :ok <- validate_optional_seal_journal(marker, journal),
-         true <- publication_entry_matches?(entry, record, journal) do
+         true <- publication_entry_matches?(entry, record, journal),
+         :ok <- validate_publication_phase(root, entry, journal) do
       true
     else
       _ -> false
@@ -1875,6 +1876,40 @@ defmodule Rekindle.ArtifactStore do
             record["manifest_digest"] == journal["descriptor"]["manifest_digest"] and
             record["profile"] == journal["descriptor"]["profile"] and
             record["source_revision"] == journal["descriptor"]["source_revision"]))
+  end
+
+  defp validate_publication_phase(root, entry, journal) do
+    with {:ok, target} <- target(journal["target"]),
+         {:ok, descriptor} <- descriptor_from_record(journal["descriptor"]),
+         :ok <- validate_descriptor(target, descriptor),
+         artifact =
+           Path.join([root, "generations", Atom.to_string(target), descriptor.artifact_id]),
+         :ok <- validate_tree(artifact, target, descriptor, true),
+         :ok <- validate_publication_metadata(root, entry, target, descriptor) do
+      :ok
+    else
+      _ -> :error
+    end
+  end
+
+  defp validate_publication_metadata(_root, %{location: {:seals, target}}, target, _descriptor),
+    do: :ok
+
+  defp validate_publication_metadata(
+         root,
+         %{location: {:references, target}},
+         target,
+         descriptor
+       ) do
+    path = Path.join([root, "seals", Atom.to_string(target), descriptor.artifact_id <> ".json"])
+    expected = descriptor_record(target, descriptor)
+
+    with :ok <- qualify_private_file(path),
+         {:ok, ^expected} <- read_canonical(path) do
+      :ok
+    else
+      _ -> :error
+    end
   end
 
   defp validate_rollback_temporary(root, entry, record) do
