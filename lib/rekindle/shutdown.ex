@@ -12,9 +12,11 @@ defmodule Rekindle.Shutdown do
     :event_bus,
     :timeout_ms,
     :result,
+    :resource_table,
     status: :accepting,
     process_runners: [],
-    resources: %{}
+    resource_indexes: %{cancel: [], notify: [], release: [], cleanup: []},
+    resource_overflow: []
   ]
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -50,7 +52,15 @@ defmodule Rekindle.Shutdown do
          is_list(runners) and Enum.all?(runners, &valid_server?/1) and
          (is_nil(event_bus) or valid_server?(event_bus)) and is_integer(timeout) and
          timeout in 100..120_000 do
-      {:ok, %__MODULE__{process_runners: runners, event_bus: event_bus, timeout_ms: timeout}}
+      table = :ets.new(:rekindle_shutdown_resources, [:set, :private])
+
+      {:ok,
+       %__MODULE__{
+         process_runners: runners,
+         event_bus: event_bus,
+         timeout_ms: timeout,
+         resource_table: table
+       }}
     else
       {:stop, :invalid_shutdown_coordinator}
     end
@@ -67,9 +77,11 @@ defmodule Rekindle.Shutdown do
       {:ok, resource} ->
         reference = make_ref()
         entry = %{owner: owner, resource: resource}
+        true = :ets.insert(state.resource_table, {reference, entry})
+        {indexes, overflow} = index_resource(state, reference, resource)
 
         {:reply, {:ok, reference},
-         %{state | resources: Map.put(state.resources, reference, entry)}}
+         %{state | resource_indexes: indexes, resource_overflow: overflow}}
 
       :error ->
         {:reply, {:error, contract("Shutdown resource is invalid")}, state}
@@ -79,14 +91,21 @@ defmodule Rekindle.Shutdown do
   def handle_call({:track, _kind, _callbacks}, _from, state),
     do: {:reply, {:error, cancelled("Shutdown has stopped new work")}, state}
 
+  def handle_call({:untrack, _owner, _reference}, _from, %{resource_table: nil} = state),
+    do: {:reply, :ok, state}
+
   def handle_call({:untrack, owner, reference}, _from, state) do
-    resources =
-      case Map.get(state.resources, reference) do
-        %{owner: ^owner} -> Map.delete(state.resources, reference)
-        _ -> state.resources
+    state =
+      case :ets.lookup(state.resource_table, reference) do
+        [{^reference, %{owner: ^owner}}] ->
+          true = :ets.delete(state.resource_table, reference)
+          remove_resource_index(state, reference)
+
+        _ ->
+          state
       end
 
-    {:reply, :ok, %{state | resources: resources}}
+    {:reply, :ok, state}
   end
 
   def handle_call({:shutdown, _reason}, _from, %{status: :stopped} = state),
@@ -95,7 +114,8 @@ defmodule Rekindle.Shutdown do
   def handle_call({:shutdown, reason}, _from, %{status: :accepting} = state)
       when reason in [:shutdown, :supervisor, :configuration_changed] do
     result = perform(state, reason)
-    {:reply, result, %{state | status: :stopped, result: result, resources: %{}}}
+    state = retire_resources(state)
+    {:reply, result, %{state | status: :stopped, result: result}}
   end
 
   def handle_call({:shutdown, _reason}, _from, state),
@@ -106,14 +126,13 @@ defmodule Rekindle.Shutdown do
   def terminate(_reason, state), do: perform(state, :supervisor) |> then(fn _ -> :ok end)
 
   defp perform(state, reason) do
-    resources = Stream.map(state.resources, fn {_reference, entry} -> entry.resource end)
     shutdown_deadline = deadline(state.timeout_ms)
     failures = emit_stopping(state.event_bus, reason, stage_deadline(shutdown_deadline, 7))
 
     failures =
       failures ++
         invoke(
-          resources,
+          state,
           [:discovery, :build, :helper, :publish, :generic],
           :cancel,
           stage_deadline(shutdown_deadline, 6)
@@ -130,7 +149,7 @@ defmodule Rekindle.Shutdown do
     failures =
       failures ++
         invoke(
-          resources,
+          state,
           [:browser, :desktop],
           :notify,
           stage_deadline(shutdown_deadline, 4)
@@ -141,12 +160,12 @@ defmodule Rekindle.Shutdown do
 
     failures =
       failures ++
-        invoke(resources, [:lease], :release, stage_deadline(shutdown_deadline, 2))
+        invoke(state, [:lease], :release, stage_deadline(shutdown_deadline, 2))
 
     failures =
       failures ++
         invoke(
-          resources,
+          state,
           [:staging, :publish, :generic, :browser, :desktop, :discovery, :build, :helper],
           :cleanup,
           shutdown_deadline
@@ -375,14 +394,12 @@ defmodule Rekindle.Shutdown do
     end
   end
 
-  defp invoke(resources, kinds, callback, callback_deadline) do
+  defp invoke(state, kinds, callback, callback_deadline) do
     parent = self()
     work_deadline = work_deadline(callback_deadline)
 
-    {selected, overflow?} =
-      bounded_select(resources, work_deadline, fn resource ->
-        resource.kind in kinds and not is_nil(Map.fetch!(resource, callback))
-      end)
+    selected = indexed_resources(state, callback, kinds)
+    overflow? = callback in state.resource_overflow
 
     {pending, launch_overflow?} =
       spawn_callback_workers(selected, parent, callback, work_deadline)
@@ -410,6 +427,20 @@ defmodule Rekindle.Shutdown do
         {:cont, {Map.put(pending, reference, entry), false}}
       else
         {:halt, {pending, true}}
+      end
+    end)
+  end
+
+  defp indexed_resources(state, callback, kinds) do
+    state.resource_indexes
+    |> Map.fetch!(callback)
+    |> Enum.flat_map(fn reference ->
+      case :ets.lookup(state.resource_table, reference) do
+        [{^reference, %{resource: resource}}] ->
+          if resource.kind in kinds, do: [resource], else: []
+
+        _ ->
+          []
       end
     end)
   end
@@ -550,6 +581,62 @@ defmodule Rekindle.Shutdown do
     now = System.monotonic_time(:millisecond)
     remaining = max(stage_deadline - now, 0)
     min(now + max(div(remaining * 4, 5), 1), stage_deadline)
+  end
+
+  defp index_resource(state, reference, resource) do
+    Enum.reduce(
+      [:cancel, :notify, :release, :cleanup],
+      {state.resource_indexes, state.resource_overflow},
+      fn callback, {indexes, overflow} ->
+        if is_function(Map.fetch!(resource, callback), 0) do
+          references = Map.fetch!(indexes, callback)
+
+          if length(references) < @max_shutdown_workers do
+            {Map.put(indexes, callback, [reference | references]), overflow}
+          else
+            {indexes, Enum.uniq([callback | overflow])}
+          end
+        else
+          {indexes, overflow}
+        end
+      end
+    )
+  end
+
+  defp remove_resource_index(state, reference) do
+    indexes =
+      Map.new(state.resource_indexes, fn {callback, references} ->
+        {callback, List.delete(references, reference)}
+      end)
+
+    %{state | resource_indexes: indexes}
+  end
+
+  defp retire_resources(%{resource_table: nil} = state), do: state
+
+  defp retire_resources(state) do
+    table = state.resource_table
+
+    janitor =
+      spawn(fn ->
+        receive do
+          {:"ETS-TRANSFER", ^table, _owner, :shutdown} -> :ets.delete(table)
+        end
+      end)
+
+    case :ets.give_away(table, janitor, :shutdown) do
+      true ->
+        %{
+          state
+          | resource_table: nil,
+            resource_indexes: %{cancel: [], notify: [], release: [], cleanup: []},
+            resource_overflow: []
+        }
+
+      false ->
+        Process.exit(janitor, :kill)
+        state
+    end
   end
 
   defp bounded_select(enumerable, work_deadline, predicate) do

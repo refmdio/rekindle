@@ -253,12 +253,18 @@ defmodule Rekindle.ShutdownTest do
                )
     end
 
+    state = :sys.get_state(coordinator)
+    assert :ets.info(state.resource_table, :size) == 5_000
+    assert length(state.resource_indexes.cleanup) == 32
+    assert :cleanup in state.resource_overflow
+
     started_at = System.monotonic_time(:millisecond)
     assert %Result{status: :uncertain, failures: failures} = Shutdown.shutdown(coordinator)
     assert System.monotonic_time(:millisecond) - started_at < 500
 
     assert Enum.any?(failures, &(&1.message =~ "runner" and &1.message =~ "bounded capacity"))
     assert Enum.any?(failures, &(&1.message =~ "cleanup callbacks exceeded bounded capacity"))
+    assert :sys.get_state(coordinator).resource_table == nil
   end
 
   test "untrack is owner-scoped" do
