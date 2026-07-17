@@ -89,21 +89,41 @@ defmodule Rekindle.ArtifactStoreTest do
 
   test "activation checkpoint errors obey the pointer commit boundary" do
     for checkpoint <- [
+          :activation_journal_created,
+          :activation_journal_written,
+          :activation_journal_file_synced,
           :activation_journal_renamed,
+          :activation_journal_directory_synced,
           :activation_journaled,
+          :activation_fallback_created,
+          :activation_fallback_written,
+          :activation_fallback_file_synced,
           :activation_fallback_renamed,
+          :activation_fallback_directory_synced,
           :activation_fallback_published,
+          :activation_current_created,
+          :activation_current_written,
+          :activation_current_file_synced,
           :activation_current_renamed,
+          :activation_current_directory_synced,
           :activation_current_published,
           :activation_journal_removed
         ] do
       root = state_root()
       {:ok, store} = start_store(root)
-      [first, second] = sealed_web_generations(store, ["old-#{checkpoint}", "new-#{checkpoint}"])
+
+      [first, second, third] =
+        sealed_web_generations(store, [
+          "fallback-#{checkpoint}",
+          "old-#{checkpoint}",
+          "new-#{checkpoint}"
+        ])
+
       assert :ok = ArtifactStore.activate(store, first, 1)
+      assert :ok = ArtifactStore.activate(store, second, 2)
 
       result =
-        ArtifactStore.activate(store, second, 2,
+        ArtifactStore.activate(store, third, 3,
           checkpoint: fn
             ^checkpoint -> {:error, injected_activation_failure()}
             _other -> :ok
@@ -111,24 +131,38 @@ defmodule Rekindle.ArtifactStoreTest do
         )
 
       if checkpoint in [
+           :activation_journal_created,
+           :activation_journal_written,
+           :activation_journal_file_synced,
            :activation_journal_renamed,
+           :activation_journal_directory_synced,
            :activation_journaled,
+           :activation_fallback_created,
+           :activation_fallback_written,
+           :activation_fallback_file_synced,
            :activation_fallback_renamed,
-           :activation_fallback_published
+           :activation_fallback_directory_synced,
+           :activation_fallback_published,
+           :activation_current_created,
+           :activation_current_written,
+           :activation_current_file_synced
          ] do
         assert {:error, %{code: :io_failed}} = result
-        assert {:ok, ^first} = ArtifactStore.current(store, :web)
-        assert :none = ArtifactStore.fallback(store, :web)
-      else
-        assert :ok = result
         assert {:ok, ^second} = ArtifactStore.current(store, :web)
         assert {:ok, ^first} = ArtifactStore.fallback(store, :web)
+      else
+        assert :ok = result
+        assert {:ok, ^third} = ArtifactStore.current(store, :web)
+        assert {:ok, ^second} = ArtifactStore.fallback(store, :web)
       end
 
       assert File.ls!(Path.join(root, "activations")) == []
-      assert :ok = ArtifactStore.activate(store, second, 2)
-      assert {:ok, ^second} = ArtifactStore.current(store, :web)
-      assert {:ok, ^first} = ArtifactStore.fallback(store, :web)
+      assert Enum.sort(File.ls!(Path.join(root, "current"))) == ["web.json"]
+      assert Enum.sort(File.ls!(Path.join(root, "fallback"))) == ["web.json"]
+
+      assert :ok = ArtifactStore.activate(store, third, 3)
+      assert {:ok, ^third} = ArtifactStore.current(store, :web)
+      assert {:ok, ^second} = ArtifactStore.fallback(store, :web)
     end
   end
 
@@ -137,22 +171,42 @@ defmodule Rekindle.ArtifactStoreTest do
     on_exit(fn -> Process.flag(:trap_exit, previous) end)
 
     for checkpoint <- [
+          :activation_journal_created,
+          :activation_journal_written,
+          :activation_journal_file_synced,
           :activation_journal_renamed,
+          :activation_journal_directory_synced,
           :activation_journaled,
+          :activation_fallback_created,
+          :activation_fallback_written,
+          :activation_fallback_file_synced,
           :activation_fallback_renamed,
+          :activation_fallback_directory_synced,
           :activation_fallback_published,
+          :activation_current_created,
+          :activation_current_written,
+          :activation_current_file_synced,
           :activation_current_renamed,
+          :activation_current_directory_synced,
           :activation_current_published,
           :activation_journal_removed
         ] do
       root = state_root()
       {:ok, store} = start_store(root)
-      [first, second] = sealed_web_generations(store, ["old-#{checkpoint}", "new-#{checkpoint}"])
+
+      [first, second, third] =
+        sealed_web_generations(store, [
+          "fallback-#{checkpoint}",
+          "old-#{checkpoint}",
+          "new-#{checkpoint}"
+        ])
+
       assert :ok = ArtifactStore.activate(store, first, 1)
+      assert :ok = ArtifactStore.activate(store, second, 2)
 
       assert capture_log(fn ->
                assert catch_exit(
-                        ArtifactStore.activate(store, second, 2,
+                        ArtifactStore.activate(store, third, 3,
                           checkpoint: fn
                             ^checkpoint -> exit(:injected_activation_crash)
                             _other -> :ok
@@ -166,23 +220,104 @@ defmodule Rekindle.ArtifactStoreTest do
       {:ok, recovered} = start_store(root)
 
       if checkpoint in [
+           :activation_journal_created,
+           :activation_journal_written,
+           :activation_journal_file_synced,
            :activation_journal_renamed,
+           :activation_journal_directory_synced,
            :activation_journaled,
+           :activation_fallback_created,
+           :activation_fallback_written,
+           :activation_fallback_file_synced,
            :activation_fallback_renamed,
-           :activation_fallback_published
+           :activation_fallback_directory_synced,
+           :activation_fallback_published,
+           :activation_current_created,
+           :activation_current_written,
+           :activation_current_file_synced
          ] do
-        assert {:ok, ^first} = ArtifactStore.current(recovered, :web)
-        assert :none = ArtifactStore.fallback(recovered, :web)
-      else
         assert {:ok, ^second} = ArtifactStore.current(recovered, :web)
         assert {:ok, ^first} = ArtifactStore.fallback(recovered, :web)
+      else
+        assert {:ok, ^third} = ArtifactStore.current(recovered, :web)
+        assert {:ok, ^second} = ArtifactStore.fallback(recovered, :web)
       end
 
       assert File.ls!(Path.join(root, "activations")) == []
-      assert :ok = ArtifactStore.activate(recovered, second, 2)
-      assert {:ok, ^second} = ArtifactStore.current(recovered, :web)
-      assert {:ok, ^first} = ArtifactStore.fallback(recovered, :web)
+      assert Enum.sort(File.ls!(Path.join(root, "current"))) == ["web.json"]
+      assert Enum.sort(File.ls!(Path.join(root, "fallback"))) == ["web.json"]
+
+      assert :ok = ArtifactStore.activate(recovered, third, 3)
+      assert {:ok, ^third} = ArtifactStore.current(recovered, :web)
+      assert {:ok, ^second} = ArtifactStore.fallback(recovered, :web)
     end
+  end
+
+  test "quarantines foreign activation temporaries without changing prior state" do
+    for {kind, directory} <- [journal: "activations", current: "current", fallback: "fallback"] do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      [generation] = sealed_web_generations(store, ["preserved-#{kind}"])
+      assert :ok = ArtifactStore.activate(store, generation, 1)
+      :ok = GenServer.stop(store)
+
+      current_path = Path.join(root, "current/web.json")
+      current_before = File.read!(current_path)
+
+      temporary =
+        Path.join([
+          root,
+          directory,
+          ".rekindle-activation-v1-#{kind}-web-#{String.duplicate("0", 32)}-#{String.duplicate("0", 64)}.tmp"
+        ])
+
+      File.write!(temporary, "foreign")
+      File.chmod!(temporary, 0o600)
+
+      {:ok, recovered} = start_store(root)
+      assert File.exists?(Path.join(root, "quarantine-v1.json"))
+      assert File.read!(current_path) == current_before
+      assert File.read!(temporary) == "foreign"
+      assert_generation_preserved(root, generation)
+
+      assert {:error, %{code: :cleanup_unconfirmed}} =
+               ArtifactStore.allocate(recovered, :web)
+
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
+  test "quarantines multiple owned activation temporaries without removing either" do
+    root = state_root()
+    {:ok, store} = start_store(root)
+    [generation] = sealed_web_generations(store, ["preserved-ambiguous-temporaries"])
+    assert :ok = ArtifactStore.activate(store, generation, 1)
+    :ok = GenServer.stop(store)
+
+    current_path = Path.join(root, "current/web.json")
+    current_before = File.read!(current_path)
+
+    temporaries =
+      for transaction_id <- [String.duplicate("1", 32), String.duplicate("2", 32)] do
+        Path.join(
+          root,
+          "activations/.rekindle-activation-v1-journal-web-#{transaction_id}-#{String.duplicate("0", 64)}.tmp"
+        )
+      end
+
+    Enum.each(temporaries, fn temporary ->
+      File.write!(temporary, "")
+      File.chmod!(temporary, 0o600)
+    end)
+
+    {:ok, recovered} = start_store(root)
+    assert File.exists?(Path.join(root, "quarantine-v1.json"))
+    assert File.read!(current_path) == current_before
+    assert Enum.all?(temporaries, &File.exists?/1)
+    assert_generation_preserved(root, generation)
+
+    assert {:error, %{code: :cleanup_unconfirmed}} =
+             ArtifactStore.allocate(recovered, :web)
   end
 
   test "rejects escaping, aliased, extra, changed, linked, and special members" do

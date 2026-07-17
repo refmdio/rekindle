@@ -11,6 +11,29 @@ defmodule Rekindle.ArtifactStore do
   @manifest_limit 67_108_864
   @member_limit 100_000
   @safe_integer 9_007_199_254_740_991
+  @activation_write_checkpoints %{
+    journal: %{
+      created: :activation_journal_created,
+      written: :activation_journal_written,
+      file_synced: :activation_journal_file_synced,
+      renamed: :activation_journal_renamed,
+      directory_synced: :activation_journal_directory_synced
+    },
+    fallback: %{
+      created: :activation_fallback_created,
+      written: :activation_fallback_written,
+      file_synced: :activation_fallback_file_synced,
+      renamed: :activation_fallback_renamed,
+      directory_synced: :activation_fallback_directory_synced
+    },
+    current: %{
+      created: :activation_current_created,
+      written: :activation_current_written,
+      file_synced: :activation_current_file_synced,
+      renamed: :activation_current_renamed,
+      directory_synced: :activation_current_directory_synced
+    }
+  }
 
   defstruct [
     :root,
@@ -895,8 +918,7 @@ defmodule Rekindle.ArtifactStore do
   defp run_activation_transaction(state, target, journal, desired_fallback, options) do
     path = activation_path(state.root, target)
 
-    with :ok <-
-           activation_atomic_write(path, journal, options, :activation_journal_renamed),
+    with :ok <- activation_atomic_write(path, journal, options, :journal, target),
          :ok <- checkpoint(options, :activation_journaled),
          :ok <-
            publish_activation_pointer(
@@ -905,7 +927,7 @@ defmodule Rekindle.ArtifactStore do
              target,
              desired_fallback,
              options,
-             :activation_fallback_renamed
+             :fallback
            ),
          :ok <- checkpoint(options, :activation_fallback_published) do
       case publish_activation_pointer(
@@ -914,7 +936,7 @@ defmodule Rekindle.ArtifactStore do
              target,
              journal["new_current"],
              options,
-             :activation_current_renamed
+             :current
            ) do
         :ok ->
           commit_activation(state, target, journal, desired_fallback, options)
@@ -1006,25 +1028,33 @@ defmodule Rekindle.ArtifactStore do
     end
   end
 
-  defp publish_activation_pointer(state, kind, target, nil, _options, _checkpoint),
+  defp publish_activation_pointer(state, kind, target, nil, _options, _write_kind),
     do: publish_pointer(state, kind, target, nil)
 
-  defp publish_activation_pointer(state, kind, target, record, options, checkpoint) do
-    activation_atomic_write(pointer_path(state, kind, target), record, options, checkpoint)
+  defp publish_activation_pointer(state, kind, target, record, options, write_kind) do
+    activation_atomic_write(
+      pointer_path(state, kind, target),
+      record,
+      options,
+      write_kind,
+      target
+    )
   end
 
-  defp activation_atomic_write(path, value, options, renamed_checkpoint) do
+  defp activation_atomic_write(path, value, options, kind, target) do
     bytes = CanonicalValue.encode!(value)
     parent = Path.dirname(path)
-    temporary = Path.join(parent, ".#{Path.basename(path)}.#{Filesystem.random_id()}.tmp")
+    digest = sha256_bytes(bytes)
+    temporary = Path.join(parent, activation_temporary_name(kind, target, digest))
 
     result =
       try do
         with {:ok, io} <- File.open(temporary, [:write, :binary, :exclusive]),
-             :ok <- write_activation_temporary(io, temporary, bytes),
+             :ok <- prepare_activation_temporary(io, temporary, bytes, options, kind),
              :ok <- File.rename(temporary, path),
-             :ok <- checkpoint(options, renamed_checkpoint),
-             :ok <- Filesystem.sync_directory(parent) do
+             :ok <- checkpoint(options, activation_write_checkpoint(kind, :renamed)),
+             :ok <- Filesystem.sync_directory(parent),
+             :ok <- checkpoint(options, activation_write_checkpoint(kind, :directory_synced)) do
           :ok
         else
           {:error, %Failure{} = failure} -> {:error, failure}
@@ -1039,16 +1069,26 @@ defmodule Rekindle.ArtifactStore do
     result
   end
 
-  defp write_activation_temporary(io, temporary, bytes) do
+  defp prepare_activation_temporary(io, temporary, bytes, options, kind) do
     try do
       with :ok <- File.chmod(temporary, 0o600),
+           :ok <- checkpoint(options, activation_write_checkpoint(kind, :created)),
            :ok <- IO.binwrite(io, bytes),
-           :ok <- :file.sync(io) do
+           :ok <- checkpoint(options, activation_write_checkpoint(kind, :written)),
+           :ok <- :file.sync(io),
+           :ok <- checkpoint(options, activation_write_checkpoint(kind, :file_synced)) do
         :ok
       end
     after
       File.close(io)
     end
+  end
+
+  defp activation_write_checkpoint(kind, boundary),
+    do: @activation_write_checkpoints |> Map.fetch!(kind) |> Map.fetch!(boundary)
+
+  defp activation_temporary_name(kind, target, digest) do
+    ".rekindle-activation-v1-#{kind}-#{target}-#{Filesystem.random_id()}-#{digest}.tmp"
   end
 
   defp activation_write_failure,
@@ -1383,11 +1423,17 @@ defmodule Rekindle.ArtifactStore do
     else
       case recover_staging(root) do
         :ok ->
-          case recover_activations(root) do
+          case recover_activation_temporaries(root) do
             :ok ->
-              case recover_deletions(root) do
-                :ok -> validate_persisted_state(root)
-                {:error, %Failure{} = failure} -> quarantine(root, failure.message)
+              case recover_activations(root) do
+                :ok ->
+                  case recover_deletions(root) do
+                    :ok -> validate_persisted_state(root)
+                    {:error, %Failure{} = failure} -> quarantine(root, failure.message)
+                  end
+
+                {:error, %Failure{} = failure} ->
+                  quarantine(root, failure.message)
               end
 
             {:error, %Failure{} = failure} ->
@@ -1399,6 +1445,169 @@ defmodule Rekindle.ArtifactStore do
       end
     end
   end
+
+  defp recover_activation_temporaries(root) do
+    with {:ok, entries} <- activation_temporary_entries(root),
+         :ok <- validate_activation_temporaries(root, entries),
+         :ok <- remove_activation_temporaries(entries) do
+      :ok
+    end
+  end
+
+  defp activation_temporary_entries(root) do
+    Enum.reduce_while(
+      [journal: "activations", current: "current", fallback: "fallback"],
+      {:ok, []},
+      fn
+        {kind, directory_name}, {:ok, entries} ->
+          directory = Path.join(root, directory_name)
+
+          case File.ls(directory) do
+            {:ok, names} ->
+              case classify_activation_directory(directory, kind, names) do
+                {:ok, found} -> {:cont, {:ok, found ++ entries}}
+                {:error, _} = error -> {:halt, error}
+              end
+
+            {:error, _reason} ->
+              {:halt, activation_temporary_failure("Activation state could not be listed")}
+          end
+      end
+    )
+  end
+
+  defp classify_activation_directory(directory, kind, names) do
+    Enum.reduce_while(Enum.sort(names), {:ok, []}, fn name, {:ok, entries} ->
+      cond do
+        name in ["web.json", "desktop.json"] ->
+          {:cont, {:ok, entries}}
+
+        true ->
+          case parse_activation_temporary(name, kind) do
+            {:ok, target, digest} ->
+              entry = %{
+                kind: kind,
+                target: target,
+                digest: digest,
+                path: Path.join(directory, name)
+              }
+
+              {:cont, {:ok, [entry | entries]}}
+
+            :error ->
+              {:halt, activation_temporary_failure("Activation temporary state is ambiguous")}
+          end
+      end
+    end)
+  end
+
+  defp parse_activation_temporary(name, kind) do
+    pattern =
+      ~r/\A\.rekindle-activation-v1-#{kind}-(web|desktop)-([0-9a-f]{32})-([0-9a-f]{64})\.tmp\z/
+
+    case Regex.run(pattern, name, capture: :all_but_first) do
+      [target, _transaction_id, digest] -> {:ok, target_atom(target), digest}
+      _ -> :error
+    end
+  end
+
+  defp validate_activation_temporaries(root, entries) do
+    unique? =
+      entries
+      |> Enum.map(&{&1.kind, &1.target})
+      |> then(&(length(&1) == length(Enum.uniq(&1))))
+
+    if unique? do
+      Enum.reduce_while(entries, :ok, fn entry, :ok ->
+        case validate_activation_temporary(root, entry) do
+          :ok -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+    else
+      activation_temporary_failure("Activation temporary state is ambiguous")
+    end
+  end
+
+  defp validate_activation_temporary(_root, %{kind: :journal} = entry) do
+    with :ok <- qualify_private_file(entry.path),
+         {:ok, bytes} <- read_activation_temporary(entry.path),
+         true <- valid_activation_journal_temporary?(bytes, entry.target, entry.digest) do
+      :ok
+    else
+      _ -> activation_temporary_failure("Activation journal temporary is invalid")
+    end
+  end
+
+  defp validate_activation_temporary(root, entry) when entry.kind in [:current, :fallback] do
+    with :ok <- qualify_private_file(entry.path),
+         {:ok, bytes} <- read_activation_temporary(entry.path),
+         {:ok, journal} <- read_canonical(activation_path(root, entry.target)),
+         true <- valid_activation_journal?(journal, entry.target),
+         {:ok, expected} <- activation_temporary_pointer(journal, entry.kind),
+         expected_bytes = CanonicalValue.encode!(expected),
+         true <- entry.digest == sha256_bytes(expected_bytes),
+         true <- bytes in ["", expected_bytes] do
+      :ok
+    else
+      _ -> activation_temporary_failure("Activation pointer temporary is invalid")
+    end
+  end
+
+  defp read_activation_temporary(path) do
+    case File.read(path) do
+      {:ok, bytes} when byte_size(bytes) <= @manifest_limit -> {:ok, bytes}
+      _ -> :error
+    end
+  end
+
+  defp valid_activation_journal_temporary?("", _target, _digest), do: true
+
+  defp valid_activation_journal_temporary?(bytes, target, digest) do
+    with true <- digest == sha256_bytes(bytes),
+         {:ok, journal} <- Jason.decode(bytes),
+         true <- CanonicalValue.encode!(journal) == bytes do
+      valid_activation_journal?(journal, target)
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp activation_temporary_pointer(journal, :current), do: {:ok, journal["new_current"]}
+
+  defp activation_temporary_pointer(journal, :fallback) do
+    case journal["old_current"] || journal["old_fallback"] do
+      nil -> :error
+      pointer -> {:ok, pointer}
+    end
+  end
+
+  defp remove_activation_temporaries(entries) do
+    entries
+    |> Enum.group_by(&Path.dirname(&1.path))
+    |> Enum.reduce_while(:ok, fn {directory, grouped}, :ok ->
+      with :ok <- remove_activation_temporary_files(grouped),
+           :ok <- Filesystem.sync_directory(directory) do
+        {:cont, :ok}
+      else
+        _ -> {:halt, activation_temporary_failure("Activation temporary could not be removed")}
+      end
+    end)
+  end
+
+  defp remove_activation_temporary_files(entries) do
+    Enum.reduce_while(entries, :ok, fn entry, :ok ->
+      case File.rm(entry.path) do
+        :ok -> {:cont, :ok}
+        _ -> {:halt, :error}
+      end
+    end)
+  end
+
+  defp activation_temporary_failure(message),
+    do: {:error, invalid(:artifact, :cache_corrupt, message)}
 
   defp recover_activations(root) do
     directory = Path.join(root, "activations")
@@ -2214,6 +2423,9 @@ defmodule Rekindle.ArtifactStore do
     )
     |> Base.encode16(case: :lower)
   end
+
+  defp sha256_bytes(bytes),
+    do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defp ancestors(path) do
     path
