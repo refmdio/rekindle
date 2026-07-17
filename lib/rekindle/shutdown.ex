@@ -16,6 +16,7 @@ defmodule Rekindle.Shutdown do
     status: :accepting,
     process_runners: [],
     resource_indexes: %{cancel: [], notify: [], release: [], cleanup: []},
+    resource_counts: %{cancel: 0, notify: 0, release: 0, cleanup: 0},
     resource_overflow: []
   ]
 
@@ -78,10 +79,15 @@ defmodule Rekindle.Shutdown do
         reference = make_ref()
         entry = %{owner: owner, resource: resource}
         true = :ets.insert(state.resource_table, {reference, entry})
-        {indexes, overflow} = index_resource(state, reference, resource)
+        {indexes, counts, overflow} = index_resource(state, reference, resource)
 
         {:reply, {:ok, reference},
-         %{state | resource_indexes: indexes, resource_overflow: overflow}}
+         %{
+           state
+           | resource_indexes: indexes,
+             resource_counts: counts,
+             resource_overflow: overflow
+         }}
 
       :error ->
         {:reply, {:error, contract("Shutdown resource is invalid")}, state}
@@ -97,9 +103,9 @@ defmodule Rekindle.Shutdown do
   def handle_call({:untrack, owner, reference}, _from, state) do
     state =
       case :ets.lookup(state.resource_table, reference) do
-        [{^reference, %{owner: ^owner}}] ->
+        [{^reference, %{owner: ^owner, resource: resource}}] ->
           true = :ets.delete(state.resource_table, reference)
-          remove_resource_index(state, reference)
+          remove_resource_index(state, reference, resource)
 
         _ ->
           state
@@ -586,31 +592,104 @@ defmodule Rekindle.Shutdown do
   defp index_resource(state, reference, resource) do
     Enum.reduce(
       [:cancel, :notify, :release, :cleanup],
-      {state.resource_indexes, state.resource_overflow},
-      fn callback, {indexes, overflow} ->
-        if is_function(Map.fetch!(resource, callback), 0) do
+      {state.resource_indexes, state.resource_counts, state.resource_overflow},
+      fn callback, {indexes, counts, overflow} ->
+        if eligible_callback?(resource, callback) do
           references = Map.fetch!(indexes, callback)
+          counts = Map.update!(counts, callback, &(&1 + 1))
 
           if length(references) < @max_shutdown_workers do
-            {Map.put(indexes, callback, [reference | references]), overflow}
+            {Map.put(indexes, callback, [reference | references]), counts, overflow}
           else
-            {indexes, Enum.uniq([callback | overflow])}
+            {indexes, counts, Enum.uniq([callback | overflow])}
           end
         else
-          {indexes, overflow}
+          {indexes, counts, overflow}
         end
       end
     )
   end
 
-  defp remove_resource_index(state, reference) do
-    indexes =
-      Map.new(state.resource_indexes, fn {callback, references} ->
-        {callback, List.delete(references, reference)}
-      end)
+  defp remove_resource_index(state, reference, resource) do
+    Enum.reduce([:cancel, :notify, :release, :cleanup], state, fn callback, state ->
+      if eligible_callback?(resource, callback) do
+        references = Map.fetch!(state.resource_indexes, callback)
+        indexed? = reference in references
+        references = List.delete(references, reference)
+        count = max(Map.fetch!(state.resource_counts, callback) - 1, 0)
 
-    %{state | resource_indexes: indexes}
+        references =
+          if indexed? and count >= @max_shutdown_workers do
+            case promote_resource(state.resource_table, callback, references) do
+              nil -> references
+              promoted -> [promoted | references]
+            end
+          else
+            references
+          end
+
+        overflow =
+          if count > @max_shutdown_workers,
+            do: Enum.uniq([callback | state.resource_overflow]),
+            else: List.delete(state.resource_overflow, callback)
+
+        %{
+          state
+          | resource_indexes: Map.put(state.resource_indexes, callback, references),
+            resource_counts: Map.put(state.resource_counts, callback, count),
+            resource_overflow: overflow
+        }
+      else
+        state
+      end
+    end)
   end
+
+  defp promote_resource(table, callback, indexed),
+    do: promote_resource(table, :ets.first(table), callback, indexed)
+
+  defp promote_resource(_table, :"$end_of_table", _callback, _indexed), do: nil
+
+  defp promote_resource(table, reference, callback, indexed) do
+    candidate? =
+      case :ets.lookup(table, reference) do
+        [{^reference, %{resource: resource}}] ->
+          reference not in indexed and eligible_callback?(resource, callback)
+
+        _ ->
+          false
+      end
+
+    if candidate?,
+      do: reference,
+      else: promote_resource(table, :ets.next(table, reference), callback, indexed)
+  end
+
+  defp eligible_callback?(resource, :cancel),
+    do:
+      resource.kind in [:discovery, :build, :helper, :publish, :generic] and
+        is_function(resource.cancel, 0)
+
+  defp eligible_callback?(resource, :notify),
+    do: resource.kind in [:browser, :desktop] and is_function(resource.notify, 0)
+
+  defp eligible_callback?(resource, :release),
+    do: resource.kind == :lease and is_function(resource.release, 0)
+
+  defp eligible_callback?(resource, :cleanup),
+    do:
+      resource.kind in [
+        :staging,
+        :publish,
+        :generic,
+        :browser,
+        :desktop,
+        :discovery,
+        :build,
+        :helper
+      ] and is_function(resource.cleanup, 0)
+
+  defp eligible_callback?(_resource, _callback), do: false
 
   defp retire_resources(%{resource_table: nil} = state), do: state
 
@@ -630,6 +709,7 @@ defmodule Rekindle.Shutdown do
           state
           | resource_table: nil,
             resource_indexes: %{cancel: [], notify: [], release: [], cleanup: []},
+            resource_counts: %{cancel: 0, notify: 0, release: 0, cleanup: 0},
             resource_overflow: []
         }
 

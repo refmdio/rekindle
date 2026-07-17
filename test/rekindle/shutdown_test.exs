@@ -267,6 +267,63 @@ defmodule Rekindle.ShutdownTest do
     assert :sys.get_state(coordinator).resource_table == nil
   end
 
+  test "callbacks from unrelated resource kinds cannot displace a required stage callback" do
+    parent = self()
+    coordinator = start_supervised!({Shutdown, []})
+
+    for _index <- 1..32 do
+      assert {:ok, _reference} =
+               Shutdown.track(coordinator, :staging,
+                 notify: callback(parent, :ineligible_notify),
+                 cleanup: fn -> :ok end
+               )
+    end
+
+    assert {:ok, _reference} =
+             Shutdown.track(coordinator, :browser,
+               notify: callback(parent, :browser_notified),
+               cleanup: fn -> :ok end
+             )
+
+    assert %Result{status: :uncertain} = Shutdown.shutdown(coordinator)
+    assert_receive :browser_notified
+    refute_receive :ineligible_notify
+  end
+
+  test "untracking an indexed resource promotes overflow and clears exact-capacity overflow" do
+    parent = self()
+    coordinator = start_supervised!({Shutdown, []})
+
+    resources =
+      Enum.map(1..33, fn index ->
+        assert {:ok, reference} =
+                 Shutdown.track(coordinator, :staging,
+                   cleanup: callback(parent, {:promoted_cleanup, index})
+                 )
+
+        {index, reference}
+      end)
+
+    {removed_index, removed_reference} = hd(resources)
+    assert :ok = Shutdown.untrack(coordinator, removed_reference)
+
+    state = :sys.get_state(coordinator)
+    assert state.resource_counts.cleanup == 32
+    assert length(state.resource_indexes.cleanup) == 32
+    refute :cleanup in state.resource_overflow
+
+    assert %Result{status: :clean} = Shutdown.shutdown(coordinator)
+
+    completed =
+      Enum.map(1..32, fn _ ->
+        assert_receive {:promoted_cleanup, index}
+        index
+      end)
+
+    refute removed_index in completed
+    assert 33 in completed
+  end
+
   test "untrack is owner-scoped" do
     parent = self()
     coordinator = start_supervised!({Shutdown, []})
