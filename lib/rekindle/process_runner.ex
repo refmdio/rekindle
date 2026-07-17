@@ -62,7 +62,8 @@ defmodule Rekindle.ProcessRunner do
         cleanup_timeout_ms: admitted.cleanup_timeout_ms,
         port: nil,
         exec_state: exec_state,
-        cancel_reason: nil
+        cancel_reason: nil,
+        cancel_worker: nil
       }
 
       state = put_job(state, reference, job)
@@ -118,7 +119,7 @@ defmodule Rekindle.ProcessRunner do
     {:noreply,
      update_job(state, reference, fn job ->
        job = %{job | port: port, exec_state: exec_state}
-       maybe_send_cancel(state.adapter, job)
+       maybe_start_cancel(state.adapter, job)
      end)}
   end
 
@@ -287,21 +288,24 @@ defmodule Rekindle.ProcessRunner do
       )
 
     job = %{job | cancel_reason: reason, cleanup_timer: cleanup_timer}
-    job = maybe_send_cancel(state.adapter, job)
+    job = maybe_start_cancel(state.adapter, job)
     {:ok, %{state | jobs: Map.put(state.jobs, reference, job)}}
   end
 
   defp request_cancel(state, _reference, _job, _reason), do: {:ok, state}
 
-  defp maybe_send_cancel(_adapter, %{cancel_reason: nil} = job), do: job
-  defp maybe_send_cancel(_adapter, %{port: nil} = job), do: job
+  defp maybe_start_cancel(_adapter, %{cancel_reason: nil} = job), do: job
+  defp maybe_start_cancel(_adapter, %{port: nil} = job), do: job
+  defp maybe_start_cancel(_adapter, %{cancel_worker: worker} = job) when is_pid(worker), do: job
 
-  defp maybe_send_cancel(adapter, job) do
-    with {:ok, header} <- Exec.cancel(job.exec_state, job.cancel_reason),
-         :ok <- adapter_module(adapter).cancel(job.port, header) do
-      %{job | port: nil}
-    else
-      _ -> job
+  defp maybe_start_cancel(adapter, job) do
+    case Exec.cancel(job.exec_state, job.cancel_reason) do
+      {:ok, header} ->
+        worker = spawn(fn -> adapter_module(adapter).cancel(job.port, header) end)
+        %{job | cancel_worker: worker}
+
+      {:error, _reason} ->
+        job
     end
   end
 
@@ -434,6 +438,7 @@ defmodule Rekindle.ProcessRunner do
   defp cleanup_job(job) do
     Process.cancel_timer(job.timer)
     if job.cleanup_timer, do: Process.cancel_timer(job.cleanup_timer)
+    if job.cancel_worker, do: Process.exit(job.cancel_worker, :kill)
     Process.demonitor(job.caller_monitor, [:flush])
     Process.demonitor(job.worker_monitor, [:flush])
   end

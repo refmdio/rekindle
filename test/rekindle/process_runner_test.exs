@@ -24,27 +24,36 @@ defmodule Rekindle.ProcessRunnerTest do
         {:cancel, header} ->
           send(test, {:fake_cancel, header})
 
-          case (receive do
-                  :finish_cancel -> :ok
-                  {:error, reason} -> {:error, reason}
-                end) do
-            :ok ->
-              {:ok,
-               %{
-                 outcome: :signaled,
-                 code: nil,
-                 signal: 15,
-                 cleanup: :confirmed,
-                 discarded_stdout: 0,
-                 discarded_stderr: 0
-               }, "", ""}
+          cancelled_result()
 
-            {:error, reason} ->
-              {:error, reason}
-          end
+        {:cancel, header, cancel_worker} ->
+          send(test, {:fake_cancel, header, cancel_worker})
+
+          cancelled_result()
 
         :crash ->
           raise "adapter crash"
+      end
+    end
+
+    defp cancelled_result do
+      case (receive do
+              :finish_cancel -> :ok
+              {:error, reason} -> {:error, reason}
+            end) do
+        :ok ->
+          {:ok,
+           %{
+             outcome: :signaled,
+             code: nil,
+             signal: 15,
+             cleanup: :confirmed,
+             discarded_stdout: 0,
+             discarded_stderr: 0
+           }, "", ""}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
 
@@ -52,6 +61,20 @@ defmodule Rekindle.ProcessRunnerTest do
     def cancel(worker, header) when is_pid(worker) do
       send(worker, {:cancel, header})
       :ok
+    end
+  end
+
+  defmodule BlockingCancelAdapter do
+    @behaviour Rekindle.ProcessRunner.Adapter
+
+    @impl true
+    def run_exec(helper, spawn, state, options),
+      do: FakeAdapter.run_exec(helper, spawn, state, options)
+
+    @impl true
+    def cancel(worker, header) do
+      send(worker, {:cancel, header, self()})
+      Process.sleep(:infinity)
     end
   end
 
@@ -104,6 +127,27 @@ defmodule Rekindle.ProcessRunnerTest do
     send(runner, {:runner_cleanup_timeout, reference})
     send(runner, {:runner_result, reference, {:ok, terminal(), "", ""}})
     refute_receive {:rekindle_process, ^reference, _result}, 50
+  end
+
+  test "a blocked cancel callback cannot block the cleanup deadline" do
+    runner =
+      start_supervised!(
+        {ProcessRunner, adapter: {BlockingCancelAdapter, test_pid: self()}},
+        id: make_ref()
+      )
+
+    assert {:ok, reference} = ProcessRunner.run(runner, short_cleanup_request())
+    assert_receive {:fake_spawn, worker, _spawn, _state, _options}
+    worker_monitor = Process.monitor(worker)
+
+    assert :ok = ProcessRunner.cancel(runner, reference, :obsolete)
+    assert_receive {:fake_cancel, %{"reason" => "obsolete"}, cancel_worker}
+    cancel_monitor = Process.monitor(cancel_worker)
+
+    assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}, 500
+    assert_receive {:DOWN, ^cancel_monitor, :process, ^cancel_worker, :killed}, 500
+    assert_receive {:rekindle_process, ^reference, {:error, %{code: :cleanup_unconfirmed}}}
+    assert Process.alive?(runner)
   end
 
   test "caller cancellation forcibly settles an unresponsive adapter", %{runner: runner} do
