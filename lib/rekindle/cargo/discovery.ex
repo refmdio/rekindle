@@ -23,7 +23,7 @@ defmodule Rekindle.Cargo.Discovery do
     target = Map.get(selection, :target)
 
     with :ok <- selection_shape(selection),
-         {:ok, package} <- select_package(metadata.packages, selection.package, target),
+         {:ok, package} <- select_package(metadata, selection.package, target),
          {:ok, cargo_target} <- select_target(package, selection.binary, target),
          :ok <- validate_features(package, selection.features, target),
          {:ok, dependency_packages} <- dependency_closure(metadata, package.id, target) do
@@ -68,8 +68,12 @@ defmodule Rekindle.Cargo.Discovery do
 
   defp selection_shape(_), do: :error
 
-  defp select_package(packages, name, target) do
-    case Enum.filter(packages, &(&1.name == name)) do
+  defp select_package(metadata, name, target) do
+    workspace_members = MapSet.new(metadata.workspace_members)
+
+    case Enum.filter(metadata.packages, fn package ->
+           package.name == name and MapSet.member?(workspace_members, package.id)
+         end) do
       [package] -> {:ok, package}
       [] -> failure(target, :package_not_found, "Configured Cargo package was not found")
       _ -> failure(target, :cargo_metadata_failed, "Configured Cargo package is ambiguous")

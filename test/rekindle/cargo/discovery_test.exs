@@ -142,6 +142,84 @@ defmodule Rekindle.Cargo.DiscoveryTest do
     assert Enum.map(inventory.dependency_packages, & &1.name) == ["sample-ui", "shared-ui"]
   end
 
+  test "does not select path or registry dependencies as application packages" do
+    for source <- [nil, "registry+https://github.com/rust-lang/crates.io-index"] do
+      map = metadata_map()
+      dependency_id = map["resolve"]["nodes"] |> Enum.at(1) |> Map.fetch!("id")
+
+      map =
+        update_in(map, ["packages", Access.at(1)], fn package ->
+          package
+          |> Map.put("name", "dependency-app")
+          |> Map.put("source", source)
+          |> Map.put("targets", [
+            %{
+              "name" => "dependency-bin",
+              "kind" => ["bin"],
+              "crate_types" => ["bin"],
+              "src_path" => "/workspace/shared/src/main.rs"
+            }
+          ])
+        end)
+
+      assert dependency_id not in map["workspace_members"]
+      assert {:ok, metadata} = Metadata.decode(Jason.encode!(map), :web)
+
+      assert {:error, %{code: :package_not_found}} =
+               Discovery.select(metadata, %{
+                 selection()
+                 | package: "dependency-app",
+                   binary: "dependency-bin",
+                   features: []
+               })
+    end
+  end
+
+  test "selects an exact member in virtual and multi-package workspaces" do
+    map = metadata_map()
+    dependency_id = map["resolve"]["nodes"] |> Enum.at(1) |> Map.fetch!("id")
+
+    map =
+      map
+      |> Map.put("workspace_root", "/workspace")
+      |> Map.put("target_directory", "/workspace/target")
+      |> Map.update!("workspace_members", &Enum.sort([dependency_id | &1]))
+      |> update_in(["packages", Access.at(1)], fn package ->
+        package
+        |> Map.put("features", %{"desktop" => []})
+        |> Map.put("targets", [
+          %{
+            "name" => "shared-bin",
+            "kind" => ["bin"],
+            "crate_types" => ["bin"],
+            "src_path" => "/workspace/shared/src/main.rs"
+          }
+        ])
+      end)
+
+    assert {:ok, metadata} = Metadata.decode(Jason.encode!(map), :desktop)
+
+    assert {:ok, inventory} =
+             Discovery.select(metadata, %{
+               selection()
+               | target: :desktop,
+                 package: "shared-ui",
+                 binary: "shared-bin",
+                 rust_target: "x86_64-unknown-linux-gnu",
+                 features: ["desktop"]
+             })
+
+    assert inventory.selected_package.id == dependency_id
+    assert inventory.selected_target.name == "shared-bin"
+  end
+
+  test "ignores matching dependency names when selecting a workspace member" do
+    map = put_in(metadata_map(), ["packages", Access.at(1), "name"], "sample-ui")
+    assert {:ok, metadata} = Metadata.decode(Jason.encode!(map), :web)
+    assert {:ok, inventory} = Discovery.select(metadata, selection())
+    assert inventory.selected_package.id == hd(metadata.workspace_members)
+  end
+
   test "fails closed for missing or ambiguous packages and binary targets" do
     assert {:ok, metadata} = Metadata.decode(Jason.encode!(metadata_map()), :web)
 
@@ -149,7 +227,12 @@ defmodule Rekindle.Cargo.DiscoveryTest do
              Discovery.select(metadata, %{selection() | package: "missing"})
 
     duplicate = %{hd(metadata.packages) | id: "duplicate", manifest_path: "/other/Cargo.toml"}
-    ambiguous_package = %{metadata | packages: [duplicate | metadata.packages]}
+
+    ambiguous_package = %{
+      metadata
+      | packages: [duplicate | metadata.packages],
+        workspace_members: [duplicate.id | metadata.workspace_members]
+    }
 
     assert {:error, %{code: :cargo_metadata_failed}} =
              Discovery.select(ambiguous_package, selection())
