@@ -91,6 +91,38 @@ defmodule Rekindle.ShutdownTest do
     refute inspect(failures) =~ "private failure"
   end
 
+  test "non-returning callbacks are terminated while later cleanup and waiters complete" do
+    for callback_stage <- [:cancel, :notify, :release, :cleanup] do
+      parent = self()
+      child_id = {Shutdown, callback_stage}
+
+      coordinator =
+        start_supervised!(Supervisor.child_spec({Shutdown, timeout_ms: 150}, id: child_id))
+
+      track_non_returning(coordinator, callback_stage, parent)
+
+      first = Task.async(fn -> Shutdown.shutdown(coordinator) end)
+      assert_receive {:callback_started, ^callback_stage, callback_worker}, 500
+      second = Task.async(fn -> Shutdown.shutdown(coordinator) end)
+
+      assert %Result{status: :uncertain, failures: failures} =
+               first_result =
+               Task.await(first, 1_000)
+
+      assert first_result == Task.await(second, 1_000)
+      assert first_result == Shutdown.shutdown(coordinator)
+      assert_receive {:later_cleanup, ^callback_stage}, 500
+      refute Process.alive?(callback_worker)
+
+      assert Enum.any?(failures, fn failure ->
+               failure.code == :cleanup_unconfirmed and
+                 failure.message =~ "#{callback_stage}" and failure.message =~ "timed out"
+             end)
+
+      stop_supervised!(child_id)
+    end
+  end
+
   test "untrack is owner-scoped" do
     parent = self()
     coordinator = start_supervised!({Shutdown, []})
@@ -124,6 +156,52 @@ defmodule Rekindle.ShutdownTest do
     fn ->
       send(parent, message)
       :ok
+    end
+  end
+
+  defp track_non_returning(coordinator, :cancel, parent) do
+    assert {:ok, _reference} =
+             Shutdown.track(coordinator, :generic,
+               cancel: non_returning(parent, :cancel),
+               cleanup: callback(parent, {:later_cleanup, :cancel})
+             )
+  end
+
+  defp track_non_returning(coordinator, :notify, parent) do
+    assert {:ok, _reference} =
+             Shutdown.track(coordinator, :browser,
+               notify: non_returning(parent, :notify),
+               cleanup: callback(parent, {:later_cleanup, :notify})
+             )
+  end
+
+  defp track_non_returning(coordinator, :release, parent) do
+    assert {:ok, _reference} =
+             Shutdown.track(coordinator, :lease, release: non_returning(parent, :release))
+
+    assert {:ok, _reference} =
+             Shutdown.track(coordinator, :staging,
+               cleanup: callback(parent, {:later_cleanup, :release})
+             )
+  end
+
+  defp track_non_returning(coordinator, :cleanup, parent) do
+    assert {:ok, _reference} =
+             Shutdown.track(coordinator, :staging, cleanup: non_returning(parent, :cleanup))
+
+    assert {:ok, _reference} =
+             Shutdown.track(coordinator, :staging,
+               cleanup: callback(parent, {:later_cleanup, :cleanup})
+             )
+  end
+
+  defp non_returning(parent, stage) do
+    fn ->
+      send(parent, {:callback_started, stage, self()})
+
+      receive do
+        :never -> :ok
+      end
     end
   end
 

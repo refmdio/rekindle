@@ -117,23 +117,44 @@ defmodule Rekindle.Shutdown do
 
   defp perform(state, reason) do
     resources = Enum.map(state.resources, fn {_reference, entry} -> entry.resource end)
+    shutdown_deadline = deadline(state.timeout_ms)
     failures = emit_stopping(state.event_bus, reason)
 
     failures =
-      failures ++ invoke(resources, [:discovery, :build, :helper, :publish, :generic], :cancel)
+      failures ++
+        invoke(
+          resources,
+          [:discovery, :build, :helper, :publish, :generic],
+          :cancel,
+          stage_deadline(shutdown_deadline, 5)
+        )
 
     {runner_waits, runner_failures} = begin_runner_shutdown(state.process_runners)
     failures = failures ++ runner_failures
-    failures = failures ++ invoke(resources, [:browser, :desktop], :notify)
-    failures = failures ++ await_runners(runner_waits, deadline(state.timeout_ms))
-    failures = failures ++ invoke(resources, [:lease], :release)
+
+    failures =
+      failures ++
+        invoke(
+          resources,
+          [:browser, :desktop],
+          :notify,
+          stage_deadline(shutdown_deadline, 4)
+        )
+
+    failures =
+      failures ++ await_runners(runner_waits, stage_deadline(shutdown_deadline, 3))
+
+    failures =
+      failures ++
+        invoke(resources, [:lease], :release, stage_deadline(shutdown_deadline, 2))
 
     failures =
       failures ++
         invoke(
           resources,
           [:staging, :publish, :generic, :browser, :desktop, :discovery, :build, :helper],
-          :cleanup
+          :cleanup,
+          shutdown_deadline
         )
 
     Result.new(failures)
@@ -192,22 +213,95 @@ defmodule Rekindle.Shutdown do
     end
   end
 
-  defp invoke(resources, kinds, callback) do
-    resources
-    |> Enum.filter(&(&1.kind in kinds))
-    |> Enum.flat_map(&invoke_callback(&1, callback))
+  defp invoke(resources, kinds, callback, callback_deadline) do
+    parent = self()
+
+    pending =
+      resources
+      |> Enum.filter(&(&1.kind in kinds and not is_nil(Map.fetch!(&1, callback))))
+      |> Map.new(fn resource ->
+        reference = make_ref()
+
+        {pid, monitor} =
+          spawn_monitor(fn ->
+            result = invoke_callback(resource, callback)
+            send(parent, {:shutdown_callback, reference, result})
+          end)
+
+        {reference, %{pid: pid, monitor: monitor, kind: resource.kind}}
+      end)
+
+    await_callbacks(pending, callback, callback_deadline, [])
   end
 
   defp invoke_callback(resource, callback) do
-    case Map.fetch!(resource, callback) do
-      nil -> []
-      function -> normalize_callback(function.(), resource.kind, callback)
-    end
+    resource
+    |> Map.fetch!(callback)
+    |> then(&normalize_callback(&1.(), resource.kind, callback))
   rescue
     _ -> [cleanup_failure("Shutdown #{callback} callback failed")]
   catch
     _, _ -> [cleanup_failure("Shutdown #{callback} callback failed")]
   end
+
+  defp await_callbacks(pending, _callback, _deadline, failures) when map_size(pending) == 0,
+    do: Enum.reverse(failures) |> List.flatten()
+
+  defp await_callbacks(pending, callback, callback_deadline, failures) do
+    remaining = max(callback_deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:shutdown_callback, reference, callback_failures} when is_list(callback_failures) ->
+        case Map.pop(pending, reference) do
+          {nil, _pending} ->
+            await_callbacks(pending, callback, callback_deadline, failures)
+
+          {%{monitor: monitor}, pending} ->
+            Process.demonitor(monitor, [:flush])
+            await_callbacks(pending, callback, callback_deadline, [callback_failures | failures])
+        end
+
+      {:DOWN, monitor, :process, _pid, _reason} ->
+        case Enum.find(pending, fn {_reference, entry} -> entry.monitor == monitor end) do
+          nil ->
+            await_callbacks(pending, callback, callback_deadline, failures)
+
+          {reference, entry} ->
+            pending = Map.delete(pending, reference)
+            failure = callback_failure(entry.kind, callback, "terminated without a result")
+            await_callbacks(pending, callback, callback_deadline, [[failure] | failures])
+        end
+    after
+      remaining ->
+        timeout_failures = terminate_callbacks(pending, callback)
+        Enum.reverse([timeout_failures | failures]) |> List.flatten()
+    end
+  end
+
+  defp terminate_callbacks(pending, callback) do
+    Enum.map(pending, fn {reference, entry} ->
+      Process.exit(entry.pid, :kill)
+      monitor = entry.monitor
+      pid = entry.pid
+
+      receive do
+        {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
+      after
+        100 -> Process.demonitor(monitor, [:flush])
+      end
+
+      receive do
+        {:shutdown_callback, ^reference, _result} -> :ok
+      after
+        0 -> :ok
+      end
+
+      callback_failure(entry.kind, callback, "timed out")
+    end)
+  end
+
+  defp callback_failure(kind, callback, reason),
+    do: cleanup_failure("Shutdown #{callback} callback for #{kind} #{reason}")
 
   defp normalize_callback(:ok, _kind, _callback), do: []
 
@@ -222,6 +316,13 @@ defmodule Rekindle.Shutdown do
     do: [cleanup_failure("Shutdown #{callback} callback returned an invalid result")]
 
   defp deadline(timeout), do: System.monotonic_time(:millisecond) + timeout
+
+  defp stage_deadline(shutdown_deadline, remaining_stages) do
+    now = System.monotonic_time(:millisecond)
+    remaining = max(shutdown_deadline - now, 0)
+    min(now + max(div(remaining, remaining_stages), 1), shutdown_deadline)
+  end
+
   defp valid_server?(value), do: is_pid(value) or is_atom(value) or is_tuple(value)
 
   defp cancelled(message),
