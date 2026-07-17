@@ -91,8 +91,8 @@ pub mod web {
     ///
     /// # Errors
     ///
-    /// Returns [`ClientError::PlatformInit`] until the Web runtime adapter is
-    /// installed by its owning implementation phase.
+    /// Returns [`ClientError::PlatformInit`] when the browser GPUI platform
+    /// cannot be initialized.
     pub fn run(build: fn(&mut gpui::App), options: ClientOptions) -> Result<(), ClientError> {
         let _ = (build, options);
         Err(ClientError::PlatformInit)
@@ -107,8 +107,8 @@ pub mod desktop {
     ///
     /// # Errors
     ///
-    /// Returns [`ClientError::PlatformInit`] until the desktop runtime adapter
-    /// is installed by its owning implementation phase.
+    /// Returns [`ClientError::PlatformInit`] when the native GPUI platform
+    /// cannot be initialized.
     pub fn run(build: fn(&mut gpui::App), options: ClientOptions) -> Result<(), ClientError> {
         let _ = (build, options);
         Err(ClientError::PlatformInit)

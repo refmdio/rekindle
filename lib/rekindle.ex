@@ -2,8 +2,8 @@ defmodule Rekindle do
   @moduledoc """
   Phoenix-native build system and development runtime for GPUI applications.
 
-  The stable public API is introduced by the feature packages that implement
-  the Rekindle build and runtime contracts.
+  Its public APIs expose the build and runtime contracts shared by Phoenix
+  hosts and GPUI clients.
   """
 
   @typedoc "A Rekindle build target."
