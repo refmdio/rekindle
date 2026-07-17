@@ -1,5 +1,5 @@
 defmodule Rekindle.Toolchain.ExecutableTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Rekindle.Toolchain.Executable
 
@@ -202,6 +202,76 @@ defmodule Rekindle.Toolchain.ExecutableTest do
              Executable.ensure_private_directory(Path.join(linked, "child"))
   end
 
+  test "settles every unique launch root, descriptor and port on success and failure" do
+    root = temp_root()
+    executable = script!(root, "tool", "exit 0\n")
+    sleeper = script!(root, "sleeper", "sleep 30\n")
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:ok, authority} = Executable.qualify(executable)
+    assert {:ok, sleep_authority} = Executable.qualify(sleeper)
+
+    roots = launch_roots()
+    ports = MapSet.new(Port.list())
+    descriptors = descriptor_count()
+
+    for iteration <- 1..25 do
+      assert {:ok, {"", 0}} = Executable.run(authority, [])
+      assert roots == launch_roots(), "success roots iteration #{iteration}"
+      assert ports == MapSet.new(Port.list()), "success ports iteration #{iteration}"
+      assert descriptors == descriptor_count(), "success descriptors iteration #{iteration}"
+    end
+
+    assert {:error, :executable_changed} =
+             Executable.run(authority, [],
+               around_spawn: fn _authority, _path, _spawn ->
+                 {:error, :forced}
+               end
+             )
+
+    assert roots == launch_roots()
+    assert ports == MapSet.new(Port.list())
+    assert descriptors == descriptor_count()
+
+    assert {:error, :executable_changed} =
+             Executable.run(authority, [], after_spawn: fn -> {:error, :forced} end)
+
+    assert roots == launch_roots()
+    assert ports == MapSet.new(Port.list())
+    assert descriptors == descriptor_count()
+
+    assert {:error, :executable_timeout} =
+             Executable.run(sleep_authority, [], timeout_ms: 25)
+
+    assert roots == launch_roots()
+    assert ports == MapSet.new(Port.list())
+    assert descriptors == descriptor_count()
+  end
+
+  test "preserves a foreign entry instead of removing a changed launch root" do
+    root = temp_root()
+    executable = script!(root, "tool", "exit 0\n")
+    on_exit(fn -> File.rm_rf!(root) end)
+    assert {:ok, authority} = Executable.qualify(executable)
+    parent = self()
+
+    around_spawn = fn _authority, launch_path, spawn ->
+      sealed_path = launch_path |> File.read_link!() |> String.replace_suffix(" (deleted)", "")
+      launch_root = Path.dirname(sealed_path)
+      foreign = Path.join(launch_root, "foreign")
+      File.write!(foreign, "preserve")
+      send(parent, {:foreign_launch_root, launch_root, foreign})
+      spawn.()
+    end
+
+    assert {:ok, {"", 0}} = Executable.run(authority, [], around_spawn: around_spawn)
+    assert_receive {:foreign_launch_root, launch_root, foreign}
+    assert File.read!(foreign) == "preserve"
+    assert {:ok, %{type: :directory}} = File.lstat(launch_root)
+    assert Bitwise.band(File.stat!(launch_root).mode, 0o777) == 0o700
+    File.rm_rf!(launch_root)
+  end
+
   defp script!(root, name, body) do
     path = Path.join(root, name)
     File.write!(path, "#!/bin/sh\n" <> body)
@@ -222,6 +292,27 @@ defmodule Rekindle.Toolchain.ExecutableTest do
     File.mkdir_p!(path)
     File.chmod!(path, 0o700)
     path
+  end
+
+  defp launch_roots do
+    System.tmp_dir!()
+    |> Path.join(".rekindle-launch-*")
+    |> Path.wildcard()
+    |> MapSet.new()
+  end
+
+  defp descriptor_count do
+    ["/proc/self/fd", "/dev/fd"]
+    |> Enum.find_value(fn path ->
+      case File.ls(path) do
+        {:ok, entries} -> length(entries)
+        _ -> nil
+      end
+    end)
+    |> case do
+      nil -> raise "an observable process descriptor directory is required"
+      count -> count
+    end
   end
 
   defp wait_file(path, timeout) do

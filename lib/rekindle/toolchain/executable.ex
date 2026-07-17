@@ -77,7 +77,7 @@ defmodule Rekindle.Toolchain.Executable do
   end
 
   @spec open(t(), [String.t()], keyword()) ::
-          {:ok, port(), :file.io_device()} | {:error, atom()}
+          {:ok, port(), tuple()} | {:error, atom()}
   def open(%__MODULE__{} = admitted, argv, options \\ []) do
     with :ok <- argv(argv),
          :ok <- invoke_hook(options, :before_spawn, admitted),
@@ -135,7 +135,12 @@ defmodule Rekindle.Toolchain.Executable do
   end
 
   @doc false
-  @spec release(:file.io_device()) :: :ok
+  @spec release(tuple() | :file.io_device()) :: :ok
+  def release({:launch_handle, handle, root, root_identity}) do
+    release(handle)
+    remove_launch_root(root, root_identity)
+  end
+
   def release(handle) do
     :file.close(handle)
     :ok
@@ -247,30 +252,58 @@ defmodule Rekindle.Toolchain.Executable do
   end
 
   defp sealed_copy(source, admitted) do
-    root = Path.join(System.tmp_dir!(), @launch_root_prefix <> System.pid())
+    with {:ok, root, root_identity} <- create_launch_root() do
+      result =
+        try do
+          sealed_copy(source, admitted, root)
+        rescue
+          _ -> {:error, :executable_changed}
+        catch
+          _, _ -> {:error, :executable_changed}
+        end
+
+      case result do
+        {:ok, handle, launch_authority} ->
+          {:ok, {:launch_handle, handle, root, root_identity}, launch_authority}
+
+        {:error, _reason} = error ->
+          remove_launch_root(root, root_identity)
+          error
+      end
+    end
+  end
+
+  defp sealed_copy(source, admitted, root) do
     name = "exec-#{System.unique_integer([:positive, :monotonic])}"
     path = Path.join(root, name)
 
-    with :ok <- ensure_private_directory(root),
-         {:ok, destination} <- :file.open(path, [:write, :binary, :raw, :exclusive]) do
-      result =
+    with {:ok, destination} <- :file.open(path, [:write, :binary, :raw, :exclusive]) do
+      with {:ok, entry_record} <- :file.read_file_info(destination) do
+        entry_identity = entry_record |> File.Stat.from_record() |> node_identity()
+
         try do
-          with :ok <- copy_handle(source, destination, admitted.size),
-               :ok <- :file.sync(destination) do
-            :ok
+          result =
+            try do
+              with :ok <- copy_handle(source, destination, admitted.size),
+                   :ok <- :file.sync(destination) do
+                :ok
+              end
+            after
+              release(destination)
+            end
+
+          with :ok <- result,
+               :ok <- File.chmod(path, 0o500) do
+            open_unlinked_seal(path, admitted)
+          else
+            _ -> {:error, :executable_changed}
           end
         after
-          release(destination)
+          remove_launch_entry(path, entry_identity)
         end
-
-      with :ok <- result,
-           :ok <- File.chmod(path, 0o500) do
-        sealed = open_unlinked_seal(path, admitted)
-        File.rm(path)
-        sealed
       else
         _ ->
-          File.rm(path)
+          release(destination)
           {:error, :executable_changed}
       end
     else
@@ -322,16 +355,18 @@ defmodule Rekindle.Toolchain.Executable do
   end
 
   defp admit_launch_handle(handle, launch_authority) do
-    with {:ok, opened_record} <- :file.read_file_info(handle),
+    io = launch_io(handle)
+
+    with {:ok, opened_record} <- :file.read_file_info(io),
          opened_stat = File.Stat.from_record(opened_record),
          true <- identity(opened_stat) == launch_authority.identity,
          true <- Bitwise.band(opened_stat.mode, 0o777) == launch_authority.mode,
          {:ok, context, size} <-
-           hash_handle(handle, :crypto.hash_init(:sha256), 0, launch_authority.size),
+           hash_handle(io, :crypto.hash_init(:sha256), 0, launch_authority.size),
          true <- size == launch_authority.size,
          digest = :crypto.hash_final(context) |> Base.encode16(case: :lower),
          true <- digest == launch_authority.sha256,
-         {:ok, _position} <- :file.position(handle, 0) do
+         {:ok, _position} <- :file.position(io, 0) do
       :ok
     else
       _ -> {:error, :executable_changed}
@@ -360,7 +395,7 @@ defmodule Rekindle.Toolchain.Executable do
   end
 
   defp launch_path(handle) do
-    with raw when is_binary(raw) <- :prim_file.get_handle(handle),
+    with raw when is_binary(raw) <- :prim_file.get_handle(launch_io(handle)),
          true <- byte_size(raw) in [4, 8],
          descriptor <- :binary.decode_unsigned(raw, :little),
          true <- descriptor >= 0 do
@@ -372,6 +407,73 @@ defmodule Rekindle.Toolchain.Executable do
     else
       _ -> {:error, :executable_changed}
     end
+  end
+
+  defp launch_io({:launch_handle, handle, _root, _identity}), do: handle
+
+  defp create_launch_root(attempts \\ 16)
+
+  defp create_launch_root(attempts) when attempts > 0 do
+    suffix = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+    root = Path.join(System.tmp_dir!(), @launch_root_prefix <> suffix)
+
+    case File.mkdir(root) do
+      :ok ->
+        with :ok <- File.chmod(root, 0o700),
+             {:ok, stat} <- File.lstat(root),
+             true <- stat.type == :directory,
+             true <- Bitwise.band(stat.mode, 0o777) == 0o700 do
+          {:ok, root, directory_identity(stat)}
+        else
+          _ ->
+            File.rmdir(root)
+            {:error, :executable_changed}
+        end
+
+      {:error, :eexist} ->
+        create_launch_root(attempts - 1)
+
+      _ ->
+        {:error, :executable_changed}
+    end
+  end
+
+  defp create_launch_root(0), do: {:error, :executable_changed}
+
+  defp remove_launch_root(root, expected_identity) do
+    with {:ok, stat} <- File.lstat(root),
+         true <- directory_identity(stat) == expected_identity,
+         {:ok, []} <- File.ls(root),
+         :ok <- File.rmdir(root) do
+      :ok
+    else
+      _ -> :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp remove_launch_entry(path, expected_identity) do
+    with {:ok, stat} <- File.lstat(path),
+         true <- node_identity(stat) == expected_identity do
+      File.rm(path)
+    else
+      _ -> :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp directory_identity(stat) do
+    fields = [:inode, :uid, :gid, :major_device, :minor_device, :type, :mode]
+    Map.take(stat, fields)
+  end
+
+  defp node_identity(stat) do
+    fields = [:inode, :uid, :gid, :major_device, :minor_device, :type]
+    Map.take(stat, fields)
   end
 
   defp collect(port, output, discarded, maximum, deadline) do
