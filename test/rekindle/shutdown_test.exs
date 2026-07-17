@@ -4,6 +4,38 @@ defmodule Rekindle.ShutdownTest do
   alias Rekindle.Shutdown
   alias Rekindle.Shutdown.Result
 
+  defmodule RunnerStub do
+    use GenServer
+
+    def start_link(mode), do: GenServer.start_link(__MODULE__, mode)
+
+    @impl true
+    def init(mode), do: {:ok, mode}
+
+    @impl true
+    def handle_call({:begin_shutdown, _caller}, _from, :silent), do: {:noreply, :silent}
+
+    def handle_call({:begin_shutdown, caller}, _from, :reported_failure) do
+      reference = make_ref()
+      send(self(), {:finish, caller, reference})
+      {:reply, {:ok, reference}, :reported_failure}
+    end
+
+    @impl true
+    def handle_info({:finish, caller, reference}, state) do
+      failure =
+        Rekindle.Failure.new!(
+          target: nil,
+          stage: :execution,
+          code: :cleanup_unconfirmed,
+          message: "Runner reported cleanup uncertainty"
+        )
+
+      send(caller, {:rekindle_process_runner_shutdown, reference, {:error, [failure]}})
+      {:noreply, state}
+    end
+  end
+
   test "an idle shutdown stops admission and returns the same clean result" do
     coordinator = start_supervised!({Shutdown, []})
 
@@ -121,6 +153,57 @@ defmodule Rekindle.ShutdownTest do
 
       stop_supervised!(child_id)
     end
+  end
+
+  test "runner initiation is bounded and retains earlier runner results" do
+    reported =
+      start_supervised!(
+        Supervisor.child_spec({RunnerStub, :reported_failure}, id: {:runner_stub, :reported})
+      )
+
+    silent =
+      start_supervised!(Supervisor.child_spec({RunnerStub, :silent}, id: {:runner_stub, :silent}))
+
+    coordinator =
+      start_supervised!({Shutdown, process_runners: [reported, silent], timeout_ms: 100})
+
+    started_at = System.monotonic_time(:millisecond)
+    assert %Result{status: :uncertain, failures: failures} = Shutdown.shutdown(coordinator)
+    assert System.monotonic_time(:millisecond) - started_at < 500
+
+    assert Enum.any?(failures, &(&1.message == "Runner reported cleanup uncertainty"))
+    assert Enum.any?(failures, &(&1.message =~ "initiation timed out"))
+  end
+
+  test "timed-out callback workers share one termination bound" do
+    parent = self()
+    coordinator = start_supervised!({Shutdown, timeout_ms: 100})
+
+    for index <- 1..20 do
+      assert {:ok, _reference} =
+               Shutdown.track(coordinator, :staging,
+                 cleanup: fn ->
+                   send(parent, {:bulk_callback_started, index, self()})
+
+                   receive do
+                     :never -> :ok
+                   end
+                 end
+               )
+    end
+
+    started_at = System.monotonic_time(:millisecond)
+    shutdown = Task.async(fn -> Shutdown.shutdown(coordinator) end)
+
+    workers =
+      Enum.map(1..20, fn _index ->
+        assert_receive {:bulk_callback_started, _received_index, worker}, 500
+        worker
+      end)
+
+    assert %Result{status: :uncertain} = Task.await(shutdown, 500)
+    assert System.monotonic_time(:millisecond) - started_at < 500
+    assert Enum.all?(workers, &(not Process.alive?(&1)))
   end
 
   test "untrack is owner-scoped" do

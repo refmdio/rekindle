@@ -126,10 +126,15 @@ defmodule Rekindle.Shutdown do
           resources,
           [:discovery, :build, :helper, :publish, :generic],
           :cancel,
-          stage_deadline(shutdown_deadline, 5)
+          stage_deadline(shutdown_deadline, 6)
         )
 
-    {runner_waits, runner_failures} = begin_runner_shutdown(state.process_runners)
+    {runner_waits, runner_failures} =
+      begin_runner_shutdown(
+        state.process_runners,
+        stage_deadline(shutdown_deadline, 5)
+      )
+
     failures = failures ++ runner_failures
 
     failures =
@@ -182,34 +187,137 @@ defmodule Rekindle.Shutdown do
     _, _ -> [cleanup_failure("Shutdown event could not be emitted")]
   end
 
-  defp begin_runner_shutdown(runners) do
-    Enum.reduce(runners, {[], []}, fn runner, {waits, failures} ->
-      case ProcessRunner.begin_shutdown(runner) do
-        {:ok, :stopped} -> {waits, failures}
-        {:ok, reference} -> {[reference | waits], failures}
-        _ -> {waits, [cleanup_failure("Process runner shutdown could not start") | failures]}
-      end
-    end)
-  rescue
-    _ -> {[], [cleanup_failure("Process runner shutdown could not start")]}
-  catch
-    _, _ -> {[], [cleanup_failure("Process runner shutdown could not start")]}
+  defp begin_runner_shutdown(runners, runner_deadline) do
+    parent = self()
+
+    pending =
+      Map.new(runners, fn runner ->
+        token = make_ref()
+
+        {pid, monitor} =
+          spawn_monitor(fn ->
+            begin_runner(parent, token, runner)
+          end)
+
+        {token, %{pid: pid, monitor: monitor}}
+      end)
+
+    await_runner_starts(pending, runner_deadline, %{}, [])
   end
 
-  defp await_runners([], _deadline), do: []
+  defp begin_runner(parent, token, runner) do
+    case ProcessRunner.begin_shutdown(runner) do
+      {:ok, :stopped} ->
+        send(parent, {:shutdown_runner_started, token, :stopped})
 
-  defp await_runners(references, deadline) do
+      {:ok, reference} ->
+        send(parent, {:shutdown_runner_started, token, {:waiting, reference}})
+
+        receive do
+          {:rekindle_process_runner_shutdown, ^reference, result} ->
+            send(parent, {:shutdown_runner_finished, token, result})
+        end
+
+      _ ->
+        send(parent, {:shutdown_runner_started, token, :error})
+    end
+  rescue
+    _ -> send(parent, {:shutdown_runner_started, token, :error})
+  catch
+    _, _ -> send(parent, {:shutdown_runner_started, token, :error})
+  end
+
+  defp await_runner_starts(pending, _deadline, waits, failures) when map_size(pending) == 0,
+    do: {waits, Enum.reverse(failures)}
+
+  defp await_runner_starts(pending, runner_deadline, waits, failures) do
+    remaining = max(runner_deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:shutdown_runner_started, token, outcome} ->
+        case Map.pop(pending, token) do
+          {nil, _pending} ->
+            await_runner_starts(pending, runner_deadline, waits, failures)
+
+          {entry, pending} ->
+            case outcome do
+              {:waiting, reference} ->
+                wait = Map.put(entry, :reference, reference)
+
+                await_runner_starts(
+                  pending,
+                  runner_deadline,
+                  Map.put(waits, token, wait),
+                  failures
+                )
+
+              :stopped ->
+                Process.demonitor(entry.monitor, [:flush])
+                await_runner_starts(pending, runner_deadline, waits, failures)
+
+              :error ->
+                Process.demonitor(entry.monitor, [:flush])
+
+                await_runner_starts(pending, runner_deadline, waits, [runner_failure() | failures])
+            end
+        end
+
+      {:DOWN, monitor, :process, _pid, _reason} ->
+        case pop_monitor(pending, monitor) do
+          :error ->
+            await_runner_starts(pending, runner_deadline, waits, failures)
+
+          {:ok, _token, _entry, pending} ->
+            await_runner_starts(pending, runner_deadline, waits, [runner_failure() | failures])
+        end
+    after
+      remaining ->
+        terminate_processes(pending, runner_deadline)
+
+        timeout_failures =
+          Enum.map(pending, fn _entry ->
+            cleanup_failure("Process runner shutdown initiation timed out")
+          end)
+
+        {waits, Enum.reverse(failures) ++ timeout_failures}
+    end
+  end
+
+  defp await_runners(waits, _deadline) when map_size(waits) == 0, do: []
+
+  defp await_runners(waits, deadline) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {:rekindle_process_runner_shutdown, reference, :ok} ->
-        await_runners(List.delete(references, reference), deadline)
+      {:shutdown_runner_finished, token, :ok} ->
+        case Map.pop(waits, token) do
+          {nil, _waits} ->
+            await_runners(waits, deadline)
 
-      {:rekindle_process_runner_shutdown, reference, {:error, failures}}
-      when is_list(failures) ->
-        failures ++ await_runners(List.delete(references, reference), deadline)
+          {%{monitor: monitor}, waits} ->
+            Process.demonitor(monitor, [:flush])
+            await_runners(waits, deadline)
+        end
+
+      {:shutdown_runner_finished, token, {:error, failures}} when is_list(failures) ->
+        case Map.pop(waits, token) do
+          {nil, _waits} ->
+            await_runners(waits, deadline)
+
+          {%{monitor: monitor}, waits} ->
+            Process.demonitor(monitor, [:flush])
+            failures ++ await_runners(waits, deadline)
+        end
+
+      {:DOWN, monitor, :process, _pid, _reason} ->
+        case pop_monitor(waits, monitor) do
+          :error -> await_runners(waits, deadline)
+          {:ok, _token, _entry, waits} -> [runner_failure() | await_runners(waits, deadline)]
+        end
     after
-      remaining -> [cleanup_failure("Process runner shutdown timed out")]
+      remaining ->
+        terminate_processes(waits, deadline)
+        [cleanup_failure("Process runner shutdown timed out")]
     end
   end
 
@@ -279,17 +387,9 @@ defmodule Rekindle.Shutdown do
   end
 
   defp terminate_callbacks(pending, callback) do
+    terminate_processes(pending, System.monotonic_time(:millisecond))
+
     Enum.map(pending, fn {reference, entry} ->
-      Process.exit(entry.pid, :kill)
-      monitor = entry.monitor
-      pid = entry.pid
-
-      receive do
-        {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
-      after
-        100 -> Process.demonitor(monitor, [:flush])
-      end
-
       receive do
         {:shutdown_callback, ^reference, _result} -> :ok
       after
@@ -299,6 +399,42 @@ defmodule Rekindle.Shutdown do
       callback_failure(entry.kind, callback, "timed out")
     end)
   end
+
+  defp terminate_processes(entries, drain_deadline) do
+    Enum.each(entries, fn {_token, entry} -> Process.exit(entry.pid, :kill) end)
+    drain_processes(entries, drain_deadline)
+  end
+
+  defp drain_processes(entries, _deadline) when map_size(entries) == 0, do: :ok
+
+  defp drain_processes(entries, drain_deadline) do
+    remaining = max(drain_deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:DOWN, monitor, :process, _pid, _reason} ->
+        case pop_monitor(entries, monitor) do
+          :error -> drain_processes(entries, drain_deadline)
+          {:ok, _token, _entry, entries} -> drain_processes(entries, drain_deadline)
+        end
+    after
+      remaining ->
+        Enum.each(entries, fn {_token, entry} ->
+          Process.demonitor(entry.monitor, [:flush])
+        end)
+
+        :ok
+    end
+  end
+
+  defp pop_monitor(entries, monitor) do
+    case Enum.find(entries, fn {_token, entry} -> entry.monitor == monitor end) do
+      nil -> :error
+      {token, entry} -> {:ok, token, entry, Map.delete(entries, token)}
+    end
+  end
+
+  defp runner_failure,
+    do: cleanup_failure("Process runner shutdown could not start or complete")
 
   defp callback_failure(kind, callback, reason),
     do: cleanup_failure("Shutdown #{callback} callback for #{kind} #{reason}")
