@@ -31,6 +31,8 @@ defmodule Rekindle.Cargo do
     :helper,
     :pool,
     :authority_owner,
+    :authority_monitor,
+    owner_alive?: true,
     jobs: %{},
     runner_jobs: %{},
     completed: %{},
@@ -79,13 +81,15 @@ defmodule Rekindle.Cargo do
     authority_owner = Keyword.fetch!(options, :authority_owner)
     max_cargo = Keyword.get(options, :max_cargo_builds, 2)
     {:ok, pool} = ResourcePool.new(max_cargo, 1)
+    authority_monitor = Process.monitor(authority_owner)
 
     {:ok,
      %__MODULE__{
        runner: runner,
        helper: helper,
        pool: pool,
-       authority_owner: authority_owner
+       authority_owner: authority_owner,
+       authority_monitor: authority_monitor
      }}
   end
 
@@ -118,17 +122,9 @@ defmodule Rekindle.Cargo do
              scheduler.target,
              identity.input["profile"]
            ),
-         authority = %{
-           token: make_ref(),
-           identity: identity,
-           target: scheduler.target,
-           source_revision: source_revision,
-           build_key: build_key,
-           status: :active
-         },
-         {:ok, state} <- register_authority(state, authority) do
-      {:reply, {:ok, authority.token},
-       %{state | authorities: Map.put(state.authorities, authority.token, authority)}}
+         {:ok, authority_token, state} <-
+           register_authority(state, identity, scheduler.target, source_revision, build_key) do
+      {:reply, {:ok, authority_token}, state}
     else
       {:error, %Failure{} = failure} -> {:reply, {:error, failure}, state}
       _ -> {:reply, failure(:cargo_protocol, nil, "Cargo authority issuer is invalid"), state}
@@ -138,9 +134,16 @@ defmodule Rekindle.Cargo do
   def handle_call({:supersede, authority_token, scheduler}, {caller, _tag}, state) do
     authority = Map.get(state.authorities, authority_token)
 
-    case supersession(caller, authority, scheduler, state) do
+    case supersession(caller, authority_token, authority, scheduler, state) do
       {:ok, target, running_revision, latest_revision} ->
-        state = advance_authority(state, target, running_revision, latest_revision)
+        state =
+          advance_authority(
+            state,
+            authority_token,
+            target,
+            running_revision,
+            latest_revision
+          )
 
         case cancel_obsolete(state, target, running_revision) do
           :ok -> {:reply, :ok, state}
@@ -160,7 +163,8 @@ defmodule Rekindle.Cargo do
          {{job, process_result}, completed} <- Map.pop(state.completed, reference),
          true <- job.authority == authority_token do
       mapped = authoritative_result(job, process_result, state)
-      {:reply, mapped, %{state | completed: completed}}
+      {:ok, pool} = ResourcePool.release_cargo(state.pool, reference)
+      {:reply, mapped, %{state | pool: pool, completed: completed}}
     else
       {nil, _completed} ->
         {:reply, failure(:cargo_protocol, nil, "Cargo result is not ready"), state}
@@ -191,19 +195,53 @@ defmodule Rekindle.Cargo do
 
       {reference, runner_jobs} ->
         {job, jobs} = Map.pop(state.jobs, reference)
-        send(state.authority_owner, {:rekindle_cargo_ready, reference})
-        {:ok, pool} = ResourcePool.release_cargo(state.pool, reference)
 
-        {:noreply,
-         %{
-           state
-           | pool: pool,
-             jobs: jobs,
-             runner_jobs: runner_jobs,
-             completed: Map.put(state.completed, reference, {job, result})
-         }}
+        if state.owner_alive? do
+          send(state.authority_owner, {:rekindle_cargo_ready, reference})
+
+          {:noreply,
+           %{
+             state
+             | jobs: jobs,
+               runner_jobs: runner_jobs,
+               completed: Map.put(state.completed, reference, {job, result})
+           }}
+        else
+          {:ok, pool} = ResourcePool.release_cargo(state.pool, reference)
+
+          {:noreply, %{state | pool: pool, jobs: jobs, runner_jobs: runner_jobs}}
+        end
     end
   end
+
+  def handle_info(
+        {:DOWN, monitor, :process, owner, _reason},
+        %{authority_monitor: monitor, authority_owner: owner} = state
+      ) do
+    Enum.each(state.jobs, fn {_reference, job} ->
+      _ = ProcessRunner.cancel(state.runner, job.runner_reference, :caller)
+    end)
+
+    pool =
+      Enum.reduce(state.completed, state.pool, fn {reference, _result}, pool ->
+        {:ok, pool} = ResourcePool.release_cargo(pool, reference)
+        pool
+      end)
+
+    {:noreply,
+     %{
+       state
+       | pool: pool,
+         owner_alive?: false,
+         completed: %{},
+         latest_revisions: %{},
+         identities: %{},
+         authorities: %{},
+         supersessions: []
+     }}
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
 
   defp admit(operation, caller, options, state)
        when operation in [:metadata, :build] and is_list(options) do
@@ -310,45 +348,72 @@ defmodule Rekindle.Cargo do
     end
   end
 
-  defp register_authority(state, authority) do
-    latest = Map.get(state.latest_revisions, authority.target, 0)
-    key = {authority.target, authority.source_revision}
+  defp register_authority(state, identity, target, source_revision, build_key) do
+    latest = Map.get(state.latest_revisions, target, 0)
+    key = {target, source_revision}
 
     cond do
-      authority.source_revision < latest ->
-        failure(:cancelled, authority.target, "Cargo source revision is obsolete")
+      source_revision < latest ->
+        failure(:cancelled, target, "Cargo source revision is obsolete")
 
-      Map.has_key?(state.identities, key) and state.identities[key] != authority.identity ->
+      Map.has_key?(state.identities, key) and state.identities[key] != identity ->
         failure(
           :cargo_protocol,
-          authority.target,
+          target,
           "Cargo build identity changed within a source revision"
         )
 
       true ->
-        {:ok,
-         %{
-           state
-           | latest_revisions:
-               Map.put(state.latest_revisions, authority.target, authority.source_revision),
-             identities: Map.put(state.identities, key, authority.identity)
-         }}
+        case current_authority(state, target, source_revision, identity) do
+          {token, _authority} ->
+            {:ok, token, state}
+
+          nil ->
+            token = make_ref()
+
+            authority = %{
+              token: token,
+              identity: identity,
+              target: target,
+              source_revision: source_revision,
+              build_key: build_key,
+              status: :active
+            }
+
+            {:ok, token,
+             %{
+               state
+               | latest_revisions: Map.put(state.latest_revisions, target, source_revision),
+                 identities:
+                   state.identities
+                   |> reject_target(target)
+                   |> Map.put(key, identity),
+                 authorities:
+                   state.authorities
+                   |> reject_target(target)
+                   |> Map.put(token, authority)
+             }}
+        end
     end
   end
 
-  defp supersession(caller, authority, %Scheduler{} = scheduler, state) do
+  defp current_authority(state, target, source_revision, identity) do
+    Enum.find(state.authorities, fn {_token, authority} ->
+      authority.target == target and authority.source_revision == source_revision and
+        authority.identity == identity and authority.status == :active
+    end)
+  end
+
+  defp supersession(caller, authority_token, authority, %Scheduler{} = scheduler, state) do
     current = Map.get(state.latest_revisions, scheduler.target, 0)
-    key = {scheduler.target, scheduler.running_revision, scheduler.latest_source_revision}
+
+    key =
+      {authority_token, scheduler.target, scheduler.running_revision,
+       scheduler.latest_source_revision}
 
     cond do
       caller != state.authority_owner ->
         failure(:cargo_protocol, scheduler.target, "Cargo supersession owner is invalid")
-
-      not is_map(authority) or authority.target != scheduler.target ->
-        failure(:cargo_protocol, scheduler.target, "Cargo supersession authority is invalid")
-
-      authority.source_revision != scheduler.running_revision ->
-        failure(:cargo_protocol, scheduler.target, "Cargo supersession authority is invalid")
 
       scheduler.state not in [:building, :validating] ->
         failure(:cargo_protocol, scheduler.target, "Cargo supersession state is invalid")
@@ -365,17 +430,24 @@ defmodule Rekindle.Cargo do
       scheduler.queued_revision != scheduler.latest_source_revision ->
         failure(:cargo_protocol, scheduler.target, "Cargo queued revision is invalid")
 
+      key in state.supersessions ->
+        {:already, scheduler.latest_source_revision}
+
+      not is_map(authority) or authority.target != scheduler.target ->
+        failure(:cargo_protocol, scheduler.target, "Cargo supersession authority is invalid")
+
+      authority.source_revision != scheduler.running_revision ->
+        failure(:cargo_protocol, scheduler.target, "Cargo supersession authority is invalid")
+
       scheduler.running_revision != current ->
-        if key in state.supersessions,
-          do: {:already, scheduler.latest_source_revision},
-          else: failure(:cargo_protocol, scheduler.target, "Cargo running revision is not owned")
+        failure(:cargo_protocol, scheduler.target, "Cargo running revision is not owned")
 
       true ->
         {:ok, scheduler.target, scheduler.running_revision, scheduler.latest_source_revision}
     end
   end
 
-  defp advance_authority(state, target, running_revision, latest_revision) do
+  defp advance_authority(state, authority_token, target, running_revision, latest_revision) do
     identities =
       state.identities
       |> Enum.reject(fn {{identity_target, revision}, _identity} ->
@@ -384,10 +456,8 @@ defmodule Rekindle.Cargo do
       |> Map.new()
 
     authorities =
-      Map.new(state.authorities, fn {token, authority} ->
-        if authority.target == target and authority.source_revision <= running_revision,
-          do: {token, %{authority | status: :revoked}},
-          else: {token, authority}
+      Map.reject(state.authorities, fn {_token, authority} ->
+        authority.target == target and authority.source_revision <= running_revision
       end)
 
     %{
@@ -396,8 +466,19 @@ defmodule Rekindle.Cargo do
         identities: identities,
         authorities: authorities,
         supersessions:
-          [{target, running_revision, latest_revision} | state.supersessions] |> Enum.take(16)
+          [
+            {authority_token, target, running_revision, latest_revision}
+            | state.supersessions
+          ]
+          |> Enum.take(16)
     }
+  end
+
+  defp reject_target(entries, target) do
+    Map.reject(entries, fn
+      {{entry_target, _revision}, _value} -> entry_target == target
+      {_token, %{target: entry_target}} -> entry_target == target
+    end)
   end
 
   defp cancel_obsolete(state, target, running_revision) do

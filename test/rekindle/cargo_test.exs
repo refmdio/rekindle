@@ -78,6 +78,7 @@ defmodule Rekindle.CargoTest do
       root: root,
       client: client,
       target_directory: target_directory,
+      runner: runner,
       cargo: cargo,
       web_identity: web_identity,
       web_scheduler: web_scheduler,
@@ -148,6 +149,101 @@ defmodule Rekindle.CargoTest do
     send(worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""})
     assert_receive {:rekindle_cargo_ready, ^reference}
     assert {:ok, _metadata} = Cargo.result(context.cargo, reference, options[:authority])
+  end
+
+  test "completed results retain exactly the configured execution capacity", context do
+    first_options = base_options(context)
+    second_directory = Path.join(context.root, "target-second")
+    third_directory = Path.join(context.root, "target-third")
+    File.mkdir_p!(second_directory)
+    File.mkdir_p!(third_directory)
+
+    second_options = Keyword.put(first_options, :target_directory, second_directory)
+    third_options = Keyword.put(first_options, :target_directory, third_directory)
+
+    assert {:ok, first_reference} = Cargo.metadata(context.cargo, first_options)
+    assert_receive {:cargo_spawn, first_worker, _spawn, _state}
+    assert {:ok, second_reference} = Cargo.metadata(context.cargo, second_options)
+    assert_receive {:cargo_spawn, second_worker, _spawn, _state}
+
+    send(
+      first_worker,
+      {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""}
+    )
+
+    send(
+      second_worker,
+      {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""}
+    )
+
+    assert_receive {:rekindle_cargo_ready, ^first_reference}
+    assert_receive {:rekindle_cargo_ready, ^second_reference}
+    assert {:busy, :capacity} = Cargo.metadata(context.cargo, third_options)
+
+    for attempt <- 1..64 do
+      directory = Path.join(context.root, "target-blocked-#{attempt}")
+      File.mkdir_p!(directory)
+
+      assert {:busy, :capacity} =
+               Cargo.metadata(
+                 context.cargo,
+                 Keyword.put(first_options, :target_directory, directory)
+               )
+    end
+
+    state = :sys.get_state(context.cargo)
+    assert map_size(state.completed) == 2
+    assert map_size(state.pool.cargo) == 2
+
+    assert {:ok, _metadata} =
+             Cargo.result(context.cargo, first_reference, context.web_authority)
+
+    assert {:ok, third_reference} = Cargo.metadata(context.cargo, third_options)
+    assert_receive {:cargo_spawn, third_worker, _spawn, _state}
+
+    send(
+      third_worker,
+      {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""}
+    )
+
+    assert_receive {:rekindle_cargo_ready, ^third_reference}
+    state = :sys.get_state(context.cargo)
+    assert map_size(state.completed) == 2
+    assert map_size(state.pool.cargo) == 2
+  end
+
+  test "consumed jobs and successive revisions keep lifecycle state bounded", context do
+    first_authority = context.web_authority
+
+    latest_authority =
+      Enum.reduce(1..64, first_authority, fn revision, _previous_authority ->
+        scheduler = scheduler(:web, revision)
+        identity = identity(:web, "revision-#{revision}")
+        assert {:ok, authority} = Cargo.authorize(context.cargo, identity, scheduler)
+
+        options = Keyword.put(base_options(context), :authority, authority)
+        assert {:ok, reference} = Cargo.metadata(context.cargo, options)
+        assert_receive {:cargo_spawn, worker, _spawn, _state}
+
+        send(worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""})
+        assert_receive {:rekindle_cargo_ready, ^reference}
+        assert {:ok, _metadata} = Cargo.result(context.cargo, reference, authority)
+        authority
+      end)
+
+    state = :sys.get_state(context.cargo)
+    assert state.completed == %{}
+    assert state.pool.cargo == %{}
+    assert map_size(state.latest_revisions) == 1
+    assert map_size(state.identities) == 1
+    assert map_size(state.authorities) == 1
+    assert Map.has_key?(state.authorities, latest_authority)
+
+    assert {:error, %{code: :cargo_protocol}} =
+             Cargo.metadata(
+               context.cargo,
+               Keyword.put(base_options(context), :authority, first_authority)
+             )
   end
 
   test "toolchain paths are qualified before a runner job exists", context do
@@ -342,6 +438,92 @@ defmodule Rekindle.CargoTest do
              Cargo.result(context.cargo, current_reference, current_authority)
   end
 
+  test "supersession replay evidence has a fixed bound and rejects retired tokens", context do
+    failure =
+      Failure.new!(
+        target: :web,
+        stage: elem(Failure.stage_for(:cancelled), 1),
+        code: :cancelled,
+        message: "superseded"
+      )
+
+    {_scheduler, first, latest} =
+      Enum.reduce(1..24, {context.web_scheduler, nil, nil}, fn revision,
+                                                               {scheduler, first, _latest} ->
+        identity = identity(:web, "revision-#{revision}")
+        assert {:ok, authority} = Cargo.authorize(context.cargo, identity, scheduler)
+
+        assert {:ok, changed, [{:cancel, ^revision}]} =
+                 Scheduler.change(scheduler, [:cargo_web], revision)
+
+        assert :ok = Cargo.supersede(context.cargo, authority, changed)
+        assert :ok = Cargo.supersede(context.cargo, authority, changed)
+        assert {:ok, queued, _effects} = Scheduler.fail(changed, revision, failure, revision)
+
+        next_revision = revision + 1
+
+        assert {:ok, current, {:start, ^next_revision, [:cargo_web]}} =
+                 Scheduler.ready(queued, revision)
+
+        {current, first || {authority, changed}, {authority, changed}}
+      end)
+
+    {first_authority, first_scheduler} = first
+    {latest_authority, latest_scheduler} = latest
+    state = :sys.get_state(context.cargo)
+    assert length(state.supersessions) == 16
+    assert map_size(state.authorities) == 0
+    assert map_size(state.identities) == 0
+
+    assert {:error, %{code: :cargo_protocol}} =
+             Cargo.supersede(context.cargo, first_authority, first_scheduler)
+
+    assert :ok = Cargo.supersede(context.cargo, latest_authority, latest_scheduler)
+  end
+
+  test "owner death cancels running jobs and releases their retained state", context do
+    {owner, cargo, authority} = owned_cargo(context)
+    options = Keyword.put(base_options(context), :authority, authority)
+
+    assert {:ok, reference} = owner_call(owner, fn -> Cargo.metadata(cargo, options) end)
+    assert_receive {:cargo_spawn, worker, _spawn, _state}
+    Process.exit(owner, :kill)
+    assert_receive {:cargo_cancel, ^worker, %{"reason" => "caller"}}
+
+    send(
+      worker,
+      {:finish_cancel, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""}
+    )
+
+    state = await_state(cargo, &(&1.jobs == %{} and &1.pool.cargo == %{}))
+    refute state.owner_alive?
+    assert state.completed == %{}
+    assert state.authorities == %{}
+    assert state.identities == %{}
+    refute_receive {:owner_message, {:rekindle_cargo_ready, ^reference}}
+  end
+
+  test "owner death discards completed output and releases its capacity", context do
+    {owner, cargo, authority} = owned_cargo(context)
+    options = Keyword.put(base_options(context), :authority, authority)
+
+    assert {:ok, reference} = owner_call(owner, fn -> Cargo.metadata(cargo, options) end)
+    assert_receive {:cargo_spawn, worker, _spawn, _state}
+    send(worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""})
+    assert_receive {:owner_message, {:rekindle_cargo_ready, ^reference}}
+
+    state = await_state(cargo, &(map_size(&1.completed) == 1))
+    assert map_size(state.pool.cargo) == 1
+
+    Process.exit(owner, :kill)
+    state = await_state(cargo, &(!&1.owner_alive?))
+    assert state.completed == %{}
+    assert state.pool.cargo == %{}
+    assert state.latest_revisions == %{}
+    assert state.authorities == %{}
+    assert state.identities == %{}
+  end
+
   test "desktop uses the same facade and selects only compiler-artifact executable", context do
     config = desktop_config()
 
@@ -498,12 +680,76 @@ defmodule Rekindle.CargoTest do
     identity
   end
 
-  defp scheduler(target) do
+  defp scheduler(target), do: scheduler(target, 1)
+
+  defp scheduler(target, revision) when is_integer(revision) and revision > 0 do
     node = if target == :web, do: :cargo_web, else: :cargo_desktop
     assert {:ok, scheduler} = Scheduler.new(target, 0)
     assert {:ok, scheduler, []} = Scheduler.change(scheduler, [node], 0)
     assert {:ok, scheduler, {:start, 1, [^node]}} = Scheduler.ready(scheduler, 0)
-    scheduler
+    %{scheduler | latest_source_revision: revision, running_revision: revision}
+  end
+
+  defp owned_cargo(context) do
+    test = self()
+    owner = spawn(fn -> owner_loop(test) end)
+
+    {:ok, cargo} =
+      Cargo.start_link(
+        runner: context.runner,
+        helper: "/tmp/rekindle_toolchain",
+        authority_owner: owner,
+        max_cargo_builds: 2
+      )
+
+    on_exit(fn ->
+      if Process.alive?(owner), do: Process.exit(owner, :kill)
+      if Process.alive?(cargo), do: GenServer.stop(cargo)
+    end)
+
+    authority =
+      owner_call(owner, fn ->
+        Cargo.authorize(cargo, context.web_identity, context.web_scheduler)
+      end)
+
+    assert {:ok, authority} = authority
+    {owner, cargo, authority}
+  end
+
+  defp owner_loop(test) do
+    receive do
+      {:call, caller, reference, callback} ->
+        send(caller, {reference, callback.()})
+        owner_loop(test)
+
+      message ->
+        send(test, {:owner_message, message})
+        owner_loop(test)
+    end
+  end
+
+  defp owner_call(owner, callback) do
+    reference = make_ref()
+    send(owner, {:call, self(), reference, callback})
+    assert_receive {^reference, result}
+    result
+  end
+
+  defp await_state(server, predicate, attempts \\ 100)
+
+  defp await_state(server, predicate, attempts) when attempts > 0 do
+    state = :sys.get_state(server)
+
+    if predicate.(state) do
+      state
+    else
+      Process.sleep(10)
+      await_state(server, predicate, attempts - 1)
+    end
+  end
+
+  defp await_state(server, _predicate, 0) do
+    flunk("Cargo state did not settle: #{inspect(:sys.get_state(server))}")
   end
 
   defp portable_package do
