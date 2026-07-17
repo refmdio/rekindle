@@ -413,14 +413,25 @@ defmodule Rekindle.ArtifactStore do
   defp ensure_project_id(root) do
     path = Path.join(root, "project-id")
 
-    case File.read(path) do
-      {:ok, value} ->
-        if id?(value),
-          do: qualify_private_file(path),
-          else: {:error, invalid(:configuration, :path_invalid, "Project identity is invalid")}
-
+    case File.lstat(path) do
       {:error, :enoent} ->
         Filesystem.atomic_write(path, Filesystem.random_id(), :project_id)
+
+      {:ok, _stat} ->
+        with :ok <- qualify_private_file(path),
+             {:ok, value} <- File.read(path),
+             true <- id?(value) do
+          :ok
+        else
+          {:error, %Failure{} = failure} ->
+            {:error, failure}
+
+          {:error, _reason} ->
+            {:error, invalid(:execution, :io_failed, "Project identity could not be read")}
+
+          _ ->
+            {:error, invalid(:configuration, :path_invalid, "Project identity is invalid")}
+        end
 
       {:error, _reason} ->
         {:error, invalid(:execution, :io_failed, "Project identity could not be read")}
@@ -1794,11 +1805,20 @@ defmodule Rekindle.ArtifactStore do
   defp validate_state_temporary_record(_root, _entry, _record), do: :error
 
   defp validate_project_identity_destination(root, entry, project_id) do
-    case File.read(entry.destination_path) do
-      {:ok, ^project_id} -> qualify_private_file(entry.destination_path)
-      {:ok, _different} -> :error
-      {:error, :enoent} -> validate_first_start_project_identity(root, entry)
-      _ -> :error
+    case File.lstat(entry.destination_path) do
+      {:error, :enoent} ->
+        validate_first_start_project_identity(root, entry)
+
+      {:ok, _stat} ->
+        with :ok <- qualify_private_file(entry.destination_path),
+             {:ok, ^project_id} <- File.read(entry.destination_path) do
+          :ok
+        else
+          _ -> :error
+        end
+
+      _present_or_ambiguous ->
+        :error
     end
   end
 
@@ -2986,9 +3006,14 @@ defmodule Rekindle.ArtifactStore do
   end
 
   defp read_canonical(path) do
-    case File.read(path) do
-      {:ok, bytes} when byte_size(bytes) <= @manifest_limit ->
-        with {:ok, value} <- Jason.decode(bytes),
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        :none
+
+      {:ok, _stat} ->
+        with :ok <- qualify_private_file(path),
+             {:ok, bytes} when byte_size(bytes) <= @manifest_limit <- File.read(path),
+             {:ok, value} <- Jason.decode(bytes),
              true <- is_map(value),
              true <- CanonicalValue.encode!(value) == bytes do
           {:ok, value}
@@ -2996,13 +3021,7 @@ defmodule Rekindle.ArtifactStore do
           _ -> invalid_record()
         end
 
-      {:ok, _bytes} ->
-        invalid_record()
-
-      {:error, :enoent} ->
-        :none
-
-      {:error, _reason} ->
+      _present_or_ambiguous ->
         invalid_record()
     end
   rescue

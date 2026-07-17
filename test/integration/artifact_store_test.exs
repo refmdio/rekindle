@@ -515,6 +515,32 @@ defmodule Rekindle.ArtifactStoreTest do
     end
   end
 
+  test "rejects untrusted persistent record nodes without consuming them" do
+    cases = [
+      pointer: :symlink,
+      reference: :hard_link,
+      seal: :unsafe_mode,
+      activation: :directory,
+      deletion: :fifo,
+      attempt: :symlink
+    ]
+
+    for {kind, mutation} <- cases do
+      root = state_root()
+      path = persistent_record_fixture(root, kind)
+      external = substitute_private_record(root, path, mutation)
+      node_before = private_node_state(path)
+      external_before = if external, do: File.read!(external)
+
+      {:ok, recovered} = start_store(root)
+      assert private_node_state(path) == node_before
+      if external, do: assert(File.read!(external) == external_before)
+      assert File.regular?(Path.join(root, "quarantine-v1.json"))
+      assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
   test "pointer corruption stops every artifact mutation before disk state changes" do
     for operation <- [:allocate, :seal, :activate, :collect],
         kind <- [:current, :fallback],
@@ -1931,6 +1957,110 @@ defmodule Rekindle.ArtifactStoreTest do
     path = Path.join([root, Atom.to_string(kind), "web.json"])
     unless File.exists?(path), do: File.write!(path, "{}")
     File.chmod!(path, 0o000)
+  end
+
+  defp persistent_record_fixture(root, kind) when kind in [:pointer, :reference, :seal] do
+    {:ok, store} = start_store(root)
+    [generation] = sealed_web_generations(store, ["private-#{kind}"])
+    assert :ok = ArtifactStore.activate(store, generation, 1)
+    :ok = GenServer.stop(store)
+
+    case kind do
+      :pointer -> Path.join(root, "current/web.json")
+      :reference -> Path.join(root, "references/web/#{generation.generation_id}.json")
+      :seal -> Path.join(root, "seals/web/#{generation.artifact_id}.json")
+    end
+  end
+
+  defp persistent_record_fixture(root, :attempt) do
+    {:ok, store} = start_store(root)
+    {:ok, staging} = ArtifactStore.allocate(store, :web)
+    :ok = GenServer.stop(store)
+    Path.join([root, "staging", staging.attempt_id, "attempt-v1.json"])
+  end
+
+  defp persistent_record_fixture(root, :activation) do
+    {:ok, store} = start_store(root)
+    [first, second] = sealed_web_generations(store, ["activation-old", "activation-new"])
+    assert :ok = ArtifactStore.activate(store, first, 1)
+    :ok = GenServer.stop(store)
+
+    journal = %{
+      "v" => 1,
+      "target" => "web",
+      "old_current" => read_json(Path.join(root, "current/web.json")),
+      "old_fallback" => nil,
+      "new_current" => pointer_record(second, 2)
+    }
+
+    path = Path.join(root, "activations/web.json")
+    File.write!(path, Rekindle.CanonicalValue.encode!(journal))
+    File.chmod!(path, 0o600)
+    path
+  end
+
+  defp persistent_record_fixture(root, :deletion) do
+    {:ok, store} = start_store(root)
+    [generation] = sealed_web_generations(store, ["pending-deletion"])
+    :ok = GenServer.stop(store)
+
+    journal = %{
+      "v" => 1,
+      "target" => "web",
+      "generation_id" => generation.generation_id,
+      "artifact_id" => generation.artifact_id
+    }
+
+    path = Path.join(root, "deletions/#{generation.generation_id}.json")
+    File.write!(path, Rekindle.CanonicalValue.encode!(journal))
+    File.chmod!(path, 0o600)
+    path
+  end
+
+  defp substitute_private_record(root, path, mutation) do
+    external =
+      Path.join(
+        Path.dirname(root),
+        "external-#{Path.basename(path)}-#{Filesystem.random_id()}"
+      )
+
+    case mutation do
+      :symlink ->
+        File.rename!(path, external)
+        :ok = File.ln_s(external, path)
+        external
+
+      :hard_link ->
+        File.rename!(path, external)
+        :ok = File.ln(external, path)
+        external
+
+      :unsafe_mode ->
+        File.chmod!(path, 0o644)
+        nil
+
+      :directory ->
+        File.rename!(path, external)
+        File.mkdir!(path)
+        File.chmod!(path, 0o700)
+        external
+
+      :fifo ->
+        File.rename!(path, external)
+        {_, 0} = System.cmd("mkfifo", [path])
+        external
+    end
+  end
+
+  defp private_node_state(path) do
+    {:ok, stat} = File.lstat(path)
+
+    case stat.type do
+      :regular -> {:regular, stat.mode &&& 0o777, stat.links, File.read!(path)}
+      :symlink -> {:symlink, File.read_link!(path)}
+      :directory -> {:directory, stat.mode &&& 0o777, File.ls!(path)}
+      type -> {type, stat.mode &&& 0o777, stat.size}
+    end
   end
 
   defp assert_generation_preserved(root, generation) do
