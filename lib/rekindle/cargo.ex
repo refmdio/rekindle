@@ -30,10 +30,13 @@ defmodule Rekindle.Cargo do
     :runner,
     :helper,
     :pool,
+    :authority_owner,
     jobs: %{},
     runner_jobs: %{},
+    completed: %{},
     latest_revisions: %{},
     identities: %{},
+    authorities: %{},
     supersessions: []
   ]
 
@@ -54,23 +57,41 @@ defmodule Rekindle.Cargo do
   def cancel(server, reference, reason),
     do: GenServer.call(server, {:cancel, self(), reference, reason})
 
-  @spec supersede(GenServer.server(), Scheduler.t()) :: :ok | {:error, Failure.t()}
-  def supersede(server, %Scheduler{} = scheduler),
-    do: GenServer.call(server, {:supersede, scheduler})
+  @spec authorize(GenServer.server(), %Identity.NodeKey{}, Scheduler.t()) ::
+          {:ok, reference()} | {:error, Failure.t()}
+  def authorize(server, %Identity.NodeKey{} = identity, %Scheduler{} = scheduler),
+    do: GenServer.call(server, {:authorize, self(), identity, scheduler})
+
+  @spec supersede(GenServer.server(), reference(), Scheduler.t()) ::
+          :ok | {:error, Failure.t()}
+  def supersede(server, authority, %Scheduler{} = scheduler),
+    do: GenServer.call(server, {:supersede, self(), authority, scheduler})
+
+  @spec result(GenServer.server(), reference(), reference()) ::
+          {:ok, %MetadataResult{} | %BuildResult{}} | {:error, Failure.t()}
+  def result(server, reference, authority),
+    do: GenServer.call(server, {:result, self(), reference, authority})
 
   @impl true
   def init(options) do
     runner = Keyword.fetch!(options, :runner)
     helper = Keyword.fetch!(options, :helper)
+    authority_owner = Keyword.fetch!(options, :authority_owner)
     max_cargo = Keyword.get(options, :max_cargo_builds, 2)
     {:ok, pool} = ResourcePool.new(max_cargo, 1)
-    {:ok, %__MODULE__{runner: runner, helper: helper, pool: pool}}
+
+    {:ok,
+     %__MODULE__{
+       runner: runner,
+       helper: helper,
+       pool: pool,
+       authority_owner: authority_owner
+     }}
   end
 
   @impl true
   def handle_call({:start, caller, operation, options}, _from, state) do
-    with {:ok, job} <- admit(operation, caller, options, state.helper),
-         {:ok, state} <- register_authority(state, job),
+    with {:ok, job} <- admit(operation, caller, options, state),
          {:ok, pool} <- ResourcePool.acquire_cargo(state.pool, job.reference, job.cache_key),
          {:ok, runner_reference} <- ProcessRunner.run(state.runner, runner_request(job)) do
       job = %{job | runner_reference: runner_reference}
@@ -88,8 +109,36 @@ defmodule Rekindle.Cargo do
     end
   end
 
-  def handle_call({:supersede, scheduler}, _from, state) do
-    case supersession(scheduler, state) do
+  def handle_call({:authorize, caller, identity, scheduler}, _from, state) do
+    with true <- caller == state.authority_owner,
+         {:ok, build_key, source_revision} <-
+           execution_authority(
+             identity,
+             scheduler,
+             scheduler.target,
+             identity.input["profile"]
+           ),
+         authority = %{
+           token: make_ref(),
+           identity: identity,
+           target: scheduler.target,
+           source_revision: source_revision,
+           build_key: build_key,
+           status: :active
+         },
+         {:ok, state} <- register_authority(state, authority) do
+      {:reply, {:ok, authority.token},
+       %{state | authorities: Map.put(state.authorities, authority.token, authority)}}
+    else
+      {:error, %Failure{} = failure} -> {:reply, {:error, failure}, state}
+      _ -> {:reply, failure(:cargo_protocol, nil, "Cargo authority issuer is invalid"), state}
+    end
+  end
+
+  def handle_call({:supersede, caller, authority_token, scheduler}, _from, state) do
+    authority = Map.get(state.authorities, authority_token)
+
+    case supersession(caller, authority, scheduler, state) do
       {:ok, target, running_revision, latest_revision} ->
         state = advance_authority(state, target, running_revision, latest_revision)
 
@@ -103,6 +152,21 @@ defmodule Rekindle.Cargo do
 
       {:error, %Failure{} = failure} ->
         {:reply, {:error, failure}, state}
+    end
+  end
+
+  def handle_call({:result, caller, reference, authority_token}, _from, state) do
+    with true <- caller == state.authority_owner,
+         {{job, process_result}, completed} <- Map.pop(state.completed, reference),
+         true <- job.authority == authority_token do
+      mapped = authoritative_result(job, process_result, state)
+      {:reply, mapped, %{state | completed: completed}}
+    else
+      {nil, _completed} ->
+        {:reply, failure(:cargo_protocol, nil, "Cargo result is not ready"), state}
+
+      _ ->
+        {:reply, failure(:cargo_protocol, nil, "Cargo result authority is invalid"), state}
     end
   end
 
@@ -124,30 +188,36 @@ defmodule Rekindle.Cargo do
 
       {reference, runner_jobs} ->
         {job, jobs} = Map.pop(state.jobs, reference)
-        mapped = authoritative_result(job, result, state)
-        send(job.caller, {:rekindle_cargo, reference, mapped})
+        send(state.authority_owner, {:rekindle_cargo_ready, reference})
         {:ok, pool} = ResourcePool.release_cargo(state.pool, reference)
-        {:noreply, %{state | pool: pool, jobs: jobs, runner_jobs: runner_jobs}}
+
+        {:noreply,
+         %{
+           state
+           | pool: pool,
+             jobs: jobs,
+             runner_jobs: runner_jobs,
+             completed: Map.put(state.completed, reference, {job, result})
+         }}
     end
   end
 
-  defp admit(operation, caller, options, helper)
+  defp admit(operation, caller, options, state)
        when operation in [:metadata, :build] and is_list(options) do
     target = Keyword.get(options, :target)
     config = Keyword.get(options, :config)
     client_root = Keyword.get(options, :client_root)
     mode = Keyword.get(options, :mode, :dev)
     rust_target = Keyword.get(options, :rust_target)
-    identity = Keyword.get(options, :identity)
-    scheduler = Keyword.get(options, :scheduler)
+    authority_token = Keyword.get(options, :authority)
     target_directory = Keyword.get(options, :target_directory)
 
     with true <- target in [:web, :desktop],
          true <- normalized_absolute?(target_directory),
          {:ok, request} <-
            apply(Arguments, operation, [client_root, target, config, mode, rust_target]),
-         {:ok, build_key, source_revision} <-
-           execution_authority(identity, scheduler, target, request.selection.profile),
+         {:ok, authority} <-
+           active_authority(state, authority_token, target, request.selection.profile),
          {:ok, executable, argv} <- command(config, request.argv, target),
          :ok <- Executable.revalidate(executable),
          {:ok, environment} <- environment(config.environment, target_directory),
@@ -161,14 +231,14 @@ defmodule Rekindle.Cargo do
          target: target,
          request: request,
          config: config,
-         identity: identity,
-         source_revision: source_revision,
-         build_key: build_key,
+         authority: authority_token,
+         source_revision: authority.source_revision,
+         build_key: authority.build_key,
          cache_key: cache_key(target_directory),
          target_directory: target_directory,
          project_root: Keyword.get(options, :project_root),
          inventory: Keyword.get(options, :inventory),
-         helper: helper,
+         helper: state.helper,
          executable: executable.path,
          argv: argv,
          environment: environment,
@@ -180,7 +250,7 @@ defmodule Rekindle.Cargo do
     end
   end
 
-  defp admit(_operation, _caller, _options, _helper),
+  defp admit(_operation, _caller, _options, _state),
     do: failure(:cargo_protocol, nil, "Canonical Cargo request is invalid")
 
   defp execution_authority(
@@ -188,7 +258,8 @@ defmodule Rekindle.Cargo do
          %Scheduler{} = scheduler,
          target,
          profile
-       ) do
+       )
+       when target in [:web, :desktop] and is_binary(profile) do
     node = cargo_node(target)
 
     with {:ok, digest} <- Identity.digest("rekindle-node-v1\0", identity.input),
@@ -215,18 +286,39 @@ defmodule Rekindle.Cargo do
   defp execution_authority(_identity, _scheduler, target, _profile),
     do: failure(:cargo_protocol, target, "Cargo execution authority is invalid")
 
-  defp register_authority(state, job) do
-    latest = Map.get(state.latest_revisions, job.target, 0)
-    key = {job.target, job.source_revision}
+  defp active_authority(state, token, target, profile) do
+    case Map.get(state.authorities, token) do
+      %{
+        status: :active,
+        target: ^target,
+        source_revision: revision,
+        identity: %Identity.NodeKey{} = identity
+      } = authority
+      when revision > 0 ->
+        if Map.get(state.latest_revisions, target) == revision and
+             identity.input["profile"] == profile do
+          {:ok, authority}
+        else
+          failure(:cancelled, target, "Cargo execution authority is obsolete")
+        end
+
+      _ ->
+        failure(:cargo_protocol, target, "Cargo execution authority is invalid")
+    end
+  end
+
+  defp register_authority(state, authority) do
+    latest = Map.get(state.latest_revisions, authority.target, 0)
+    key = {authority.target, authority.source_revision}
 
     cond do
-      job.source_revision < latest ->
-        failure(:cancelled, job.target, "Cargo source revision is obsolete")
+      authority.source_revision < latest ->
+        failure(:cancelled, authority.target, "Cargo source revision is obsolete")
 
-      Map.has_key?(state.identities, key) and state.identities[key] != job.identity ->
+      Map.has_key?(state.identities, key) and state.identities[key] != authority.identity ->
         failure(
           :cargo_protocol,
-          job.target,
+          authority.target,
           "Cargo build identity changed within a source revision"
         )
 
@@ -234,17 +326,27 @@ defmodule Rekindle.Cargo do
         {:ok,
          %{
            state
-           | latest_revisions: Map.put(state.latest_revisions, job.target, job.source_revision),
-             identities: Map.put(state.identities, key, job.identity)
+           | latest_revisions:
+               Map.put(state.latest_revisions, authority.target, authority.source_revision),
+             identities: Map.put(state.identities, key, authority.identity)
          }}
     end
   end
 
-  defp supersession(%Scheduler{} = scheduler, state) do
+  defp supersession(caller, authority, %Scheduler{} = scheduler, state) do
     current = Map.get(state.latest_revisions, scheduler.target, 0)
     key = {scheduler.target, scheduler.running_revision, scheduler.latest_source_revision}
 
     cond do
+      caller != state.authority_owner ->
+        failure(:cargo_protocol, scheduler.target, "Cargo supersession owner is invalid")
+
+      not is_map(authority) or authority.target != scheduler.target ->
+        failure(:cargo_protocol, scheduler.target, "Cargo supersession authority is invalid")
+
+      authority.source_revision != scheduler.running_revision ->
+        failure(:cargo_protocol, scheduler.target, "Cargo supersession authority is invalid")
+
       scheduler.state not in [:building, :validating] ->
         failure(:cargo_protocol, scheduler.target, "Cargo supersession state is invalid")
 
@@ -278,10 +380,18 @@ defmodule Rekindle.Cargo do
       end)
       |> Map.new()
 
+    authorities =
+      Map.new(state.authorities, fn {token, authority} ->
+        if authority.target == target and authority.source_revision <= running_revision,
+          do: {token, %{authority | status: :revoked}},
+          else: {token, authority}
+      end)
+
     %{
       state
       | latest_revisions: Map.put(state.latest_revisions, target, latest_revision),
         identities: identities,
+        authorities: authorities,
         supersessions:
           [{target, running_revision, latest_revision} | state.supersessions] |> Enum.take(16)
     }
@@ -300,7 +410,10 @@ defmodule Rekindle.Cargo do
   end
 
   defp authoritative_result(job, result, state) do
-    if job.source_revision < Map.get(state.latest_revisions, job.target, 0) do
+    authority = Map.get(state.authorities, job.authority)
+
+    if job.source_revision < Map.get(state.latest_revisions, job.target, 0) or
+         not match?(%{status: :active}, authority) do
       obsolete_result(job, result)
     else
       map_result(job, result)

@@ -63,10 +63,26 @@ defmodule Rekindle.CargoTest do
 
     cargo =
       start_supervised!(
-        {Cargo, runner: runner, helper: "/tmp/rekindle_toolchain", max_cargo_builds: 2}
+        {Cargo,
+         runner: runner,
+         helper: "/tmp/rekindle_toolchain",
+         authority_owner: self(),
+         max_cargo_builds: 2}
       )
 
-    %{root: root, client: client, target_directory: target_directory, cargo: cargo}
+    web_identity = identity(:web)
+    web_scheduler = scheduler(:web)
+    {:ok, web_authority} = Cargo.authorize(cargo, web_identity, web_scheduler)
+
+    %{
+      root: root,
+      client: client,
+      target_directory: target_directory,
+      cargo: cargo,
+      web_identity: web_identity,
+      web_scheduler: web_scheduler,
+      web_authority: web_authority
+    }
   end
 
   test "metadata and Web build use one explicit canonical facade", context do
@@ -93,7 +109,8 @@ defmodule Rekindle.CargoTest do
            ]
 
     send(metadata_worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""})
-    assert_receive {:rekindle_cargo, ^metadata_reference, {:ok, metadata}}
+    assert_receive {:rekindle_cargo_ready, ^metadata_reference}
+    assert {:ok, metadata} = Cargo.result(context.cargo, metadata_reference, options[:authority])
     assert metadata.inventory.selected_package.id == @package_id
 
     artifact = Path.join(context.target_directory, "wasm32-unknown-unknown/dev/web.wasm")
@@ -115,8 +132,9 @@ defmodule Rekindle.CargoTest do
       |> Enum.map_join("", &(Jason.encode!(&1) <> "\n"))
 
     send(build_worker, {:finish, Adapter.terminal(), output, "warning from cargo"})
-    assert_receive {:rekindle_cargo, ^build_reference, {:ok, build}}
-    assert build.build_key == options[:identity].key
+    assert_receive {:rekindle_cargo_ready, ^build_reference}
+    assert {:ok, build} = Cargo.result(context.cargo, build_reference, options[:authority])
+    assert build.build_key == context.web_identity.key
     assert build.artifact.path == artifact
     assert build.artifact.sha256 == sha256("wasm-bytes")
     assert Enum.any?(build.diagnostics, &(&1.code == :cargo_tool_output))
@@ -128,7 +146,8 @@ defmodule Rekindle.CargoTest do
     assert_receive {:cargo_spawn, worker, _spawn, _state}
     assert {:busy, :cache_key} = Cargo.metadata(context.cargo, options)
     send(worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""})
-    assert_receive {:rekindle_cargo, ^reference, {:ok, _metadata}}
+    assert_receive {:rekindle_cargo_ready, ^reference}
+    assert {:ok, _metadata} = Cargo.result(context.cargo, reference, options[:authority])
   end
 
   test "toolchain paths are qualified before a runner job exists", context do
@@ -149,41 +168,101 @@ defmodule Rekindle.CargoTest do
   end
 
   test "execution rejects forged identities and target mismatches", context do
-    options = base_options(context)
-    forged = %{options[:identity] | key: @digest}
+    forged = %{context.web_identity | key: @digest}
 
     assert {:error, %{code: :cargo_protocol}} =
-             Cargo.metadata(context.cargo, Keyword.put(options, :identity, forged))
+             Cargo.authorize(context.cargo, forged, context.web_scheduler)
 
     assert {:error, %{code: :cargo_protocol}} =
-             Cargo.metadata(context.cargo, Keyword.put(options, :identity, identity(:desktop)))
+             Cargo.authorize(context.cargo, identity(:desktop), context.web_scheduler)
 
     refute_receive {:cargo_spawn, _worker, _spawn, _state}
   end
 
   test "execution rejects a scheduler snapshot with newer source work", context do
-    options = base_options(context)
-    assert {:ok, changed, [{:cancel, 1}]} = Scheduler.change(options[:scheduler], [:cargo_web], 1)
+    assert {:ok, changed, [{:cancel, 1}]} =
+             Scheduler.change(context.web_scheduler, [:cargo_web], 1)
 
     assert {:error, %{code: :cargo_protocol}} =
-             Cargo.metadata(context.cargo, Keyword.put(options, :scheduler, changed))
+             Cargo.authorize(context.cargo, context.web_identity, changed)
 
     refute_receive {:cargo_spawn, _worker, _spawn, _state}
   end
 
   test "one source revision cannot change its canonical build identity", context do
+    changed_identity = identity(:web, "different-inputs-in-same-revision")
+
+    assert {:error, %{code: :cargo_protocol}} =
+             Cargo.authorize(context.cargo, changed_identity, context.web_scheduler)
+
+    refute_receive {:cargo_spawn, _worker, _spawn, _state}
+  end
+
+  test "only the configured coordinator can issue execution authority", context do
+    task =
+      Task.async(fn ->
+        Cargo.authorize(context.cargo, context.web_identity, context.web_scheduler)
+      end)
+
+    assert {:error, %{code: :cargo_protocol}} = Task.await(task)
+
+    assert {:error, %{code: :cargo_protocol}} =
+             Cargo.metadata(
+               context.cargo,
+               Keyword.put(base_options(context), :authority, make_ref())
+             )
+
+    refute_receive {:cargo_spawn, _worker, _spawn, _state}
+  end
+
+  test "only the configured coordinator can authorize a completed result", context do
     options = base_options(context)
     assert {:ok, reference} = Cargo.metadata(context.cargo, options)
     assert_receive {:cargo_spawn, worker, _spawn, _state}
     send(worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""})
-    assert_receive {:rekindle_cargo, ^reference, {:ok, _metadata}}
+    assert_receive {:rekindle_cargo_ready, ^reference}
 
-    changed_identity = identity(:web, "different-inputs-in-same-revision")
+    task =
+      Task.async(fn ->
+        Cargo.result(context.cargo, reference, context.web_authority)
+      end)
 
-    assert {:error, %{code: :cargo_protocol}} =
-             Cargo.metadata(context.cargo, Keyword.put(options, :identity, changed_identity))
+    assert {:error, %{code: :cargo_protocol}} = Task.await(task)
 
-    refute_receive {:cargo_spawn, _worker, _spawn, _state}
+    assert {:ok, _metadata} =
+             Cargo.result(context.cargo, reference, context.web_authority)
+  end
+
+  test "supersession revokes output that completed before invalidation", context do
+    options = base_options(context)
+    assert {:ok, reference} = Cargo.metadata(context.cargo, options)
+    assert_receive {:cargo_spawn, worker, _spawn, _state}
+    send(worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""})
+    assert_receive {:rekindle_cargo_ready, ^reference}
+
+    assert {:ok, changed, [{:cancel, 1}]} =
+             Scheduler.change(context.web_scheduler, [:cargo_web], 1)
+
+    assert :ok = Cargo.supersede(context.cargo, context.web_authority, changed)
+
+    assert {:error, %{code: :cancelled}} =
+             Cargo.result(context.cargo, reference, context.web_authority)
+  end
+
+  test "a result claimed before a later invalidation remains the ordered outcome", context do
+    options = base_options(context)
+    assert {:ok, reference} = Cargo.metadata(context.cargo, options)
+    assert_receive {:cargo_spawn, worker, _spawn, _state}
+    send(worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""})
+    assert_receive {:rekindle_cargo_ready, ^reference}
+
+    assert {:ok, _metadata} =
+             Cargo.result(context.cargo, reference, context.web_authority)
+
+    assert {:ok, changed, [{:cancel, 1}]} =
+             Scheduler.change(context.web_scheduler, [:cargo_web], 1)
+
+    assert :ok = Cargo.supersede(context.cargo, context.web_authority, changed)
   end
 
   test "supersession cancels obsolete work and rejects a late successful completion", context do
@@ -191,11 +270,13 @@ defmodule Rekindle.CargoTest do
     assert {:ok, old_reference} = Cargo.metadata(context.cargo, options)
     assert_receive {:cargo_spawn, old_worker, _spawn, _state}
 
-    assert {:ok, changed, [{:cancel, 1}]} = Scheduler.change(options[:scheduler], [:cargo_web], 1)
-    assert :ok = Cargo.supersede(context.cargo, changed)
+    assert {:ok, changed, [{:cancel, 1}]} =
+             Scheduler.change(context.web_scheduler, [:cargo_web], 1)
+
+    assert :ok = Cargo.supersede(context.cargo, context.web_authority, changed)
     assert_receive {:cargo_cancel, ^old_worker, %{"reason" => "obsolete"}}
 
-    assert :ok = Cargo.supersede(context.cargo, changed)
+    assert :ok = Cargo.supersede(context.cargo, context.web_authority, changed)
     refute_receive {:cargo_cancel, ^old_worker, _header}
 
     send(
@@ -203,7 +284,10 @@ defmodule Rekindle.CargoTest do
       {:finish_cancel, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""}
     )
 
-    assert_receive {:rekindle_cargo, ^old_reference, {:error, %{code: :cancelled}}}
+    assert_receive {:rekindle_cargo_ready, ^old_reference}
+
+    assert {:error, %{code: :cancelled}} =
+             Cargo.result(context.cargo, old_reference, context.web_authority)
 
     failure =
       Failure.new!(
@@ -216,10 +300,9 @@ defmodule Rekindle.CargoTest do
     assert {:ok, queued, _effects} = Scheduler.fail(changed, 1, failure, 1)
     assert {:ok, current, {:start, 2, [:cargo_web]}} = Scheduler.ready(queued, 1)
 
-    current_options =
-      options
-      |> Keyword.put(:scheduler, current)
-      |> Keyword.put(:identity, identity(:web, "revision-2"))
+    current_identity = identity(:web, "revision-2")
+    assert {:ok, current_authority} = Cargo.authorize(context.cargo, current_identity, current)
+    current_options = Keyword.put(options, :authority, current_authority)
 
     assert {:ok, current_reference} = Cargo.metadata(context.cargo, current_options)
     assert_receive {:cargo_spawn, current_worker, _spawn, _state}
@@ -229,7 +312,10 @@ defmodule Rekindle.CargoTest do
       {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""}
     )
 
-    assert_receive {:rekindle_cargo, ^current_reference, {:ok, _metadata}}
+    assert_receive {:rekindle_cargo_ready, ^current_reference}
+
+    assert {:ok, _metadata} =
+             Cargo.result(context.cargo, current_reference, current_authority)
   end
 
   test "desktop uses the same facade and selects only compiler-artifact executable", context do
@@ -246,7 +332,8 @@ defmodule Rekindle.CargoTest do
       |> put_in(["packages", Access.at(0), "targets", Access.at(0), "name"], "desktop")
 
     send(worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_json), ""})
-    assert_receive {:rekindle_cargo, ^metadata_reference, {:ok, metadata}}
+    assert_receive {:rekindle_cargo_ready, ^metadata_reference}
+    assert {:ok, metadata} = Cargo.result(context.cargo, metadata_reference, options[:authority])
 
     executable = Path.join(context.target_directory, "debug/desktop")
     File.mkdir_p!(Path.dirname(executable))
@@ -269,7 +356,8 @@ defmodule Rekindle.CargoTest do
         "\n" <> Jason.encode!(%{"reason" => "build-finished", "success" => true}) <> "\n"
 
     send(build_worker, {:finish, Adapter.terminal(), stdout, ""})
-    assert_receive {:rekindle_cargo, ^build_reference, {:ok, result}}
+    assert_receive {:rekindle_cargo_ready, ^build_reference}
+    assert {:ok, result} = Cargo.result(context.cargo, build_reference, options[:authority])
     assert result.artifact.path == executable
     assert Bitwise.band(result.artifact.mode, 0o100) != 0
   end
@@ -300,20 +388,22 @@ defmodule Rekindle.CargoTest do
       project_root: context.root,
       mode: :dev,
       rust_target: "wasm32-unknown-unknown",
-      identity: identity(:web),
-      scheduler: scheduler(:web),
+      authority: context.web_authority,
       target_directory: context.target_directory,
       process: process_policy()
     ]
   end
 
   defp target_options(context, :desktop, config) do
+    identity = identity(:desktop)
+    scheduler = scheduler(:desktop)
+    assert {:ok, authority} = Cargo.authorize(context.cargo, identity, scheduler)
+
     base_options(context)
     |> Keyword.put(:target, :desktop)
     |> Keyword.put(:config, config)
     |> Keyword.put(:rust_target, "x86_64-unknown-linux-gnu")
-    |> Keyword.put(:identity, identity(:desktop))
-    |> Keyword.put(:scheduler, scheduler(:desktop))
+    |> Keyword.put(:authority, authority)
   end
 
   defp identity(target, salt \\ "revision-1") do
