@@ -3,7 +3,7 @@
 use crate::{HandoffError, HandoffFuture, StateHandoff};
 use futures_util::FutureExt;
 use sha2::{Digest, Sha256};
-use std::panic::AssertUnwindSafe;
+use std::{future::poll_fn, panic::AssertUnwindSafe, task::Poll};
 
 pub(crate) const PROTOCOL_VERSION: u8 = 1;
 pub(crate) const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
@@ -122,6 +122,24 @@ pub(crate) enum AdapterResult<T> {
     Cancelled,
 }
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) trait AdapterBounds {}
+
+#[cfg(target_arch = "wasm32")]
+impl<T: ?Sized> AdapterBounds for T {}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) trait AdapterBounds: Send + Sync {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + Sync + ?Sized> AdapterBounds for T {}
+
+pub(crate) trait Adapter: AdapterBounds {
+    fn deadline(&self, milliseconds: u64) -> HandoffFuture<'_, ()>;
+
+    fn cancelled(&self) -> HandoffFuture<'_, ()>;
+}
+
 pub(crate) fn settle<T>(result: AdapterResult<T>) -> Result<T, Failure> {
     match result {
         AdapterResult::Completed(value) => Ok(value),
@@ -130,7 +148,36 @@ pub(crate) fn settle<T>(result: AdapterResult<T>) -> Result<T, Failure> {
     }
 }
 
+async fn bounded<'a, T>(
+    adapter: &'a dyn Adapter,
+    operation: HandoffFuture<'a, T>,
+    deadline_ms: u64,
+) -> Result<T, Failure> {
+    let mut operation = operation;
+    let mut deadline = adapter.deadline(deadline_ms);
+    let mut cancellation = adapter.cancelled();
+
+    let result = poll_fn(move |context| {
+        if cancellation.as_mut().poll(context).is_ready() {
+            return Poll::Ready(AdapterResult::Cancelled);
+        }
+
+        if deadline.as_mut().poll(context).is_ready() {
+            return Poll::Ready(AdapterResult::Deadline);
+        }
+
+        operation
+            .as_mut()
+            .poll(context)
+            .map(AdapterResult::Completed)
+    })
+    .await;
+
+    settle(result)
+}
+
 pub(crate) fn snapshot<'a>(
+    adapter: &'a dyn Adapter,
     hook: Option<&'a dyn StateHandoff>,
     request: SnapshotRequest<'a>,
 ) -> HandoffFuture<'a, Result<Option<Envelope>, Failure>> {
@@ -148,11 +195,15 @@ pub(crate) fn snapshot<'a>(
             .map_err(|_| Failure::Panicked)?;
         let future = std::panic::catch_unwind(AssertUnwindSafe(|| hook.snapshot()))
             .map_err(|_| Failure::Panicked)?;
-        let bytes = AssertUnwindSafe(future)
-            .catch_unwind()
-            .await
-            .map_err(|_| Failure::Panicked)?
-            .map_err(Failure::from)?;
+        let application = Box::pin(async move {
+            AssertUnwindSafe(future)
+                .catch_unwind()
+                .await
+                .map_err(|_| Failure::Panicked)?
+                .map_err(Failure::from)
+        });
+
+        let bytes = bounded(adapter, application, request.policy.snapshot_deadline_ms).await??;
 
         let Some(payload) = bytes else {
             return Ok(None);
@@ -180,6 +231,7 @@ pub(crate) fn snapshot<'a>(
 }
 
 pub(crate) fn restore<'a>(
+    adapter: &'a dyn Adapter,
     hook: Option<&'a dyn StateHandoff>,
     envelope: Option<&'a Envelope>,
     request: RestoreRequest<'a>,
@@ -205,11 +257,15 @@ pub(crate) fn restore<'a>(
         }))
         .map_err(|_| Failure::Panicked)?;
 
-        AssertUnwindSafe(future)
-            .catch_unwind()
-            .await
-            .map_err(|_| Failure::Panicked)?
-            .map_err(Failure::from)?;
+        let application = Box::pin(async move {
+            AssertUnwindSafe(future)
+                .catch_unwind()
+                .await
+                .map_err(|_| Failure::Panicked)?
+                .map_err(Failure::from)
+        });
+
+        bounded(adapter, application, request.policy.restore_deadline_ms).await??;
 
         Ok(true)
     })
@@ -264,10 +320,146 @@ fn digest(bytes: &[u8]) -> [u8; 32] {
 mod tests {
     use super::*;
     use futures_executor::block_on;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        future::{Future, pending},
+        marker::PhantomData,
+        pin::Pin,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        task::{Context, Wake, Waker},
     };
+
+    struct PassiveAdapter;
+
+    impl Adapter for PassiveAdapter {
+        fn deadline(&self, _milliseconds: u64) -> HandoffFuture<'_, ()> {
+            Box::pin(pending())
+        }
+
+        fn cancelled(&self) -> HandoffFuture<'_, ()> {
+            Box::pin(pending())
+        }
+    }
+
+    static PASSIVE_ADAPTER: PassiveAdapter = PassiveAdapter;
+
+    fn snapshot<'a>(
+        hook: Option<&'a dyn StateHandoff>,
+        request: SnapshotRequest<'a>,
+    ) -> HandoffFuture<'a, Result<Option<Envelope>, Failure>> {
+        super::snapshot(&PASSIVE_ADAPTER, hook, request)
+    }
+
+    fn restore<'a>(
+        hook: Option<&'a dyn StateHandoff>,
+        envelope: Option<&'a Envelope>,
+        request: RestoreRequest<'a>,
+    ) -> HandoffFuture<'a, Result<bool, Failure>> {
+        super::restore(&PASSIVE_ADAPTER, hook, envelope, request)
+    }
+
+    #[derive(Clone, Default)]
+    struct Signal {
+        ready: Arc<AtomicBool>,
+        waker: Arc<Mutex<Option<Waker>>>,
+    }
+
+    impl Signal {
+        fn fire(&self) {
+            self.ready.store(true, Ordering::Release);
+
+            if let Some(waker) = self.waker.lock().expect("signal waker lock").take() {
+                waker.wake();
+            }
+        }
+
+        fn wait(&self) -> SignalFuture {
+            SignalFuture(self.clone())
+        }
+    }
+
+    struct SignalFuture(Signal);
+
+    impl Future for SignalFuture {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.0.ready.load(Ordering::Acquire) {
+                Poll::Ready(())
+            } else {
+                *self.0.waker.lock().expect("signal waker lock") = Some(context.waker().clone());
+
+                if self.0.ready.load(Ordering::Acquire) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct ControlledAdapter {
+        deadline: Signal,
+        cancellation: Signal,
+        requested_deadlines: Mutex<Vec<u64>>,
+    }
+
+    impl Adapter for ControlledAdapter {
+        fn deadline(&self, milliseconds: u64) -> HandoffFuture<'_, ()> {
+            self.requested_deadlines
+                .lock()
+                .expect("deadline request lock")
+                .push(milliseconds);
+            Box::pin(self.deadline.wait())
+        }
+
+        fn cancelled(&self) -> HandoffFuture<'_, ()> {
+            Box::pin(self.cancellation.wait())
+        }
+    }
+
+    struct PendingOperation<T> {
+        drops: Arc<AtomicUsize>,
+        output: PhantomData<fn() -> T>,
+    }
+
+    impl<T> PendingOperation<T> {
+        fn new(drops: Arc<AtomicUsize>) -> Self {
+            Self {
+                drops,
+                output: PhantomData,
+            }
+        }
+    }
+
+    impl<T> Future for PendingOperation<T> {
+        type Output = T;
+
+        fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+
+    impl<T> Drop for PendingOperation<T> {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn poll_once<T>(future: &mut HandoffFuture<'_, T>) -> Poll<T> {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        future.as_mut().poll(&mut context)
+    }
 
     struct Hook {
         schema: u32,
@@ -306,6 +498,69 @@ mod tests {
                     None => Ok(()),
                 }
             })
+        }
+    }
+
+    struct PendingHook {
+        snapshot_drops: Arc<AtomicUsize>,
+        restore_drops: Arc<AtomicUsize>,
+    }
+
+    impl StateHandoff for PendingHook {
+        fn schema_version(&self) -> u32 {
+            7
+        }
+
+        fn snapshot(&self) -> HandoffFuture<'_, Result<Option<Vec<u8>>, HandoffError>> {
+            Box::pin(PendingOperation::new(self.snapshot_drops.clone()))
+        }
+
+        fn restore<'a>(&'a self, _bytes: &'a [u8]) -> HandoffFuture<'a, Result<(), HandoffError>> {
+            Box::pin(PendingOperation::new(self.restore_drops.clone()))
+        }
+    }
+
+    struct YieldOnce<T> {
+        value: Option<T>,
+        yielded: bool,
+    }
+
+    impl<T> YieldOnce<T> {
+        fn new(value: T) -> Self {
+            Self {
+                value: Some(value),
+                yielded: false,
+            }
+        }
+    }
+
+    impl<T: Unpin> Future for YieldOnce<T> {
+        type Output = T;
+
+        fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.yielded {
+                Poll::Ready(self.value.take().expect("yielding future output"))
+            } else {
+                self.yielded = true;
+                context.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    struct YieldingHook;
+
+    impl StateHandoff for YieldingHook {
+        fn schema_version(&self) -> u32 {
+            7
+        }
+
+        fn snapshot(&self) -> HandoffFuture<'_, Result<Option<Vec<u8>>, HandoffError>> {
+            Box::pin(YieldOnce::new(Ok(Some(vec![4, 2]))))
+        }
+
+        fn restore<'a>(&'a self, _bytes: &'a [u8]) -> HandoffFuture<'a, Result<(), HandoffError>> {
+            Box::pin(YieldOnce::new(Ok(())))
         }
     }
 
@@ -515,16 +770,183 @@ mod tests {
     }
 
     #[test]
-    fn adapter_contract_preserves_deadline_and_cancellation() {
+    fn pending_snapshot_honors_its_deadline_and_drops_the_hook_future() {
+        let adapter = ControlledAdapter::default();
+        let snapshot_drops = Arc::new(AtomicUsize::new(0));
+        let hook = PendingHook {
+            snapshot_drops: snapshot_drops.clone(),
+            restore_drops: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut request = snapshot_request(8);
+        request.policy.snapshot_deadline_ms = 321;
+        let mut future = super::snapshot(&adapter, Some(&hook), request);
+
+        assert!(poll_once(&mut future).is_pending());
         assert_eq!(
-            settle::<()>(AdapterResult::Deadline),
-            Err(Failure::Deadline)
+            *adapter
+                .requested_deadlines
+                .lock()
+                .expect("deadline request lock"),
+            vec![321]
         );
+
+        adapter.deadline.fire();
+        assert_eq!(poll_once(&mut future), Poll::Ready(Err(Failure::Deadline)));
+        assert_eq!(snapshot_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn pending_restore_honors_cancellation_and_drops_the_hook_future() {
+        let adapter = ControlledAdapter::default();
+        let restore_drops = Arc::new(AtomicUsize::new(0));
+        let hook = PendingHook {
+            snapshot_drops: Arc::new(AtomicUsize::new(0)),
+            restore_drops: restore_drops.clone(),
+        };
+        let envelope = envelope(vec![1, 2, 3]);
+        let mut request = restore_request(3);
+        request.policy.restore_deadline_ms = 654;
+        let mut future = super::restore(&adapter, Some(&hook), Some(&envelope), request);
+
+        assert!(poll_once(&mut future).is_pending());
         assert_eq!(
-            settle::<()>(AdapterResult::Cancelled),
-            Err(Failure::Cancelled)
+            *adapter
+                .requested_deadlines
+                .lock()
+                .expect("deadline request lock"),
+            vec![654]
         );
-        assert_eq!(settle(AdapterResult::Completed(7)), Ok(7));
+
+        adapter.cancellation.fire();
+        assert_eq!(poll_once(&mut future), Poll::Ready(Err(Failure::Cancelled)));
+        assert_eq!(restore_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn snapshot_cancellation_and_restore_deadline_use_the_same_bounded_contract() {
+        let snapshot_adapter = ControlledAdapter::default();
+        let snapshot_drops = Arc::new(AtomicUsize::new(0));
+        let snapshot_hook = PendingHook {
+            snapshot_drops: snapshot_drops.clone(),
+            restore_drops: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut snapshot =
+            super::snapshot(&snapshot_adapter, Some(&snapshot_hook), snapshot_request(8));
+
+        assert!(poll_once(&mut snapshot).is_pending());
+        snapshot_adapter.cancellation.fire();
+        assert_eq!(
+            poll_once(&mut snapshot),
+            Poll::Ready(Err(Failure::Cancelled))
+        );
+        assert_eq!(snapshot_drops.load(Ordering::Relaxed), 1);
+
+        let restore_adapter = ControlledAdapter::default();
+        let restore_drops = Arc::new(AtomicUsize::new(0));
+        let restore_hook = PendingHook {
+            snapshot_drops: Arc::new(AtomicUsize::new(0)),
+            restore_drops: restore_drops.clone(),
+        };
+        let envelope = envelope(vec![1, 2, 3]);
+        let mut restore = super::restore(
+            &restore_adapter,
+            Some(&restore_hook),
+            Some(&envelope),
+            restore_request(3),
+        );
+
+        assert!(poll_once(&mut restore).is_pending());
+        restore_adapter.deadline.fire();
+        assert_eq!(poll_once(&mut restore), Poll::Ready(Err(Failure::Deadline)));
+        assert_eq!(restore_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn yielding_snapshot_and_restore_complete_before_pending_bounds() {
+        let adapter = ControlledAdapter::default();
+        let snapshot = block_on(super::snapshot(
+            &adapter,
+            Some(&YieldingHook),
+            snapshot_request(8),
+        ))
+        .expect("yielding snapshot")
+        .expect("yielding payload");
+
+        assert_eq!(snapshot.payload, vec![4, 2]);
+        assert_eq!(
+            block_on(super::restore(
+                &adapter,
+                Some(&YieldingHook),
+                Some(&snapshot),
+                restore_request(8),
+            )),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn exact_deadline_precedes_an_operation_that_becomes_ready_on_the_same_poll() {
+        let adapter = ControlledAdapter::default();
+        let mut future = super::snapshot(
+            &adapter,
+            Some(&YieldingHook),
+            snapshot_request(MAX_PAYLOAD_BYTES),
+        );
+
+        assert!(poll_once(&mut future).is_pending());
+        adapter.deadline.fire();
+        assert_eq!(poll_once(&mut future), Poll::Ready(Err(Failure::Deadline)));
+    }
+
+    #[test]
+    fn cancellation_precedes_deadline_when_both_are_observed_together() {
+        let adapter = ControlledAdapter::default();
+        let hook = PendingHook {
+            snapshot_drops: Arc::new(AtomicUsize::new(0)),
+            restore_drops: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut future = super::snapshot(&adapter, Some(&hook), snapshot_request(8));
+
+        assert!(poll_once(&mut future).is_pending());
+        adapter.deadline.fire();
+        adapter.cancellation.fire();
+        assert_eq!(poll_once(&mut future), Poll::Ready(Err(Failure::Cancelled)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_bounded_handoff_future_remains_send() {
+        fn assert_send<T: Send>(_value: T) {}
+
+        let adapter = ControlledAdapter::default();
+        let hook = hook(Some(vec![1]));
+        assert_send(super::snapshot(&adapter, Some(&hook), snapshot_request(8)));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn web_adapter_and_bounded_future_may_remain_local() {
+        use std::{cell::Cell, rc::Rc};
+
+        struct LocalAdapter(Rc<Cell<u64>>);
+
+        impl Adapter for LocalAdapter {
+            fn deadline(&self, milliseconds: u64) -> HandoffFuture<'_, ()> {
+                self.0.set(milliseconds);
+                Box::pin(pending())
+            }
+
+            fn cancelled(&self) -> HandoffFuture<'_, ()> {
+                Box::pin(pending())
+            }
+        }
+
+        let adapter = LocalAdapter(Rc::new(Cell::new(0)));
+        let hook = hook(Some(vec![1]));
+        let mut future = super::snapshot(&adapter, Some(&hook), snapshot_request(8));
+
+        assert!(poll_once(&mut future).is_ready());
+        assert_eq!(adapter.0.get(), 1_000);
     }
 
     #[test]
