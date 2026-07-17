@@ -995,39 +995,41 @@ defmodule Rekindle.ArtifactStoreTest do
     end
   end
 
-  test "blocks first startup when the quarantine control path is not a regular file" do
-    for kind <- [:dangling_symlink, :directory] do
+  test "does not initialize child state when a quarantine control already exists" do
+    for kind <- [:dangling_symlink, :directory, :regular] do
       root = state_root()
       File.mkdir!(root)
       File.chmod!(root, 0o700)
       quarantine = Path.join(root, "quarantine-v1.json")
       quarantine_control!(quarantine, kind)
-      control_before = quarantine_control_state(quarantine)
+      state_before = private_tree_state(root)
 
       {:ok, store} = start_store(root)
       refute File.exists?(Path.join(root, "project-id"))
-      assert quarantine_control_state(quarantine) == control_before
+      assert private_tree_state(root) == state_before
       assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(store, :web)
       :ok = GenServer.stop(store)
     end
   end
 
-  test "preserves durable state when the quarantine control path is not a regular file" do
-    for kind <- [:dangling_symlink, :directory] do
+  test "does not repair a partial durable layout while a quarantine control exists" do
+    for kind <- [:dangling_symlink, :directory, :regular] do
       root = state_root()
       {:ok, store} = start_store(root)
       [generation] = sealed_web_generations(store, ["quarantine-control"])
       assert :ok = ArtifactStore.activate(store, generation, 1)
       :ok = GenServer.stop(store)
 
+      for relative <- ["staging", "generations/desktop", "references/desktop", "seals/desktop"] do
+        :ok = File.rmdir(Path.join(root, relative))
+      end
+
       quarantine = Path.join(root, "quarantine-v1.json")
-      durable_before = project_identity_state(root, [generation])
       quarantine_control!(quarantine, kind)
-      control_before = quarantine_control_state(quarantine)
+      state_before = private_tree_state(root)
 
       {:ok, recovered} = start_store(root)
-      assert quarantine_control_state(quarantine) == control_before
-      assert project_identity_state(root, [generation]) == durable_before
+      assert private_tree_state(root) == state_before
       assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
       :ok = GenServer.stop(recovered)
     end
@@ -1737,12 +1739,37 @@ defmodule Rekindle.ArtifactStoreTest do
     File.chmod!(path, 0o700)
   end
 
-  defp quarantine_control_state(path) do
+  defp quarantine_control!(path, :regular) do
+    File.write!(path, ~s({"state":"cleanup_required","v":1}))
+    File.chmod!(path, 0o600)
+  end
+
+  defp private_tree_state(root), do: Map.new(private_tree_entries(root, root))
+
+  defp private_tree_entries(root, path) do
     {:ok, stat} = File.lstat(path)
+    relative = Path.relative_to(path, root)
 
     case stat.type do
-      :symlink -> {:symlink, File.read_link!(path)}
-      :directory -> {:directory, stat.mode &&& 0o777, File.ls!(path)}
+      :directory ->
+        entry = {relative, {:directory, stat.mode &&& 0o777}}
+
+        children =
+          path
+          |> File.ls!()
+          |> Enum.sort()
+          |> Enum.flat_map(&private_tree_entries(root, Path.join(path, &1)))
+
+        [entry | children]
+
+      :regular ->
+        [{relative, {:regular, stat.mode &&& 0o777, File.read!(path)}}]
+
+      :symlink ->
+        [{relative, {:symlink, File.read_link!(path)}}]
+
+      type ->
+        [{relative, {type, stat.mode &&& 0o777}}]
     end
   end
 

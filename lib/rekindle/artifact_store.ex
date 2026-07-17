@@ -133,8 +133,12 @@ defmodule Rekindle.ArtifactStore do
          true <- safe_root?(root),
          true <- is_integer(retained) and retained in 1..20,
          true <- is_integer(max_bytes) and max_bytes in 67_108_864..17_179_869_184,
-         :ok <- initialize_layout(root),
-         {:ok, temporary_quarantine?} <- recover_temporaries_before_identity(root),
+         {:ok, layout_quarantine?} <- initialize_layout(root),
+         {:ok, temporary_quarantine?} <-
+           if(layout_quarantine?,
+             do: {:ok, true},
+             else: recover_temporaries_before_identity(root)
+           ),
          :ok <- ensure_project_identity(root, temporary_quarantine?),
          {:ok, quarantined?} <-
            if(temporary_quarantine?, do: {:ok, true}, else: recover(root)) do
@@ -394,9 +398,15 @@ defmodule Rekindle.ArtifactStore do
   end
 
   defp initialize_layout(root) do
-    with :ok <- Filesystem.ensure_private_directory(root),
-         :ok <- ensure_directories(root) do
-      :ok
+    with :ok <- Filesystem.ensure_private_directory(root) do
+      if quarantine_control_present?(root) do
+        {:ok, true}
+      else
+        case ensure_directories(root) do
+          :ok -> {:ok, false}
+          {:error, _} = error -> error
+        end
+      end
     end
   end
 
