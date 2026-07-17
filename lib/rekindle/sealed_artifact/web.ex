@@ -65,7 +65,8 @@ defmodule Rekindle.SealedArtifact.Web do
       Validation.exact?(manifest["host_requirements"], @host_keys) and
       manifest["host_requirements"] == %{"secure_context" => true, "webgpu" => true} and
       Validation.relative?(manifest["entry"]) and valid_paths?(manifest["hot_styles"]) and
-      valid_members?(manifest["members"]) and valid_edges?(manifest["edges"])
+      valid_members?(manifest["members"]) and valid_edges?(manifest["edges"]) and
+      complete_closure?(manifest)
   rescue
     _ -> false
   end
@@ -85,7 +86,7 @@ defmodule Rekindle.SealedArtifact.Web do
     do: Validation.sorted_unique?(paths, & &1) and Enum.all?(paths, &Validation.relative?/1)
 
   defp valid_members?(members) do
-    Validation.sorted_unique?(members, & &1["path"]) and
+    Validation.sorted_unique?(members, & &1["path"]) and casefold_unique?(members) and
       Enum.all?(members, fn member ->
         Validation.exact?(member, @member_keys) and Validation.relative?(member["path"]) and
           member["role"] in @roles and Validation.digest?(member["sha256"]) and
@@ -102,6 +103,70 @@ defmodule Rekindle.SealedArtifact.Web do
           (Validation.relative?(edge["to"]) or https?(edge["to"])) and edge["kind"] in @edge_kinds
       end)
   end
+
+  defp complete_closure?(manifest) do
+    members = manifest["members"]
+    edges = manifest["edges"]
+    roles = Map.new(members, &{&1["path"], &1["role"]})
+    entry = manifest["entry"]
+
+    bootstrap_edges =
+      Enum.filter(edges, &(&1["from"] == entry and &1["kind"] == "dynamic_import"))
+
+    Enum.count(members, &(&1["role"] == "bootstrap")) == 1 and
+      roles[entry] == "bootstrap" and member_cache(members, entry) == "no_cache" and
+      Enum.any?(members, &(&1["role"] == "javascript")) and
+      Enum.any?(members, &(&1["role"] == "wasm")) and
+      Enum.all?(manifest["hot_styles"], fn path ->
+        roles[path] == "css" and edge?(edges, entry, path, "css_url")
+      end) and
+      Enum.all?(edges, fn edge ->
+        Map.has_key?(roles, edge["from"]) and
+          (Map.has_key?(roles, edge["to"]) or https?(edge["to"]))
+      end) and
+      length(bootstrap_edges) == 1 and
+      roles[hd(bootstrap_edges)["to"]] == "javascript" and
+      Enum.all?(members, &valid_source_map?(&1, roles, edges)) and
+      Enum.all?(members, &required_reference?(&1, edges))
+  rescue
+    _ -> false
+  end
+
+  defp valid_source_map?(%{"path" => path, "source_map" => nil}, _roles, edges),
+    do: not Enum.any?(edges, &(&1["from"] == path and &1["kind"] == "source_map"))
+
+  defp valid_source_map?(%{"path" => path, "source_map" => source_map}, roles, edges),
+    do:
+      roles[source_map] == "source_map" and
+        Enum.filter(edges, &(&1["from"] == path and &1["kind"] == "source_map")) == [
+          %{"from" => path, "to" => source_map, "kind" => "source_map"}
+        ]
+
+  defp required_reference?(%{"path" => path, "role" => "wasm"}, edges),
+    do: Enum.any?(edges, &(&1["to"] == path and &1["kind"] == "wasm_url"))
+
+  defp required_reference?(%{"path" => path, "role" => "source_map"}, edges),
+    do: Enum.any?(edges, &(&1["to"] == path and &1["kind"] == "source_map"))
+
+  defp required_reference?(_member, _edges), do: true
+
+  defp edge?(edges, from, to, kind),
+    do: Enum.any?(edges, &(&1 == %{"from" => from, "to" => to, "kind" => kind}))
+
+  defp member_cache(members, path) do
+    case Enum.find(members, &(&1["path"] == path)) do
+      %{"cache" => cache} -> cache
+      _ -> nil
+    end
+  end
+
+  defp casefold_unique?(members) do
+    folded = Enum.map(members, &casefold(&1["path"]))
+    length(folded) == MapSet.size(MapSet.new(folded))
+  end
+
+  defp casefold(value),
+    do: value |> String.to_charlist() |> :string.casefold() |> List.to_string()
 
   defp https?(value), do: is_binary(value) and String.starts_with?(value, "https://")
 

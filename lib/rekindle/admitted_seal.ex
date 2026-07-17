@@ -2,7 +2,7 @@ defmodule Rekindle.AdmittedSeal do
   @moduledoc false
 
   alias Rekindle.ArtifactStore
-  alias Rekindle.ArtifactStore.Lease
+  alias Rekindle.ArtifactStore.{Descriptor, Lease, Member}
   alias Rekindle.SealedArtifact.{Desktop, Validation, Web}
   alias Rekindle.{Failure, GenerationRef}
 
@@ -28,18 +28,24 @@ defmodule Rekindle.AdmittedSeal do
           {:ok, t()} | {:error, Failure.t()}
   def admit(store, sealed) do
     with {:ok, target, generation, source_revision, producer, union} <- summarize(sealed),
-         {:ok, lease} <- ArtifactStore.acquire(store, generation, source_revision),
-         :ok <- exact_lease(lease, generation) do
-      common = common(target, generation, source_revision, producer, :sealed, union)
+         {:ok, lease} <- ArtifactStore.acquire(store, generation, source_revision) do
+      case verify_store_binding(lease, generation, union) do
+        :ok ->
+          common = common(target, generation, source_revision, producer, :sealed, union)
 
-      {:ok,
-       struct!(
-         __MODULE__,
-         Map.merge(common, %{
-           lease: lease,
-           fingerprint: Validation.fingerprint(common, lease.token)
-         })
-       )}
+          {:ok,
+           struct!(
+             __MODULE__,
+             Map.merge(common, %{
+               lease: lease,
+               fingerprint: Validation.fingerprint(common, lease.token)
+             })
+           )}
+
+        {:error, %Failure{}} = error ->
+          _ = ArtifactStore.release(lease)
+          error
+      end
     end
   end
 
@@ -49,8 +55,8 @@ defmodule Rekindle.AdmittedSeal do
            summarize_union(admitted.sealed),
          true <- exact_fields?(admitted),
          true <- identity_matches?(admitted, target, generation, source_revision, producer, union),
-         :ok <- exact_lease(admitted.lease, generation),
          true <- ArtifactStore.valid_lease?(admitted.lease),
+         :ok <- verify_store_binding(admitted.lease, generation, union),
          common <- common(target, generation, source_revision, producer, :sealed, union),
          true <- admitted.fingerprint == Validation.fingerprint(common, admitted.lease.token) do
       {:ok, Map.put(common, :lease, admitted.lease)}
@@ -123,6 +129,60 @@ defmodule Rekindle.AdmittedSeal do
   end
 
   defp exact_lease(_lease, _generation), do: invalid()
+
+  defp verify_store_binding(lease, generation, union) do
+    with :ok <- exact_lease(lease, generation),
+         {:ok, descriptor} <- ArtifactStore.sealed_descriptor(lease),
+         :ok <- exact_descriptor(descriptor, generation, union) do
+      :ok
+    end
+  end
+
+  defp exact_descriptor(%Descriptor{} = descriptor, generation, {:web, %Web{} = sealed}) do
+    expected =
+      Map.new(sealed.manifest["members"], fn member ->
+        path = "members/" <> member["path"]
+
+        {path,
+         %Member{
+           path: path,
+           sha256: member["sha256"],
+           size: member["size"],
+           mode: :regular
+         }}
+      end)
+
+    if descriptor_identity?(descriptor, generation, "rekindle-web-manifest-v1.json") and
+         Map.new(descriptor.members, &{&1.path, &1}) == expected,
+       do: :ok,
+       else: invalid()
+  end
+
+  defp exact_descriptor(%Descriptor{} = descriptor, generation, {:desktop, %Desktop{} = sealed}) do
+    executable = sealed.manifest["executable"]
+
+    expected = %{
+      executable["path"] => %Member{
+        path: executable["path"],
+        sha256: executable["sha256"],
+        size: executable["size"],
+        mode: :executable_owner
+      }
+    }
+
+    if descriptor_identity?(descriptor, generation, "rekindle-native-manifest-v1.json") and
+         Map.new(descriptor.members, &{&1.path, &1}) == expected,
+       do: :ok,
+       else: invalid()
+  end
+
+  defp exact_descriptor(_descriptor, _generation, _union), do: invalid()
+
+  defp descriptor_identity?(descriptor, generation, manifest_path) do
+    descriptor.artifact_id == generation.artifact_id and
+      descriptor.manifest_digest == generation.manifest_digest and
+      descriptor.profile == generation.profile and descriptor.manifest_path == manifest_path
+  end
 
   defp exact_fields?(admitted),
     do: Map.from_struct(admitted) |> Map.keys() |> Enum.sort() == Enum.sort(@fields)

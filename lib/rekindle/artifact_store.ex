@@ -85,6 +85,10 @@ defmodule Rekindle.ArtifactStore do
   def valid_lease?(%Lease{store: store} = lease),
     do: GenServer.call(store, {:valid_lease, lease}, :infinity)
 
+  @spec sealed_descriptor(Lease.t()) :: {:ok, Descriptor.t()} | {:error, Failure.t()}
+  def sealed_descriptor(%Lease{store: store} = lease),
+    do: GenServer.call(store, {:sealed_descriptor, lease}, :infinity)
+
   @spec collect(GenServer.server(), [GenerationRef.t()], keyword()) ::
           {:ok, map()} | {:error, Failure.t()}
   def collect(server, protected \\ [], options \\ []),
@@ -229,14 +233,14 @@ defmodule Rekindle.ArtifactStore do
         {:reply, {:ok, release}, put_in(state.leases[token], entry)}
 
       _ ->
-        {:reply, {:error, release_denied()}, state}
+        {:reply, {:error, lease_access_denied()}, state}
     end
   end
 
   def handle_call({:release, %Lease{token: token} = lease}, {owner, _tag}, state) do
     case Map.get(state.leases, token) do
       %{owner: ^owner, lease: ^lease} -> {:reply, :ok, drop_lease(state, token)}
-      _ -> {:reply, {:error, release_denied()}, state}
+      _ -> {:reply, {:error, lease_access_denied()}, state}
     end
   end
 
@@ -246,11 +250,11 @@ defmodule Rekindle.ArtifactStore do
         if MapSet.member?(authorities, authority) do
           {:reply, :ok, drop_lease(state, token)}
         else
-          {:reply, {:error, release_denied()}, state}
+          {:reply, {:error, lease_access_denied()}, state}
         end
 
       _ ->
-        {:reply, {:error, release_denied()}, state}
+        {:reply, {:error, lease_access_denied()}, state}
     end
   end
 
@@ -261,11 +265,11 @@ defmodule Rekindle.ArtifactStore do
           entry = %{entry | release_authorities: MapSet.delete(authorities, authority)}
           {:reply, :ok, put_in(state.leases[token], entry)}
         else
-          {:reply, {:error, release_denied()}, state}
+          {:reply, {:error, lease_access_denied()}, state}
         end
 
       _ ->
-        {:reply, {:error, release_denied()}, state}
+        {:reply, {:error, lease_access_denied()}, state}
     end
   end
 
@@ -277,6 +281,28 @@ defmodule Rekindle.ArtifactStore do
       )
 
     {:reply, valid?, state}
+  end
+
+  def handle_call({:sealed_descriptor, %Lease{token: token} = lease}, {owner, _tag}, state) do
+    result =
+      case Map.get(state.leases, token) do
+        %{owner: ^owner, lease: ^lease} ->
+          with {:ok, descriptor} <- load_descriptor(state, lease.target, lease.artifact_id),
+               :ok <-
+                 validate_tree(
+                   artifact_path(state, lease.target, lease.artifact_id),
+                   lease.target,
+                   descriptor,
+                   true
+                 ) do
+            {:ok, descriptor}
+          end
+
+        _ ->
+          {:error, lease_access_denied()}
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call({:collect, protected, options}, _from, state) do
@@ -1879,8 +1905,8 @@ defmodule Rekindle.ArtifactStore do
   defp invalid_record,
     do: {:error, invalid(:artifact, :cache_corrupt, "Artifact store record is invalid")}
 
-  defp release_denied,
-    do: invalid(:internal, :contract_violation, "Artifact lease release is not authorized")
+  defp lease_access_denied,
+    do: invalid(:internal, :contract_violation, "Artifact lease access is not authorized")
 
   defp invalid(stage, code, message),
     do: Failure.new!(target: nil, stage: stage, code: code, message: message)

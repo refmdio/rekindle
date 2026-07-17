@@ -181,11 +181,17 @@ defmodule Rekindle.ArtifactStoreTest do
     {:ok, generation} = ArtifactStore.seal(staging, descriptor)
     {:ok, lease} = ArtifactStore.acquire(store, generation)
 
+    assert {:ok, sealed_descriptor} = ArtifactStore.sealed_descriptor(lease)
+    assert sealed_descriptor.artifact_id == generation.artifact_id
+    assert sealed_descriptor.members == descriptor.members
+
     authorize_task = Task.async(fn -> ArtifactStore.authorize_release(lease) end)
     release_task = Task.async(fn -> ArtifactStore.release(lease) end)
+    descriptor_task = Task.async(fn -> ArtifactStore.sealed_descriptor(lease) end)
 
     assert {:error, %{code: :contract_violation}} = Task.await(authorize_task)
     assert {:error, %{code: :contract_violation}} = Task.await(release_task)
+    assert {:error, %{code: :contract_violation}} = Task.await(descriptor_task)
     assert ArtifactStore.valid_lease?(lease)
     assert {:ok, authority} = ArtifactStore.authorize_release(lease)
 
@@ -214,6 +220,22 @@ defmodule Rekindle.ArtifactStoreTest do
     refute ArtifactStore.valid_lease?(lease)
     assert {:ok, %{removed_generations: 1}} = ArtifactStore.collect(store)
     refute File.exists?(artifact_path(root, :web, first.artifact_id))
+  end
+
+  test "sealed descriptor access revalidates immutable member content" do
+    root = state_root()
+    {:ok, store} = start_store(root)
+    {staging, descriptor} = stage_web(store, "verified-descriptor")
+    {:ok, generation} = ArtifactStore.seal(staging, descriptor)
+    {:ok, lease} = ArtifactStore.acquire(store, generation)
+    member = Path.join(artifact_path(root, :web, generation.artifact_id), "members/entry.js")
+
+    File.chmod!(member, 0o600)
+    File.write!(member, "changed")
+
+    assert {:error, %{code: :artifact_changed}} = ArtifactStore.sealed_descriptor(lease)
+    assert ArtifactStore.valid_lease?(lease)
+    assert :ok = ArtifactStore.release(lease)
   end
 
   test "collection enforces the configured byte bound independently of count" do
