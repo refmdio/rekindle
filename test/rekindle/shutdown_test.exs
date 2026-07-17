@@ -13,6 +13,8 @@ defmodule Rekindle.ShutdownTest do
     def init(mode), do: {:ok, mode}
 
     @impl true
+    def handle_call(_request, _from, :silent_event), do: {:noreply, :silent_event}
+
     def handle_call({:begin_shutdown, _caller}, _from, :silent), do: {:noreply, :silent}
 
     def handle_call({:begin_shutdown, caller}, _from, :reported_failure) do
@@ -204,6 +206,29 @@ defmodule Rekindle.ShutdownTest do
     assert %Result{status: :uncertain} = Task.await(shutdown, 500)
     assert System.monotonic_time(:millisecond) - started_at < 500
     assert Enum.all?(workers, &(not Process.alive?(&1)))
+  end
+
+  test "event emission is bounded and does not prevent cleanup" do
+    parent = self()
+
+    event_bus =
+      start_supervised!(
+        Supervisor.child_spec({RunnerStub, :silent_event}, id: {:event_bus_stub, :silent})
+      )
+
+    coordinator =
+      start_supervised!({Shutdown, event_bus: event_bus, timeout_ms: 100})
+
+    assert {:ok, _reference} =
+             Shutdown.track(coordinator, :staging,
+               cleanup: callback(parent, :cleanup_after_event_timeout)
+             )
+
+    started_at = System.monotonic_time(:millisecond)
+    assert %Result{status: :uncertain, failures: failures} = Shutdown.shutdown(coordinator)
+    assert System.monotonic_time(:millisecond) - started_at < 500
+    assert_receive :cleanup_after_event_timeout
+    assert Enum.any?(failures, &(&1.message == "Shutdown event emission timed out"))
   end
 
   test "untrack is owner-scoped" do
