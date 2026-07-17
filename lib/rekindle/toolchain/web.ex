@@ -3,6 +3,7 @@ defmodule Rekindle.Toolchain.Web do
 
   alias Rekindle.CanonicalValue
   alias Rekindle.SealedArtifact.Identity
+  alias Rekindle.SealedArtifact.WebMemberMetadata
   alias Rekindle.Toolchain.RootAuthority
 
   @root_keys ~w[id path mode device]
@@ -584,58 +585,6 @@ defmodule Rekindle.Toolchain.Web do
       unique?(values) and Enum.all?(values, validator)
   end
 
-  defp member_metadata(role, path) when is_binary(path) do
-    extension = path |> case_fold() |> Path.extname()
-
-    case {role, extension} do
-      {"bootstrap", ".js"} ->
-        {:ok, "text/javascript; charset=utf-8", "no_cache"}
-
-      {"javascript", ".js"} ->
-        {:ok, "text/javascript; charset=utf-8", "immutable"}
-
-      {"wasm", ".wasm"} ->
-        {:ok, "application/wasm", "immutable"}
-
-      {"css", ".css"} ->
-        {:ok, "text/css; charset=utf-8", "immutable"}
-
-      {"source_map", ".map"} ->
-        {:ok, "application/json; charset=utf-8", "immutable"}
-
-      {"asset", extension} when extension not in [".js", ".wasm", ".css", ".map"] ->
-        {:ok, asset_mime(extension), "immutable"}
-
-      _ ->
-        {:error, :role_extension}
-    end
-  end
-
-  defp member_metadata(_role, _path), do: {:error, :role_extension}
-
-  defp asset_mime(extension) do
-    Map.get(
-      %{
-        ".png" => "image/png",
-        ".jpg" => "image/jpeg",
-        ".jpeg" => "image/jpeg",
-        ".gif" => "image/gif",
-        ".webp" => "image/webp",
-        ".avif" => "image/avif",
-        ".svg" => "image/svg+xml",
-        ".ico" => "image/x-icon",
-        ".woff" => "font/woff",
-        ".woff2" => "font/woff2",
-        ".ttf" => "font/ttf",
-        ".otf" => "font/otf",
-        ".txt" => "text/plain; charset=utf-8",
-        ".json" => "application/json; charset=utf-8"
-      },
-      extension,
-      "application/octet-stream"
-    )
-  end
-
   defp case_fold(value) when is_binary(value) do
     value |> String.to_charlist() |> :string.casefold() |> List.to_string()
   end
@@ -679,7 +628,7 @@ defmodule Rekindle.Toolchain.Web do
   defp valid_manifest_member_shape?(member) do
     with true <- exact?(member, ~w[path role sha256 size mime cache source_map]),
          true <- relative?(member["path"]),
-         {:ok, mime, cache} <- member_metadata(member["role"], member["path"]),
+         {:ok, mime, cache} <- WebMemberMetadata.resolve(member["role"], member["path"]),
          true <- member["mime"] == mime and member["cache"] == cache,
          true <- digest?(member["sha256"]) and nonnegative?(member["size"]),
          true <- is_nil(member["source_map"]) or relative?(member["source_map"]) do

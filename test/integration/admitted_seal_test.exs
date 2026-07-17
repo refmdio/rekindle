@@ -192,6 +192,62 @@ defmodule Rekindle.AdmittedSealTest do
     end
   end
 
+  test "web contracts reject noncanonical MIME and cache values after digest renewal" do
+    store = store()
+    sealed = seal(store, :web, :extension, 52)
+
+    mutations = [
+      {"bootstrap", "mime", "application/javascript"},
+      {"bootstrap", "cache", "immutable"},
+      {"javascript", "mime", "Text/Javascript; charset=utf-8"},
+      {"javascript", "mime", "text/javascript"},
+      {"javascript", "mime", "text/javascript; charset=utf-8; version=1"},
+      {"javascript", "cache", "no_cache"},
+      {"wasm", "mime", "application/wasm; charset=binary"},
+      {"wasm", "cache", "no_cache"}
+    ]
+
+    for {role, field, value} <- mutations do
+      manifest =
+        update_in(sealed.manifest, ["members"], fn members ->
+          Enum.map(members, fn
+            %{"role" => ^role} = member -> Map.put(member, field, value)
+            member -> member
+          end)
+        end)
+
+      assert {:error, %{code: :manifest_invalid}} = rebuild_web_contract(sealed, manifest)
+    end
+  end
+
+  test "web contracts apply canonical metadata to every member role" do
+    store = store()
+    sealed = seal(store, :web, :extension, 53)
+    manifest = expanded_web_manifest(sealed.manifest)
+
+    assert {:ok, expanded} = rebuild_bound_web_contract(sealed, manifest)
+
+    for role <- ~w[bootstrap javascript wasm css source_map asset], field <- ~w[mime cache] do
+      value =
+        case field do
+          "mime" -> "Invalid/#{role}; parameter=1"
+          "cache" when role == "bootstrap" -> "immutable"
+          "cache" -> "no_cache"
+        end
+
+      changed =
+        update_in(expanded.manifest, ["members"], fn members ->
+          Enum.map(members, fn
+            %{"role" => ^role} = member -> Map.put(member, field, value)
+            member -> member
+          end)
+        end)
+
+      assert {:error, %{code: :manifest_invalid}} =
+               rebuild_bound_web_contract(expanded, changed)
+    end
+  end
+
   test "admission binds every manifest member field to sealed store metadata" do
     for {producer_kind, producer_offset} <- [canonical: 0, extension: 100],
         {target, target_offset} <- [web: 0, desktop: 10],
@@ -259,6 +315,94 @@ defmodule Rekindle.AdmittedSealTest do
       manifest: manifest,
       seal_result: :sealed
     )
+  end
+
+  defp rebuild_bound_web_contract(%Web{} = sealed, manifest) do
+    artifact_id = artifact_id(:web, manifest["build"]["build_key"], manifest["members"])
+
+    manifest =
+      manifest
+      |> Map.put("artifact_id", artifact_id)
+      |> Map.delete("manifest_digest")
+
+    manifest_digest = manifest_digest(:web, manifest)
+    manifest = Map.put(manifest, "manifest_digest", manifest_digest)
+
+    generation = %{
+      sealed.generation
+      | artifact_id: artifact_id,
+        manifest_digest: manifest_digest
+    }
+
+    Web.new(
+      generation: generation,
+      source_revision: sealed.source_revision,
+      manifest: manifest,
+      seal_result: :sealed
+    )
+  end
+
+  defp expanded_web_manifest(manifest) do
+    [javascript] = Enum.filter(manifest["members"], &(&1["role"] == "javascript"))
+
+    additions = [
+      %{
+        "path" => javascript["path"] <> ".map",
+        "role" => "source_map",
+        "sha256" => String.duplicate("3", 64),
+        "size" => 3,
+        "mime" => "application/json; charset=utf-8",
+        "cache" => "immutable",
+        "source_map" => nil
+      },
+      %{
+        "path" => "styles/app.css",
+        "role" => "css",
+        "sha256" => String.duplicate("4", 64),
+        "size" => 4,
+        "mime" => "text/css; charset=utf-8",
+        "cache" => "immutable",
+        "source_map" => nil
+      },
+      %{
+        "path" => "assets/data.bin",
+        "role" => "asset",
+        "sha256" => String.duplicate("5", 64),
+        "size" => 5,
+        "mime" => "application/octet-stream",
+        "cache" => "immutable",
+        "source_map" => nil
+      }
+    ]
+
+    members =
+      manifest["members"]
+      |> Enum.map(fn
+        %{"role" => "javascript"} = member ->
+          Map.put(member, "source_map", javascript["path"] <> ".map")
+
+        member ->
+          member
+      end)
+      |> Kernel.++(additions)
+      |> Enum.sort_by(& &1["path"])
+
+    edges =
+      [
+        %{
+          "from" => javascript["path"],
+          "to" => javascript["path"] <> ".map",
+          "kind" => "source_map"
+        },
+        %{"from" => manifest["entry"], "to" => "styles/app.css", "kind" => "css_url"}
+        | manifest["edges"]
+      ]
+      |> Enum.sort_by(&{&1["from"], &1["to"], &1["kind"]})
+
+    manifest
+    |> Map.put("members", members)
+    |> Map.put("edges", edges)
+    |> Map.put("hot_styles", ["styles/app.css"])
   end
 
   defp remove_web_role(manifest, role) do
@@ -552,7 +696,11 @@ defmodule Rekindle.AdmittedSealTest do
     identity = %{
       "v" => 1,
       "build_key" => build_key,
-      "members" => Enum.map(members, &Map.take(&1.manifest, ~w[path role sha256 size]))
+      "members" =>
+        Enum.map(members, fn
+          %{manifest: member} -> Map.take(member, ~w[path role sha256 size])
+          member when is_map(member) -> Map.take(member, ~w[path role sha256 size])
+        end)
     }
 
     digest("rekindle-web-artifact-v1\0" <> CanonicalValue.encode!(identity))

@@ -3,6 +3,7 @@ defmodule Rekindle.SealedArtifact.Web do
 
   alias Rekindle.GenerationRef
   alias Rekindle.SealedArtifact.Validation
+  alias Rekindle.SealedArtifact.WebMemberMetadata
 
   @fields [:generation, :source_revision, :manifest, :producer, :seal_result]
   @enforce_keys @fields
@@ -14,7 +15,6 @@ defmodule Rekindle.SealedArtifact.Web do
   @member_keys ~w[path role sha256 size mime cache source_map]
   @edge_keys ~w[from to kind]
   @roles ~w[bootstrap javascript wasm css asset source_map]
-  @caches ~w[no_cache immutable]
   @edge_kinds ~w[esm_import dynamic_import wasm_url source_map css_url asset_url]
 
   @type t :: %__MODULE__{
@@ -88,11 +88,20 @@ defmodule Rekindle.SealedArtifact.Web do
   defp valid_members?(members) do
     Validation.sorted_unique?(members, & &1["path"]) and casefold_unique?(members) and
       Enum.all?(members, fn member ->
-        Validation.exact?(member, @member_keys) and Validation.relative?(member["path"]) and
-          member["role"] in @roles and Validation.digest?(member["sha256"]) and
-          Validation.uint?(member["size"]) and Validation.safe_text?(member["mime"], 256) and
-          member["cache"] in @caches and
-          (is_nil(member["source_map"]) or Validation.relative?(member["source_map"]))
+        with true <- Validation.exact?(member, @member_keys),
+             true <- Validation.relative?(member["path"]),
+             true <- member["role"] in @roles,
+             {:ok, mime, cache} <-
+               WebMemberMetadata.resolve(member["role"], member["path"]),
+             true <- member["mime"] == mime,
+             true <- member["cache"] == cache,
+             true <- Validation.digest?(member["sha256"]),
+             true <- Validation.uint?(member["size"]),
+             true <- is_nil(member["source_map"]) or Validation.relative?(member["source_map"]) do
+          true
+        else
+          _ -> false
+        end
       end)
   end
 
