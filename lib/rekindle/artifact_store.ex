@@ -42,8 +42,10 @@ defmodule Rekindle.ArtifactStore do
 
   @spec activate(GenServer.server(), GenerationRef.t(), non_neg_integer()) ::
           :ok | {:error, Failure.t()}
-  def activate(server, generation, source_revision),
-    do: GenServer.call(server, {:activate, generation, source_revision}, :infinity)
+  @spec activate(GenServer.server(), GenerationRef.t(), non_neg_integer(), keyword()) ::
+          :ok | {:error, Failure.t()}
+  def activate(server, generation, source_revision, options \\ []),
+    do: GenServer.call(server, {:activate, generation, source_revision, options}, :infinity)
 
   @spec current(GenServer.server(), Rekindle.target()) :: {:ok, GenerationRef.t()} | :none
   def current(server, target), do: GenServer.call(server, {:current, target}, :infinity)
@@ -165,21 +167,34 @@ defmodule Rekindle.ArtifactStore do
     end
   end
 
-  def handle_call({:activate, generation, revision}, _from, state) do
-    with :ok <- writable(state),
-         true <- uint?(revision),
-         {:ok, generation} <- validate_generation(state, generation),
-         :ok <- generation_source_revision(state, generation, revision),
-         previous <- read_pointer(state, :current, generation.target),
-         :ok <- write_pointer(state, :current, generation, revision),
-         :ok <- write_fallback(state, previous) do
-      {:reply, :ok, state}
-    else
-      false ->
-        {:reply, {:error, invalid(:configuration, :config_invalid, "Revision is invalid")}, state}
+  def handle_call({:activate, generation, revision, options}, _from, state) do
+    result =
+      with :ok <- writable(state),
+           true <- valid_activation_options?(options),
+           true <- uint?(revision),
+           {:ok, generation} <- validate_generation(state, generation),
+           :ok <- recover_activation(state.root, generation.target),
+           :ok <- generation_source_revision(state, generation, revision),
+           {:ok, current} <- pointer_value(state, :current, generation.target),
+           {:ok, fallback} <- pointer_value(state, :fallback, generation.target) do
+        activate_generation(state, generation, revision, current, fallback, options)
+      else
+        false ->
+          {:error, invalid(:configuration, :config_invalid, "Activation request is invalid")}
+
+        {:error, %Failure{} = failure} ->
+          {:error, failure}
+      end
+
+    case result do
+      :ok ->
+        {:reply, :ok, state}
 
       {:error, %Failure{} = failure} ->
         {:reply, {:error, failure}, state}
+
+      {:quarantine, %Failure{} = failure} ->
+        {:reply, {:error, failure}, %{state | quarantined?: true}}
     end
   end
 
@@ -364,7 +379,7 @@ defmodule Rekindle.ArtifactStore do
 
   defp ensure_directories(root) do
     directories =
-      ["staging", "current", "fallback", "seals", "deletions"] ++
+      ["staging", "current", "fallback", "activations", "seals", "deletions"] ++
         for(
           parent <- ["generations", "references", "seals"],
           target <- ["web", "desktop"],
@@ -826,8 +841,8 @@ defmodule Rekindle.ArtifactStore do
   defp maybe_generation_source_revision(state, generation, expected),
     do: generation_source_revision(state, generation, expected)
 
-  defp write_pointer(state, kind, generation, revision) do
-    record = %{
+  defp pointer_record(generation, revision) do
+    %{
       "v" => 1,
       "target" => Atom.to_string(generation.target),
       "generation_id" => generation.generation_id,
@@ -835,17 +850,140 @@ defmodule Rekindle.ArtifactStore do
       "manifest_digest" => generation.manifest_digest,
       "source_revision" => revision
     }
-
-    Filesystem.atomic_write(pointer_path(state, kind, generation.target), record)
   end
 
-  defp write_fallback(_state, :none), do: :ok
+  defp activate_generation(state, generation, revision, current, fallback, options) do
+    candidate = pointer_record(generation, revision)
 
-  defp write_fallback(state, {:ok, record}) do
-    Filesystem.atomic_write(pointer_path(state, :fallback, target_atom(record["target"])), record)
+    if current == candidate do
+      :ok
+    else
+      desired_fallback = current || fallback
+
+      journal = %{
+        "v" => 1,
+        "target" => Atom.to_string(generation.target),
+        "old_current" => current,
+        "old_fallback" => fallback,
+        "new_current" => candidate
+      }
+
+      run_activation_transaction(
+        state,
+        generation.target,
+        journal,
+        desired_fallback,
+        options
+      )
+    end
   end
 
-  defp write_fallback(_state, {:error, %Failure{} = failure}), do: {:error, failure}
+  defp run_activation_transaction(state, target, journal, desired_fallback, options) do
+    path = activation_path(state.root, target)
+
+    with :ok <- Filesystem.atomic_write(path, journal),
+         :ok <- checkpoint(options, :activation_journaled),
+         :ok <- publish_pointer(state, :fallback, target, desired_fallback),
+         :ok <- checkpoint(options, :activation_fallback_published) do
+      case publish_pointer(state, :current, target, journal["new_current"]) do
+        :ok ->
+          commit_activation(state, target, journal, desired_fallback, options)
+
+        {:error, %Failure{} = failure} ->
+          resolve_activation_write(state, target, journal, desired_fallback, failure)
+      end
+    else
+      {:error, %Failure{} = failure} ->
+        abort_activation(state, target, journal, failure)
+    end
+  end
+
+  defp commit_activation(state, target, journal, desired_fallback, options) do
+    _ = checkpoint(options, :activation_current_published)
+
+    case finish_committed_activation(state, target, journal, desired_fallback) do
+      :ok ->
+        _ = checkpoint(options, :activation_journal_removed)
+        :ok
+
+      {:error, %Failure{}} ->
+        # The current pointer is the commit point. The durable journal completes cleanup on restart.
+        :ok
+    end
+  end
+
+  defp resolve_activation_write(state, target, journal, desired_fallback, failure) do
+    new_current = journal["new_current"]
+
+    case read_pointer(state, :current, target) do
+      {:ok, ^new_current} ->
+        commit_activation(state, target, journal, desired_fallback, [])
+
+      {:ok, _current} ->
+        abort_activation(state, target, journal, failure)
+
+      :none ->
+        abort_activation(state, target, journal, failure)
+
+      {:error, %Failure{}} ->
+        {:quarantine,
+         invalid(:execution, :cleanup_unconfirmed, "Activation commit state is ambiguous")}
+    end
+  end
+
+  defp abort_activation(state, target, journal, failure) do
+    with :ok <- ensure_pointer(state, :current, target, journal["old_current"]),
+         :ok <- ensure_pointer(state, :fallback, target, journal["old_fallback"]),
+         :ok <- remove_activation_journal(state.root, target) do
+      {:error, failure}
+    else
+      {:error, %Failure{}} ->
+        {:quarantine,
+         invalid(:execution, :cleanup_unconfirmed, "Activation rollback could not be confirmed")}
+    end
+  end
+
+  defp finish_committed_activation(state, target, journal, desired_fallback) do
+    with :ok <- ensure_pointer(state, :fallback, target, desired_fallback),
+         :ok <- ensure_pointer(state, :current, target, journal["new_current"]),
+         :ok <- remove_activation_journal(state.root, target) do
+      :ok
+    end
+  end
+
+  defp ensure_pointer(state, kind, target, desired) do
+    case read_pointer(state, kind, target) do
+      :none when is_nil(desired) -> :ok
+      {:ok, current} when current == desired -> :ok
+      :none -> publish_pointer(state, kind, target, desired)
+      {:ok, _current} -> publish_pointer(state, kind, target, desired)
+      {:error, %Failure{} = failure} -> {:error, failure}
+    end
+  end
+
+  defp publish_pointer(state, kind, target, nil) do
+    path = pointer_path(state, kind, target)
+
+    with :ok <- remove_file(path),
+         :ok <- Filesystem.sync_directory(Path.dirname(path)) do
+      :ok
+    end
+  end
+
+  defp publish_pointer(state, kind, target, record) do
+    Filesystem.atomic_write(pointer_path(state, kind, target), record)
+  end
+
+  defp pointer_value(state, kind, target) do
+    case read_pointer(state, kind, target) do
+      :none -> {:ok, nil}
+      {:ok, record} -> {:ok, record}
+      {:error, %Failure{} = failure} -> {:error, failure}
+    end
+  end
+
+  defp valid_activation_options?(options),
+    do: Keyword.keyword?(options) and Keyword.keys(options) -- [:checkpoint] == []
 
   defp pointer_generation(state, kind, target) when target in [:web, :desktop] do
     case read_pointer(state, kind, target) do
@@ -1124,9 +1262,15 @@ defmodule Rekindle.ArtifactStore do
     else
       case recover_staging(root) do
         :ok ->
-          case recover_deletions(root) do
-            :ok -> validate_persisted_state(root)
-            {:error, %Failure{} = failure} -> quarantine(root, failure.message)
+          case recover_activations(root) do
+            :ok ->
+              case recover_deletions(root) do
+                :ok -> validate_persisted_state(root)
+                {:error, %Failure{} = failure} -> quarantine(root, failure.message)
+              end
+
+            {:error, %Failure{} = failure} ->
+              quarantine(root, failure.message)
           end
 
         {:error, %Failure{} = failure} ->
@@ -1134,6 +1278,91 @@ defmodule Rekindle.ArtifactStore do
       end
     end
   end
+
+  defp recover_activations(root) do
+    directory = Path.join(root, "activations")
+
+    case File.ls(directory) do
+      {:ok, names} ->
+        Enum.reduce_while(Enum.sort(names), :ok, fn name, :ok ->
+          case activation_target(name) do
+            {:ok, target} ->
+              case recover_activation(root, target) do
+                :ok -> {:cont, :ok}
+                {:error, _} = error -> {:halt, error}
+              end
+
+            :error ->
+              {:halt,
+               {:error, invalid(:artifact, :cache_corrupt, "Activation journal is invalid")}}
+          end
+        end)
+
+      {:error, _reason} ->
+        {:error, invalid(:execution, :io_failed, "Activation state could not be listed")}
+    end
+  end
+
+  defp recover_activation(root, target) do
+    state = %__MODULE__{root: root}
+    path = activation_path(root, target)
+
+    case read_canonical(path) do
+      :none ->
+        :ok
+
+      {:ok, journal} ->
+        with true <- valid_activation_journal?(journal, target) do
+          desired_fallback = journal["old_current"] || journal["old_fallback"]
+          new_current = journal["new_current"]
+
+          case read_pointer(state, :current, target) do
+            {:ok, ^new_current} ->
+              finish_committed_activation(state, target, journal, desired_fallback)
+
+            {:ok, _current} ->
+              rollback_recovered_activation(state, target, journal)
+
+            :none ->
+              rollback_recovered_activation(state, target, journal)
+
+            {:error, %Failure{} = failure} ->
+              {:error, failure}
+          end
+        else
+          _ -> {:error, invalid(:artifact, :cache_corrupt, "Activation journal is invalid")}
+        end
+
+      {:error, %Failure{} = failure} ->
+        {:error, failure}
+    end
+  end
+
+  defp rollback_recovered_activation(state, target, journal) do
+    with :ok <- ensure_pointer(state, :current, target, journal["old_current"]),
+         :ok <- ensure_pointer(state, :fallback, target, journal["old_fallback"]),
+         :ok <- remove_activation_journal(state.root, target) do
+      :ok
+    end
+  end
+
+  defp valid_activation_journal?(journal, target) do
+    is_map(journal) and
+      Map.keys(journal) |> Enum.sort() ==
+        ~w[new_current old_current old_fallback target v] |> Enum.sort() and
+      journal["v"] == 1 and journal["target"] == Atom.to_string(target) and
+      optional_pointer?(journal["old_current"], target) and
+      optional_pointer?(journal["old_fallback"], target) and
+      valid_pointer?(journal["new_current"], target) and
+      journal["old_current"] != journal["new_current"]
+  end
+
+  defp optional_pointer?(nil, _target), do: true
+  defp optional_pointer?(record, target), do: valid_pointer?(record, target)
+
+  defp activation_target("web.json"), do: {:ok, :web}
+  defp activation_target("desktop.json"), do: {:ok, :desktop}
+  defp activation_target(_name), do: :error
 
   defp recover_staging(root) do
     directory = Path.join(root, "staging")
@@ -1398,6 +1627,7 @@ defmodule Rekindle.ArtifactStore do
   defp validate_control_directories(state) do
     with :ok <- exact_record_names(Path.join(state.root, "current")),
          :ok <- exact_record_names(Path.join(state.root, "fallback")),
+         {:ok, []} <- File.ls(Path.join(state.root, "activations")),
          {:ok, []} <- File.ls(Path.join(state.root, "deletions")) do
       :ok
     else
@@ -1728,6 +1958,18 @@ defmodule Rekindle.ArtifactStore do
 
   defp pointer_path(state, kind, target),
     do: Path.join([state.root, Atom.to_string(kind), Atom.to_string(target) <> ".json"])
+
+  defp activation_path(root, target),
+    do: Path.join([root, "activations", Atom.to_string(target) <> ".json"])
+
+  defp remove_activation_journal(root, target) do
+    path = activation_path(root, target)
+
+    with :ok <- remove_file(path),
+         :ok <- Filesystem.sync_directory(Path.dirname(path)) do
+      :ok
+    end
+  end
 
   defp deletion_path(state, generation_id),
     do: Path.join([state.root, "deletions", generation_id <> ".json"])

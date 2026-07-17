@@ -54,6 +54,121 @@ defmodule Rekindle.ArtifactStoreTest do
     assert pointer["generation_id"] == generation2.generation_id
   end
 
+  test "activation errors preserve both prior pointers and a retry preserves the true fallback" do
+    root = state_root()
+    {:ok, store} = start_store(root)
+    [first, second, third] = sealed_web_generations(store, ["first", "second", "third"])
+
+    assert :ok = ArtifactStore.activate(store, first, 1)
+
+    fallback_directory = Path.join(root, "fallback")
+    File.chmod!(fallback_directory, 0o500)
+
+    assert {:error, %{code: :io_failed}} = ArtifactStore.activate(store, second, 2)
+    assert {:ok, ^first} = ArtifactStore.current(store, :web)
+    assert :none = ArtifactStore.fallback(store, :web)
+
+    File.chmod!(fallback_directory, 0o700)
+    assert :ok = ArtifactStore.activate(store, second, 2)
+    assert {:ok, ^second} = ArtifactStore.current(store, :web)
+    assert {:ok, ^first} = ArtifactStore.fallback(store, :web)
+
+    current_directory = Path.join(root, "current")
+    File.chmod!(current_directory, 0o500)
+
+    assert {:error, %{code: :io_failed}} = ArtifactStore.activate(store, third, 3)
+    assert {:ok, ^second} = ArtifactStore.current(store, :web)
+    assert {:ok, ^first} = ArtifactStore.fallback(store, :web)
+
+    File.chmod!(current_directory, 0o700)
+    assert :ok = ArtifactStore.activate(store, third, 3)
+    assert {:ok, ^third} = ArtifactStore.current(store, :web)
+    assert {:ok, ^second} = ArtifactStore.fallback(store, :web)
+    assert File.ls!(Path.join(root, "activations")) == []
+  end
+
+  test "activation checkpoint errors obey the pointer commit boundary" do
+    for checkpoint <- [
+          :activation_journaled,
+          :activation_fallback_published,
+          :activation_current_published,
+          :activation_journal_removed
+        ] do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      [first, second] = sealed_web_generations(store, ["old-#{checkpoint}", "new-#{checkpoint}"])
+      assert :ok = ArtifactStore.activate(store, first, 1)
+
+      result =
+        ArtifactStore.activate(store, second, 2,
+          checkpoint: fn
+            ^checkpoint -> {:error, injected_activation_failure()}
+            _other -> :ok
+          end
+        )
+
+      if checkpoint in [:activation_journaled, :activation_fallback_published] do
+        assert {:error, %{code: :io_failed}} = result
+        assert {:ok, ^first} = ArtifactStore.current(store, :web)
+        assert :none = ArtifactStore.fallback(store, :web)
+      else
+        assert :ok = result
+        assert {:ok, ^second} = ArtifactStore.current(store, :web)
+        assert {:ok, ^first} = ArtifactStore.fallback(store, :web)
+      end
+
+      assert File.ls!(Path.join(root, "activations")) == []
+      assert :ok = ArtifactStore.activate(store, second, 2)
+      assert {:ok, ^second} = ArtifactStore.current(store, :web)
+      assert {:ok, ^first} = ArtifactStore.fallback(store, :web)
+    end
+  end
+
+  test "recovers activation crashes on both sides of the pointer commit boundary" do
+    previous = Process.flag(:trap_exit, true)
+    on_exit(fn -> Process.flag(:trap_exit, previous) end)
+
+    for checkpoint <- [
+          :activation_journaled,
+          :activation_fallback_published,
+          :activation_current_published,
+          :activation_journal_removed
+        ] do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      [first, second] = sealed_web_generations(store, ["old-#{checkpoint}", "new-#{checkpoint}"])
+      assert :ok = ArtifactStore.activate(store, first, 1)
+
+      assert capture_log(fn ->
+               assert catch_exit(
+                        ArtifactStore.activate(store, second, 2,
+                          checkpoint: fn
+                            ^checkpoint -> exit(:injected_activation_crash)
+                            _other -> :ok
+                          end
+                        )
+                      )
+
+               assert_receive {:EXIT, ^store, :injected_activation_crash}
+             end) =~ "injected_activation_crash"
+
+      {:ok, recovered} = start_store(root)
+
+      if checkpoint in [:activation_journaled, :activation_fallback_published] do
+        assert {:ok, ^first} = ArtifactStore.current(recovered, :web)
+        assert :none = ArtifactStore.fallback(recovered, :web)
+      else
+        assert {:ok, ^second} = ArtifactStore.current(recovered, :web)
+        assert {:ok, ^first} = ArtifactStore.fallback(recovered, :web)
+      end
+
+      assert File.ls!(Path.join(root, "activations")) == []
+      assert :ok = ArtifactStore.activate(recovered, second, 2)
+      assert {:ok, ^second} = ArtifactStore.current(recovered, :web)
+      assert {:ok, ^first} = ArtifactStore.fallback(recovered, :web)
+    end
+  end
+
   test "rejects escaping, aliased, extra, changed, linked, and special members" do
     for mutation <- [:traversal, :collision, :extra, :digest, :manifest, :symlink, :hard_link] do
       root = state_root()
@@ -513,6 +628,25 @@ defmodule Rekindle.ArtifactStoreTest do
     }
 
     {staging, descriptor}
+  end
+
+  defp sealed_web_generations(store, contents) do
+    contents
+    |> Enum.with_index(1)
+    |> Enum.map(fn {content, revision} ->
+      {staging, descriptor} = stage_web(store, content, revision)
+      {:ok, generation} = ArtifactStore.seal(staging, descriptor)
+      generation
+    end)
+  end
+
+  defp injected_activation_failure do
+    Rekindle.Failure.new!(
+      target: :web,
+      stage: :execution,
+      code: :io_failed,
+      message: "Injected activation failure"
+    )
   end
 
   defp stage_sparse_desktop(store, marker, size) do
