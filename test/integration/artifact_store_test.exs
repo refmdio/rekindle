@@ -703,7 +703,7 @@ defmodule Rekindle.ArtifactStoreTest do
       }
 
       journal_path = Path.join(root, "deletions/#{first.generation_id}.json")
-      assert :ok = Filesystem.atomic_write(journal_path, journal)
+      assert :ok = Filesystem.atomic_write(journal_path, journal, :deletion_journal)
       corrupt_pointer(root, kind, mutation)
 
       {:ok, recovered} = start_store(root, retained_generations: 1)
@@ -886,6 +886,453 @@ defmodule Rekindle.ArtifactStoreTest do
     eventually(fn -> refute File.exists?(Path.dirname(path)) end)
   end
 
+  test "preserves project identity while recovering attempt allocation at every state write boundary" do
+    for boundary <- state_write_boundaries() do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      :ok = GenServer.stop(store)
+
+      project_id_path = Path.join(root, "project-id")
+      project_id = File.read!(project_id_path)
+
+      attempt_id = Filesystem.random_id()
+      attempt_path = Path.join([root, "staging", attempt_id])
+      body = Path.join(attempt_path, "body")
+      File.mkdir!(attempt_path)
+      File.chmod!(attempt_path, 0o700)
+      File.mkdir!(body)
+      File.chmod!(body, 0o700)
+
+      marker = %{
+        "v" => 1,
+        "attempt_id" => attempt_id,
+        "generation_id" => Filesystem.random_id(),
+        "session_id" => Filesystem.random_id(),
+        "target" => "web",
+        "owner" => inspect(self())
+      }
+
+      crash_state_write(
+        Path.join(attempt_path, "attempt-v1.json"),
+        marker,
+        :attempt_marker,
+        boundary
+      )
+
+      {:ok, recovered} = start_store(root)
+      assert File.read!(project_id_path) == project_id
+      refute File.exists?(attempt_path)
+      assert state_temporaries(root) == []
+      assert {:ok, _staging} = ArtifactStore.allocate(recovered, :web)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
+  test "recovers first-start project identity writes at every state write boundary" do
+    for boundary <- state_write_boundaries() do
+      root = state_root()
+      File.mkdir!(root)
+      File.chmod!(root, 0o700)
+      intended = Filesystem.random_id()
+
+      crash_state_write(Path.join(root, "project-id"), intended, :project_id, boundary)
+
+      {:ok, store} = start_store(root)
+      project_id = File.read!(Path.join(root, "project-id"))
+      assert Regex.match?(~r/\A[0-9a-f]{32}\z/, project_id)
+
+      if boundary == :created,
+        do: refute(project_id == intended),
+        else: assert(project_id == intended)
+
+      assert state_temporaries(root) == []
+      assert {:ok, _staging} = ArtifactStore.allocate(store, :web)
+      :ok = GenServer.stop(store)
+    end
+  end
+
+  test "recovers publication record writes at every state write boundary" do
+    previous = Process.flag(:trap_exit, true)
+    on_exit(fn -> Process.flag(:trap_exit, previous) end)
+
+    for kind <- [:seal_journal, :seal_metadata, :generation_reference],
+        boundary <- state_write_boundaries() do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      {staging, descriptor} = stage_web(store, "#{kind}-#{boundary}")
+      expected = generation(staging, descriptor)
+
+      capture_log(fn ->
+        assert catch_exit(
+                 ArtifactStore.seal(staging, descriptor,
+                   checkpoint: state_write_crash_callback(kind, boundary)
+                 )
+               )
+
+        assert_receive {:EXIT, ^store, :injected_state_write_crash}
+      end)
+
+      {:ok, recovered} = start_store(root)
+      assert state_temporaries(root) == []
+
+      if kind == :seal_journal do
+        refute File.exists?(artifact_path(root, :web, descriptor.artifact_id))
+        assert {:error, %{code: :artifact_missing}} = ArtifactStore.acquire(recovered, expected)
+      else
+        assert {:ok, lease} = ArtifactStore.acquire(recovered, expected)
+        assert :ok = ArtifactStore.release(lease)
+      end
+
+      assert {:ok, _next} = ArtifactStore.allocate(recovered, :web)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
+  test "recovers metadata and reference writes interrupted during publication recovery" do
+    previous = Process.flag(:trap_exit, true)
+    on_exit(fn -> Process.flag(:trap_exit, previous) end)
+
+    for kind <- [:seal_metadata, :generation_reference], boundary <- state_write_boundaries() do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      {staging, descriptor} = stage_web(store, "recovery-#{kind}-#{boundary}")
+      expected = generation(staging, descriptor)
+
+      capture_log(fn ->
+        assert catch_exit(
+                 ArtifactStore.seal(staging, descriptor,
+                   checkpoint: fn
+                     :renamed -> exit(:injected_publication_crash)
+                     _other -> :ok
+                   end
+                 )
+               )
+
+        assert_receive {:EXIT, ^store, :injected_publication_crash}
+      end)
+
+      {path, record} = recovery_record(root, kind, staging, descriptor)
+
+      if kind == :generation_reference do
+        {metadata_path, metadata} = recovery_record(root, :seal_metadata, staging, descriptor)
+        assert :ok = Filesystem.atomic_write(metadata_path, metadata, :seal_metadata)
+      end
+
+      crash_state_write(path, record, kind, boundary)
+
+      {:ok, recovered} = start_store(root)
+      assert state_temporaries(root) == []
+      assert {:ok, lease} = ArtifactStore.acquire(recovered, expected)
+      assert :ok = ArtifactStore.release(lease)
+      assert {:ok, _next} = ArtifactStore.allocate(recovered, :web)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
+  test "recovers rollback pointer writes at every state write boundary" do
+    for boundary <- state_write_boundaries() do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      [first, second] = sealed_web_generations(store, ["old-#{boundary}", "new-#{boundary}"])
+      assert :ok = ArtifactStore.activate(store, first, 1)
+      :ok = GenServer.stop(store)
+
+      old_current = read_json(Path.join(root, "current/web.json"))
+      new_current = pointer_record(second, 2)
+
+      journal = %{
+        "v" => 1,
+        "target" => "web",
+        "old_current" => old_current,
+        "old_fallback" => nil,
+        "new_current" => new_current
+      }
+
+      journal_path = Path.join(root, "activations/web.json")
+      File.write!(journal_path, Rekindle.CanonicalValue.encode!(journal))
+      File.chmod!(journal_path, 0o600)
+
+      crash_state_write(
+        Path.join(root, "current/web.json"),
+        new_current,
+        :rollback_pointer,
+        boundary
+      )
+
+      {:ok, recovered} = start_store(root)
+      assert state_temporaries(root) == []
+      assert File.ls!(Path.join(root, "activations")) == []
+
+      if boundary in [:renamed, :directory_synced] do
+        assert {:ok, ^second} = ArtifactStore.current(recovered, :web)
+        assert {:ok, ^first} = ArtifactStore.fallback(recovered, :web)
+      else
+        assert {:ok, ^first} = ArtifactStore.current(recovered, :web)
+        assert :none = ArtifactStore.fallback(recovered, :web)
+      end
+
+      assert :ok = ArtifactStore.activate(recovered, second, 2)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
+  test "recovers deletion journal writes at every state write boundary" do
+    previous = Process.flag(:trap_exit, true)
+    on_exit(fn -> Process.flag(:trap_exit, previous) end)
+
+    for boundary <- state_write_boundaries() do
+      root = state_root()
+      {:ok, store} = start_store(root, retained_generations: 1)
+      [first, second] = sealed_web_generations(store, ["delete-#{boundary}", "keep-#{boundary}"])
+
+      capture_log(fn ->
+        assert catch_exit(
+                 ArtifactStore.collect(store, [],
+                   checkpoint: state_write_crash_callback(:deletion_journal, boundary)
+                 )
+               )
+
+        assert_receive {:EXIT, ^store, :injected_state_write_crash}
+      end)
+
+      {:ok, recovered} = start_store(root, retained_generations: 1)
+      assert state_temporaries(root) == []
+      assert File.dir?(artifact_path(root, :web, second.artifact_id))
+
+      if boundary in [:renamed, :directory_synced] do
+        refute File.exists?(artifact_path(root, :web, first.artifact_id))
+      else
+        assert File.dir?(artifact_path(root, :web, first.artifact_id))
+      end
+
+      assert {:ok, _result} = ArtifactStore.collect(recovered)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
+  test "restores interrupted quarantine writes at every state write boundary" do
+    for boundary <- state_write_boundaries() do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      :ok = GenServer.stop(store)
+
+      record = %{"v" => 1, "state" => "cleanup_required", "reason" => "test"}
+
+      crash_state_write(
+        Path.join(root, "quarantine-v1.json"),
+        record,
+        :quarantine,
+        boundary
+      )
+
+      {:ok, recovered} = start_store(root)
+      assert File.regular?(Path.join(root, "quarantine-v1.json"))
+      assert state_temporaries(root) == []
+
+      assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
+  test "quarantines ambiguous state temporaries without changing them" do
+    for mutation <- [
+          :legacy,
+          :foreign_typed,
+          :modified,
+          :project_conflict,
+          :conflicting,
+          :duplicate
+        ] do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      :ok = GenServer.stop(store)
+      project_id = File.read!(Path.join(root, "project-id"))
+
+      temporaries = ambiguous_state_temporaries(root, mutation, project_id)
+      before = Map.new(temporaries, &{&1, File.read!(&1)})
+
+      {:ok, recovered} = start_store(root)
+      assert File.regular?(Path.join(root, "quarantine-v1.json"))
+      assert Map.new(temporaries, &{&1, File.read!(&1)}) == before
+      assert File.read!(Path.join(root, "project-id")) == project_id
+
+      assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
+  test "preserves a deletion temporary when its reference is malformed" do
+    root = state_root()
+    {:ok, store} = start_store(root)
+    {staging, descriptor} = stage_web(store, "malformed-deletion-context")
+    {:ok, generation} = ArtifactStore.seal(staging, descriptor)
+    :ok = GenServer.stop(store)
+
+    reference = Path.join([root, "references", "web", generation.generation_id <> ".json"])
+    malformed_reference = Rekindle.CanonicalValue.encode!(%{"v" => 1})
+    File.chmod!(reference, 0o600)
+    File.write!(reference, malformed_reference)
+
+    journal = %{
+      "v" => 1,
+      "target" => "web",
+      "generation_id" => generation.generation_id,
+      "artifact_id" => generation.artifact_id
+    }
+
+    bytes = Rekindle.CanonicalValue.encode!(journal)
+
+    name =
+      Filesystem.state_temporary_name(
+        :deletion_journal,
+        generation.generation_id <> ".json",
+        Filesystem.sha256_bytes(bytes),
+        "00000000000000000000000000000000"
+      )
+
+    temporary = Path.join(root, "deletions/#{name}")
+    File.write!(temporary, "")
+    File.chmod!(temporary, 0o600)
+
+    {:ok, recovered} = start_store(root)
+    assert File.read!(reference) == malformed_reference
+    assert File.read!(temporary) == ""
+    assert File.regular?(Path.join(root, "quarantine-v1.json"))
+    assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
+    :ok = GenServer.stop(recovered)
+  end
+
+  test "preserves a rollback temporary when its prior pointer is malformed" do
+    root = state_root()
+    {:ok, store} = start_store(root)
+    [first, second] = sealed_web_generations(store, ["valid-current", "candidate-current"])
+    assert :ok = ArtifactStore.activate(store, first, 1)
+    :ok = GenServer.stop(store)
+
+    current_path = Path.join(root, "current/web.json")
+    old_current = read_json(current_path)
+    new_current = pointer_record(second, 2)
+
+    journal = %{
+      "v" => 1,
+      "target" => "web",
+      "old_current" => old_current,
+      "old_fallback" => nil,
+      "new_current" => new_current
+    }
+
+    journal_path = Path.join(root, "activations/web.json")
+    File.write!(journal_path, Rekindle.CanonicalValue.encode!(journal))
+    File.chmod!(journal_path, 0o600)
+
+    malformed_pointer = Rekindle.CanonicalValue.encode!(%{"v" => 1})
+    File.write!(current_path, malformed_pointer)
+    File.chmod!(current_path, 0o600)
+
+    bytes = Rekindle.CanonicalValue.encode!(new_current)
+
+    name =
+      Filesystem.state_temporary_name(
+        :rollback_pointer,
+        "web.json",
+        Filesystem.sha256_bytes(bytes),
+        "00000000000000000000000000000000"
+      )
+
+    temporary = Path.join(root, "current/#{name}")
+    File.write!(temporary, bytes)
+    File.chmod!(temporary, 0o600)
+
+    {:ok, recovered} = start_store(root)
+    assert File.read!(current_path) == malformed_pointer
+    assert File.read!(temporary) == bytes
+    assert File.regular?(Path.join(root, "quarantine-v1.json"))
+    assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
+    :ok = GenServer.stop(recovered)
+  end
+
+  test "preserves generic state when activation storage contains a foreign temporary" do
+    root = state_root()
+    {:ok, store} = start_store(root)
+    [first, second] = sealed_web_generations(store, ["mixed-old", "mixed-new"])
+    assert :ok = ArtifactStore.activate(store, first, 1)
+    :ok = GenServer.stop(store)
+
+    current_path = Path.join(root, "current/web.json")
+    old_current_bytes = File.read!(current_path)
+    old_current = Jason.decode!(old_current_bytes)
+    new_current = pointer_record(second, 2)
+
+    journal = %{
+      "v" => 1,
+      "target" => "web",
+      "old_current" => old_current,
+      "old_fallback" => nil,
+      "new_current" => new_current
+    }
+
+    journal_path = Path.join(root, "activations/web.json")
+    File.write!(journal_path, Rekindle.CanonicalValue.encode!(journal))
+    File.chmod!(journal_path, 0o600)
+
+    generic_bytes = Rekindle.CanonicalValue.encode!(new_current)
+
+    generic_name =
+      Filesystem.state_temporary_name(
+        :rollback_pointer,
+        "web.json",
+        Filesystem.sha256_bytes(generic_bytes),
+        "00000000000000000000000000000000"
+      )
+
+    generic = Path.join(root, "current/#{generic_name}")
+    File.write!(generic, generic_bytes)
+    File.chmod!(generic, 0o600)
+
+    activation = Path.join(root, "activations/.rekindle-state-v1-foreign.tmp")
+
+    File.write!(activation, "malformed")
+    File.chmod!(activation, 0o600)
+
+    {:ok, recovered} = start_store(root)
+    assert File.read!(current_path) == old_current_bytes
+    assert File.read!(generic) == generic_bytes
+    assert File.read!(activation) == "malformed"
+    assert File.regular?(Path.join(root, "quarantine-v1.json"))
+    assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
+    :ok = GenServer.stop(recovered)
+  end
+
+  test "does not remove a colliding state temporary it did not create" do
+    root = state_root()
+    {:ok, store} = start_store(root)
+    :ok = GenServer.stop(store)
+
+    path = Path.join(root, "project-id")
+    project_id = File.read!(path)
+    transaction_id = "00000000000000000000000000000000"
+
+    name =
+      Filesystem.state_temporary_name(
+        :project_id,
+        "project-id",
+        Filesystem.sha256_bytes(project_id),
+        transaction_id
+      )
+
+    temporary = Path.join(root, name)
+    File.write!(temporary, "foreign")
+    File.chmod!(temporary, 0o600)
+
+    assert {:error, %{code: :io_failed}} =
+             Filesystem.atomic_write(path, project_id, :project_id,
+               transaction_id: transaction_id
+             )
+
+    assert File.read!(temporary) == "foreign"
+    assert File.read!(path) == project_id
+  end
+
   defp start_store(root, options \\ []) do
     ArtifactStore.start_link(
       Keyword.merge(
@@ -893,6 +1340,209 @@ defmodule Rekindle.ArtifactStoreTest do
         options
       )
     )
+  end
+
+  defp state_write_boundaries,
+    do: [:created, :written, :file_synced, :renamed, :directory_synced]
+
+  defp state_write_crash_callback(kind, boundary) do
+    fn
+      {:artifact_state_write, ^kind, ^boundary} -> exit(:injected_state_write_crash)
+      _other -> :ok
+    end
+  end
+
+  defp crash_state_write(path, value, kind, boundary) do
+    {_pid, monitor} =
+      spawn_monitor(fn ->
+        Filesystem.atomic_write(path, value, kind,
+          checkpoint: state_write_crash_callback(kind, boundary)
+        )
+      end)
+
+    assert_receive {:DOWN, ^monitor, :process, _pid, :injected_state_write_crash}, 5_000
+  end
+
+  defp state_temporaries(root) do
+    Path.wildcard(Path.join(root, "**/*.tmp"), match_dot: true)
+  end
+
+  defp ambiguous_state_temporaries(root, :legacy, _project_id) do
+    attempt_id = Filesystem.random_id()
+    attempt = Path.join([root, "staging", attempt_id])
+    File.mkdir!(attempt)
+    File.chmod!(attempt, 0o700)
+    File.mkdir!(Path.join(attempt, "body"))
+    File.chmod!(Path.join(attempt, "body"), 0o700)
+    path = Path.join(attempt, ".attempt-v1.json.00000000000000000000000000000000.tmp")
+
+    marker = %{
+      "v" => 1,
+      "attempt_id" => attempt_id,
+      "generation_id" => Filesystem.random_id(),
+      "session_id" => Filesystem.random_id(),
+      "target" => "web",
+      "owner" => inspect(self())
+    }
+
+    File.write!(path, Rekindle.CanonicalValue.encode!(marker))
+    File.chmod!(path, 0o600)
+    [path]
+  end
+
+  defp ambiguous_state_temporaries(root, :foreign_typed, _project_id) do
+    name =
+      Filesystem.state_temporary_name(
+        :attempt_marker,
+        "attempt-v1.json",
+        Filesystem.sha256_bytes(""),
+        "00000000000000000000000000000000"
+      )
+
+    path = Path.join(root, name)
+    File.write!(path, "")
+    File.chmod!(path, 0o600)
+    [path]
+  end
+
+  defp ambiguous_state_temporaries(root, :modified, project_id) do
+    name =
+      Filesystem.state_temporary_name(
+        :project_id,
+        "project-id",
+        Filesystem.sha256_bytes(project_id),
+        "00000000000000000000000000000000"
+      )
+
+    path = Path.join(root, name)
+    File.write!(path, "changed")
+    File.chmod!(path, 0o600)
+    [path]
+  end
+
+  defp ambiguous_state_temporaries(root, :project_conflict, project_id) do
+    conflicting =
+      if project_id == String.duplicate("a", 32),
+        do: String.duplicate("b", 32),
+        else: String.duplicate("a", 32)
+
+    digest = Filesystem.sha256_bytes(conflicting)
+
+    name =
+      Filesystem.state_temporary_name(
+        :project_id,
+        "project-id",
+        digest,
+        "00000000000000000000000000000000"
+      )
+
+    path = Path.join(root, name)
+    File.write!(path, conflicting)
+    File.chmod!(path, 0o600)
+    [path]
+  end
+
+  defp ambiguous_state_temporaries(root, :duplicate, project_id) do
+    digest = Filesystem.sha256_bytes(project_id)
+
+    for transaction <- ["00000000000000000000000000000000", "11111111111111111111111111111111"] do
+      name = Filesystem.state_temporary_name(:project_id, "project-id", digest, transaction)
+      path = Path.join(root, name)
+      File.write!(path, project_id)
+      File.chmod!(path, 0o600)
+      path
+    end
+  end
+
+  defp ambiguous_state_temporaries(root, :conflicting, _project_id) do
+    attempt_id = Filesystem.random_id()
+    attempt = Path.join([root, "staging", attempt_id])
+    body = Path.join(attempt, "body")
+    File.mkdir!(attempt)
+    File.chmod!(attempt, 0o700)
+    File.mkdir!(body)
+    File.chmod!(body, 0o700)
+
+    marker = %{
+      "v" => 1,
+      "attempt_id" => attempt_id,
+      "generation_id" => Filesystem.random_id(),
+      "session_id" => Filesystem.random_id(),
+      "target" => "web",
+      "owner" => inspect(self())
+    }
+
+    bytes = Rekindle.CanonicalValue.encode!(marker)
+    final = Path.join(attempt, "attempt-v1.json")
+    File.write!(final, bytes)
+    File.chmod!(final, 0o600)
+
+    name =
+      Filesystem.state_temporary_name(
+        :attempt_marker,
+        "attempt-v1.json",
+        Filesystem.sha256_bytes(bytes),
+        "00000000000000000000000000000000"
+      )
+
+    path = Path.join(attempt, name)
+    File.write!(path, bytes)
+    File.chmod!(path, 0o600)
+    [path]
+  end
+
+  defp pointer_record(generation, source_revision) do
+    %{
+      "v" => 1,
+      "target" => Atom.to_string(generation.target),
+      "generation_id" => generation.generation_id,
+      "artifact_id" => generation.artifact_id,
+      "manifest_digest" => generation.manifest_digest,
+      "source_revision" => source_revision
+    }
+  end
+
+  defp recovery_record(root, :seal_metadata, _staging, descriptor) do
+    path = Path.join([root, "seals", "web", descriptor.artifact_id <> ".json"])
+
+    record = %{
+      "v" => 1,
+      "target" => "web",
+      "descriptor" => descriptor_map(descriptor) |> Map.delete("source_revision")
+    }
+
+    {path, record}
+  end
+
+  defp recovery_record(root, :generation_reference, staging, descriptor) do
+    path = Path.join([root, "references", "web", staging.generation_id <> ".json"])
+
+    record =
+      generation(staging, descriptor)
+      |> pointer_record(descriptor.source_revision)
+      |> Map.put("profile", descriptor.profile)
+      |> Map.put("published_at_unix_ms", System.system_time(:millisecond))
+
+    {path, record}
+  end
+
+  defp descriptor_map(descriptor) do
+    %{
+      "artifact_id" => descriptor.artifact_id,
+      "manifest_path" => descriptor.manifest_path,
+      "manifest_digest" => descriptor.manifest_digest,
+      "profile" => descriptor.profile,
+      "source_revision" => descriptor.source_revision,
+      "members" =>
+        Enum.map(descriptor.members, fn member ->
+          %{
+            "path" => member.path,
+            "sha256" => member.sha256,
+            "size" => member.size,
+            "mode" => Atom.to_string(member.mode)
+          }
+        end)
+    }
   end
 
   defp state_root do

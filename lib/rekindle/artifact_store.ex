@@ -134,7 +134,10 @@ defmodule Rekindle.ArtifactStore do
          true <- is_integer(retained) and retained in 1..20,
          true <- is_integer(max_bytes) and max_bytes in 67_108_864..17_179_869_184,
          :ok <- initialize_layout(root),
-         {:ok, quarantined?} <- recover(root) do
+         {:ok, temporary_quarantine?} <- recover_temporaries_before_identity(root),
+         :ok <- ensure_project_id(root),
+         {:ok, quarantined?} <-
+           if(temporary_quarantine?, do: {:ok, true}, else: recover(root)) do
       {:ok,
        %__MODULE__{
          root: root,
@@ -392,7 +395,6 @@ defmodule Rekindle.ArtifactStore do
 
   defp initialize_layout(root) do
     with :ok <- Filesystem.ensure_private_directory(root),
-         :ok <- ensure_project_id(root),
          :ok <- ensure_directories(root) do
       :ok
     end
@@ -408,7 +410,7 @@ defmodule Rekindle.ArtifactStore do
           else: {:error, invalid(:configuration, :path_invalid, "Project identity is invalid")}
 
       {:error, :enoent} ->
-        Filesystem.atomic_write(path, Filesystem.random_id())
+        Filesystem.atomic_write(path, Filesystem.random_id(), :project_id)
 
       {:error, _reason} ->
         {:error, invalid(:execution, :io_failed, "Project identity could not be read")}
@@ -472,7 +474,11 @@ defmodule Rekindle.ArtifactStore do
                  :ok <- File.mkdir(body),
                  :ok <- File.chmod(body, 0o700),
                  :ok <-
-                   Filesystem.atomic_write(Path.join(attempt_path, "attempt-v1.json"), marker),
+                   Filesystem.atomic_write(
+                     Path.join(attempt_path, "attempt-v1.json"),
+                     marker,
+                     :attempt_marker
+                   ),
                  :ok <- Filesystem.sync_directory(Path.join(state.root, "staging")) do
               {:ok,
                %Staging{
@@ -531,15 +537,18 @@ defmodule Rekindle.ArtifactStore do
 
     with :ok <- validate_tree(staging.path, staging.target, descriptor, false),
          :ok <- checkpoint(options, :validated),
-         :ok <- Filesystem.atomic_write(journal_path, seal_record(staging, descriptor)),
+         :ok <-
+           Filesystem.atomic_write(journal_path, seal_record(staging, descriptor), :seal_journal,
+             checkpoint: Keyword.get(options, :checkpoint)
+           ),
          :ok <- checkpoint(options, :journaled),
          :ok <- seal_tree(staging.path, descriptor),
          :ok <- checkpoint(options, :sealed),
          :ok <- publish_artifact(staging.path, final_path, staging.target, descriptor, options),
          :ok <- checkpoint(options, :renamed),
-         :ok <- write_seal_metadata(state, staging.target, descriptor),
+         :ok <- write_seal_metadata(state, staging.target, descriptor, options),
          :ok <- checkpoint(options, :metadata_published),
-         {:ok, generation} <- write_reference(state, staging, descriptor),
+         {:ok, generation} <- write_reference(state, staging, descriptor, options),
          :ok <- checkpoint(options, :reference_published),
          :ok <- Filesystem.remove_tree(attempt_path),
          :ok <- Filesystem.sync_directory(Path.join(state.root, "staging")) do
@@ -798,7 +807,7 @@ defmodule Rekindle.ArtifactStore do
     end
   end
 
-  defp write_seal_metadata(state, target, descriptor) do
+  defp write_seal_metadata(state, target, descriptor, options) do
     path = seal_path(state, target, descriptor.artifact_id)
 
     case read_canonical(path) do
@@ -808,14 +817,16 @@ defmodule Rekindle.ArtifactStore do
           else: {:error, invalid(:artifact, :artifact_changed, "Seal metadata changed")}
 
       :none ->
-        Filesystem.atomic_write(path, descriptor_record(target, descriptor))
+        Filesystem.atomic_write(path, descriptor_record(target, descriptor), :seal_metadata,
+          checkpoint: Keyword.get(options, :checkpoint)
+        )
 
       {:error, _} = error ->
         error
     end
   end
 
-  defp write_reference(state, staging, descriptor) do
+  defp write_reference(state, staging, descriptor, options) do
     generation = %GenerationRef{
       target: staging.target,
       generation_id: staging.generation_id,
@@ -835,7 +846,9 @@ defmodule Rekindle.ArtifactStore do
         {:error, invalid(:artifact, :artifact_changed, "Generation reference changed")}
 
       :none ->
-        case Filesystem.atomic_write(path, record) do
+        case Filesystem.atomic_write(path, record, :generation_reference,
+               checkpoint: Keyword.get(options, :checkpoint)
+             ) do
           :ok -> {:ok, generation}
           {:error, _} = error -> error
         end
@@ -1107,7 +1120,7 @@ defmodule Rekindle.ArtifactStore do
   end
 
   defp publish_pointer(state, kind, target, record) do
-    Filesystem.atomic_write(pointer_path(state, kind, target), record)
+    Filesystem.atomic_write(pointer_path(state, kind, target), record, :rollback_pointer)
   end
 
   defp pointer_value(state, kind, target) do
@@ -1274,7 +1287,10 @@ defmodule Rekindle.ArtifactStore do
     journal_path = deletion_path(state, generation.generation_id)
     reference = reference_path(state, generation.target, generation.generation_id)
 
-    with :ok <- Filesystem.atomic_write(journal_path, journal),
+    with :ok <-
+           Filesystem.atomic_write(journal_path, journal, :deletion_journal,
+             checkpoint: Keyword.get(options, :checkpoint)
+           ),
          :ok <- checkpoint(options, :deletion_journaled),
          :ok <- remove_file(reference),
          :ok <- Filesystem.sync_directory(Path.dirname(reference)),
@@ -1449,6 +1465,658 @@ defmodule Rekindle.ArtifactStore do
     end
   end
 
+  defp recover_temporaries_before_identity(root) do
+    if File.exists?(Path.join(root, "quarantine-v1.json")) do
+      {:ok, true}
+    else
+      result =
+        with {:ok, activation_entries} <- activation_temporary_entries(root),
+             :ok <- validate_activation_temporaries(root, activation_entries),
+             :ok <- recover_state_temporaries(root, activation_entries) do
+          :ok
+        end
+
+      case result do
+        :ok -> {:ok, false}
+        {:error, %Failure{} = failure} -> quarantine(root, failure.message)
+      end
+    end
+  end
+
+  defp recover_state_temporaries(root, activation_entries) do
+    with {:ok, directories} <- state_temporary_directories(root),
+         {:ok, entries} <- state_temporary_entries(directories),
+         :ok <- validate_state_temporaries(root, entries),
+         :ok <- validate_temporary_mechanism_conflicts(entries, activation_entries),
+         :ok <- resolve_state_temporaries(entries) do
+      :ok
+    end
+  end
+
+  defp validate_temporary_mechanism_conflicts(state_entries, activation_entries) do
+    conflicts? =
+      Enum.any?(state_entries, fn
+        %{kind: :rollback_pointer, location: kind, destination: destination} ->
+          target = destination |> String.trim_trailing(".json") |> target_atom()
+          Enum.any?(activation_entries, &(&1.kind == kind and &1.target == target))
+
+        _entry ->
+          false
+      end)
+
+    if conflicts?,
+      do: state_temporary_failure("Artifact record temporaries conflict"),
+      else: :ok
+  end
+
+  defp state_temporary_directories(root) do
+    fixed =
+      [
+        {root, :root},
+        {Path.join(root, "current"), :current},
+        {Path.join(root, "fallback"), :fallback},
+        {Path.join(root, "deletions"), :deletions}
+      ] ++
+        for(parent <- [:seals, :references], target <- [:web, :desktop]) do
+          {Path.join([root, Atom.to_string(parent), Atom.to_string(target)]), {parent, target}}
+        end
+
+    staging = Path.join(root, "staging")
+
+    with {:ok, names} <- File.ls(staging) do
+      attempts =
+        Enum.flat_map(names, fn name ->
+          path = Path.join(staging, name)
+
+          case File.lstat(path) do
+            {:ok, %File.Stat{type: :directory}} -> [{path, {:staging, name}}]
+            _ -> []
+          end
+        end)
+
+      {:ok, fixed ++ attempts}
+    else
+      _ -> state_temporary_failure("Artifact staging state could not be listed")
+    end
+  end
+
+  defp state_temporary_entries(directories) do
+    Enum.reduce_while(directories, {:ok, []}, fn {directory, location}, {:ok, entries} ->
+      case File.ls(directory) do
+        {:ok, names} ->
+          case classify_state_temporary_names(directory, location, names) do
+            {:ok, found} -> {:cont, {:ok, found ++ entries}}
+            {:error, _} = error -> {:halt, error}
+          end
+
+        {:error, _reason} ->
+          {:halt, state_temporary_failure("Artifact record state could not be listed")}
+      end
+    end)
+  end
+
+  defp classify_state_temporary_names(directory, location, names) do
+    Enum.reduce_while(Enum.sort(names), {:ok, []}, fn name, {:ok, entries} ->
+      if state_temporary_candidate?(location, name) do
+        case Filesystem.parse_state_temporary(name) do
+          {:ok, parsed} ->
+            entry =
+              parsed
+              |> Map.merge(%{
+                directory: directory,
+                location: location,
+                name: name,
+                path: Path.join(directory, name),
+                destination_path: Path.join(directory, parsed.destination)
+              })
+
+            {:cont, {:ok, [entry | entries]}}
+
+          :error ->
+            {:halt, state_temporary_failure("Artifact record temporary is ambiguous")}
+        end
+      else
+        {:cont, {:ok, entries}}
+      end
+    end)
+  end
+
+  defp state_temporary_candidate?(location, ".rekindle-activation-v1-" <> _rest)
+       when location in [:current, :fallback],
+       do: false
+
+  defp state_temporary_candidate?(_location, name),
+    do: String.starts_with?(name, ".rekindle-state-") or String.ends_with?(name, ".tmp")
+
+  defp validate_state_temporaries(root, entries) do
+    unique_destinations? =
+      entries
+      |> Enum.map(& &1.destination_path)
+      |> then(&(length(&1) == length(Enum.uniq(&1))))
+
+    with true <- unique_destinations? do
+      Enum.reduce_while(entries, :ok, fn entry, :ok ->
+        case validate_state_temporary(root, entry) do
+          :ok -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+    else
+      _ -> state_temporary_failure("Artifact record temporaries conflict")
+    end
+  end
+
+  defp validate_state_temporary(root, entry) do
+    with :ok <- qualify_private_file(entry.path),
+         :ok <- validate_state_destination(entry),
+         {:ok, bytes} <- read_state_temporary(entry.path),
+         true <- bytes == "" or Filesystem.sha256_bytes(bytes) == entry.digest,
+         {:ok, record} <- decode_state_temporary(bytes, entry.kind),
+         :ok <- validate_state_temporary_record(root, entry, record),
+         :ok <- validate_state_destination_presence(entry) do
+      :ok
+    else
+      _ -> state_temporary_failure("Artifact record temporary is invalid")
+    end
+  end
+
+  defp validate_state_destination(%{
+         location: :root,
+         kind: :project_id,
+         destination: "project-id"
+       }),
+       do: :ok
+
+  defp validate_state_destination(%{
+         location: :root,
+         kind: :quarantine,
+         destination: "quarantine-v1.json"
+       }),
+       do: :ok
+
+  defp validate_state_destination(%{location: location, kind: :rollback_pointer} = entry)
+       when location in [:current, :fallback] do
+    if entry.destination in ["web.json", "desktop.json"], do: :ok, else: :error
+  end
+
+  defp validate_state_destination(%{location: :deletions, kind: :deletion_journal} = entry) do
+    if Regex.match?(~r/\A[0-9a-f]{32}\.json\z/, entry.destination), do: :ok, else: :error
+  end
+
+  defp validate_state_destination(%{location: {:seals, _target}, kind: :seal_metadata} = entry) do
+    if Regex.match?(~r/\A[0-9a-f]{64}\.json\z/, entry.destination), do: :ok, else: :error
+  end
+
+  defp validate_state_destination(
+         %{
+           location: {:references, _target},
+           kind: :generation_reference
+         } = entry
+       ) do
+    if Regex.match?(~r/\A[0-9a-f]{32}\.json\z/, entry.destination), do: :ok, else: :error
+  end
+
+  defp validate_state_destination(%{location: {:staging, attempt_id}} = entry) do
+    cond do
+      not id?(attempt_id) -> :error
+      entry.kind == :attempt_marker and entry.destination == "attempt-v1.json" -> :ok
+      entry.kind == :seal_journal and entry.destination == "seal-v1.json" -> :ok
+      true -> :error
+    end
+  end
+
+  defp validate_state_destination(_entry), do: :error
+
+  defp read_state_temporary(path) do
+    case File.read(path) do
+      {:ok, bytes} when byte_size(bytes) <= @manifest_limit -> {:ok, bytes}
+      _ -> :error
+    end
+  end
+
+  defp decode_state_temporary("", _kind), do: {:ok, :empty}
+
+  defp decode_state_temporary(bytes, :project_id), do: {:ok, bytes}
+
+  defp decode_state_temporary(bytes, _kind) do
+    with {:ok, record} when is_map(record) <- Jason.decode(bytes),
+         true <- CanonicalValue.encode!(record) == bytes do
+      {:ok, record}
+    else
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  defp validate_state_temporary_record(_root, %{kind: :project_id} = entry, :empty) do
+    if File.exists?(entry.destination_path), do: :error, else: :ok
+  end
+
+  defp validate_state_temporary_record(_root, %{kind: :project_id} = entry, project_id) do
+    with true <- id?(project_id),
+         :ok <- validate_project_identity_destination(entry.destination_path, project_id) do
+      :ok
+    else
+      _ -> :error
+    end
+  end
+
+  defp validate_state_temporary_record(_root, %{kind: :attempt_marker} = entry, :empty),
+    do: validate_unmarked_attempt(entry)
+
+  defp validate_state_temporary_record(_root, %{kind: :attempt_marker} = entry, marker) do
+    if valid_marker?(marker, elem(entry.location, 1)),
+      do: validate_unmarked_attempt(entry),
+      else: :error
+  end
+
+  defp validate_state_temporary_record(root, %{kind: :seal_journal} = entry, :empty),
+    do: validate_seal_journal_context(root, entry, nil)
+
+  defp validate_state_temporary_record(root, %{kind: :seal_journal} = entry, journal),
+    do: validate_seal_journal_context(root, entry, journal)
+
+  defp validate_state_temporary_record(root, %{kind: :seal_metadata} = entry, :empty),
+    do: matching_publication_journal?(root, entry, nil)
+
+  defp validate_state_temporary_record(root, %{kind: :seal_metadata} = entry, record) do
+    with {:seals, target} <- entry.location,
+         true <- Map.keys(record) |> Enum.sort() == ~w[descriptor target v] |> Enum.sort(),
+         true <- record["v"] == 1 and record["target"] == Atom.to_string(target),
+         {:ok, descriptor} <- descriptor_from_artifact_record(record["descriptor"]),
+         :ok <- validate_descriptor(target, descriptor),
+         true <- entry.destination == descriptor.artifact_id <> ".json",
+         :ok <- matching_publication_journal?(root, entry, record) do
+      :ok
+    else
+      _ -> :error
+    end
+  end
+
+  defp validate_state_temporary_record(root, %{kind: :generation_reference} = entry, :empty),
+    do: matching_publication_journal?(root, entry, nil)
+
+  defp validate_state_temporary_record(root, %{kind: :generation_reference} = entry, record) do
+    with {:references, target} <- entry.location,
+         {:ok, generation} <- generation_from_reference(record),
+         true <- generation.target == target,
+         true <- entry.destination == generation.generation_id <> ".json",
+         :ok <- matching_publication_journal?(root, entry, record) do
+      :ok
+    else
+      _ -> :error
+    end
+  end
+
+  defp validate_state_temporary_record(root, %{kind: :rollback_pointer} = entry, :empty),
+    do: validate_rollback_temporary(root, entry, nil)
+
+  defp validate_state_temporary_record(root, %{kind: :rollback_pointer} = entry, record),
+    do: validate_rollback_temporary(root, entry, record)
+
+  defp validate_state_temporary_record(_root, %{kind: :deletion_journal} = entry, :empty),
+    do: validate_deletion_temporary_context(entry, nil)
+
+  defp validate_state_temporary_record(_root, %{kind: :deletion_journal} = entry, record),
+    do: validate_deletion_temporary_context(entry, record)
+
+  defp validate_state_temporary_record(_root, %{kind: :quarantine}, :empty), do: :ok
+
+  defp validate_state_temporary_record(_root, %{kind: :quarantine}, record) do
+    if is_map(record) and Map.keys(record) |> Enum.sort() == ~w[reason state v] and
+         record["v"] == 1 and record["state"] == "cleanup_required" and
+         is_binary(record["reason"]),
+       do: :ok,
+       else: :error
+  end
+
+  defp validate_state_temporary_record(_root, _entry, _record), do: :error
+
+  defp validate_project_identity_destination(path, project_id) do
+    case File.read(path) do
+      {:ok, ^project_id} -> qualify_private_file(path)
+      {:ok, _different} -> :error
+      {:error, :enoent} -> :ok
+      _ -> :error
+    end
+  end
+
+  defp validate_unmarked_attempt(entry) do
+    body = Path.join(entry.directory, "body")
+
+    with {:ok, names} <- File.ls(entry.directory),
+         true <- Enum.sort(names) == Enum.sort(["body", entry.name]),
+         {:ok, %File.Stat{type: :directory, mode: attempt_mode}} <- File.lstat(entry.directory),
+         true <- (attempt_mode &&& 0o777) == 0o700,
+         {:ok, %File.Stat{type: :directory, mode: body_mode}} <- File.lstat(body),
+         true <- (body_mode &&& 0o777) == 0o700,
+         {:ok, []} <- File.ls(body) do
+      :ok
+    else
+      _ -> :error
+    end
+  end
+
+  defp validate_seal_journal_context(root, entry, journal) do
+    attempt_id = elem(entry.location, 1)
+
+    with {:ok, marker} <- read_canonical(Path.join(entry.directory, "attempt-v1.json")),
+         true <- valid_marker?(marker, attempt_id),
+         :ok <- validate_optional_seal_journal(marker, journal),
+         true <- File.dir?(Path.join(entry.directory, "body")),
+         true <- Path.dirname(entry.directory) == Path.join(root, "staging") do
+      :ok
+    else
+      _ -> :error
+    end
+  end
+
+  defp validate_optional_seal_journal(_marker, nil), do: :ok
+
+  defp validate_optional_seal_journal(marker, journal) do
+    with true <-
+           Map.keys(journal) |> Enum.sort() ==
+             ~w[descriptor generation_id target v] |> Enum.sort(),
+         true <- journal["v"] == 1,
+         true <- journal["target"] == marker["target"],
+         true <- journal["generation_id"] == marker["generation_id"],
+         {:ok, target} <- target(journal["target"]),
+         {:ok, descriptor} <- descriptor_from_record(journal["descriptor"]),
+         :ok <- validate_descriptor(target, descriptor) do
+      :ok
+    else
+      _ -> :error
+    end
+  end
+
+  defp matching_publication_journal?(root, entry, record) do
+    staging = Path.join(root, "staging")
+
+    with {:ok, names} <- File.ls(staging) do
+      if Enum.any?(names, &publication_journal_matches?(root, &1, entry, record)),
+        do: :ok,
+        else: :error
+    else
+      _ -> :error
+    end
+  end
+
+  defp publication_journal_matches?(root, attempt_id, entry, record) do
+    attempt = Path.join([root, "staging", attempt_id])
+
+    with true <- id?(attempt_id),
+         {:ok, marker} <- read_canonical(Path.join(attempt, "attempt-v1.json")),
+         true <- valid_marker?(marker, attempt_id),
+         {:ok, journal} <- read_canonical(Path.join(attempt, "seal-v1.json")),
+         :ok <- validate_optional_seal_journal(marker, journal),
+         true <- publication_entry_matches?(entry, record, journal) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp publication_entry_matches?(%{location: {:seals, target}} = entry, record, journal) do
+    artifact_id = String.trim_trailing(entry.destination, ".json")
+
+    journal["target"] == Atom.to_string(target) and
+      journal["descriptor"]["artifact_id"] == artifact_id and
+      (is_nil(record) or
+         Map.delete(journal["descriptor"], "source_revision") == record["descriptor"])
+  end
+
+  defp publication_entry_matches?(%{location: {:references, target}} = entry, record, journal) do
+    generation_id = String.trim_trailing(entry.destination, ".json")
+
+    journal["target"] == Atom.to_string(target) and journal["generation_id"] == generation_id and
+      (is_nil(record) or
+         (record["artifact_id"] == journal["descriptor"]["artifact_id"] and
+            record["manifest_digest"] == journal["descriptor"]["manifest_digest"] and
+            record["profile"] == journal["descriptor"]["profile"] and
+            record["source_revision"] == journal["descriptor"]["source_revision"]))
+  end
+
+  defp validate_rollback_temporary(root, entry, record) do
+    target = entry.destination |> String.trim_trailing(".json") |> target_atom()
+    kind = entry.location
+
+    with true <- target in [:web, :desktop],
+         {:ok, journal} <- read_canonical(activation_path(root, target)),
+         true <- valid_activation_journal?(journal, target),
+         true <- is_nil(record) or valid_pointer?(record, target),
+         true <- is_nil(record) or record in rollback_pointer_values(journal, kind),
+         :ok <- validate_rollback_destination(entry, target, journal) do
+      :ok
+    else
+      _ -> :error
+    end
+  end
+
+  defp rollback_pointer_values(journal, :current),
+    do: Enum.reject([journal["old_current"], journal["new_current"]], &is_nil/1)
+
+  defp rollback_pointer_values(journal, :fallback),
+    do: Enum.reject([journal["old_fallback"], journal["old_current"]], &is_nil/1)
+
+  defp validate_rollback_destination(entry, target, journal) do
+    case read_canonical(entry.destination_path) do
+      :none ->
+        :ok
+
+      {:ok, pointer} ->
+        with :ok <- qualify_private_file(entry.destination_path),
+             true <- valid_pointer?(pointer, target),
+             true <- pointer in rollback_pointer_values(journal, entry.location) do
+          :ok
+        else
+          _ -> :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp validate_deletion_temporary_context(entry, record) do
+    name = entry.destination
+
+    with true <- is_nil(record) or valid_deletion_record?(record, name),
+         true <- deletion_reference_matches?(entry, record) do
+      :ok
+    else
+      _ -> :error
+    end
+  end
+
+  defp deletion_reference_matches?(entry, nil) do
+    generation_id = String.trim_trailing(entry.destination, ".json")
+    root = entry.directory |> Path.dirname()
+
+    existing =
+      Enum.filter([:web, :desktop], fn target ->
+        path = Path.join([root, "references", Atom.to_string(target), generation_id <> ".json"])
+
+        case File.lstat(path) do
+          {:ok, _stat} -> true
+          {:error, :enoent} -> false
+          _ -> true
+        end
+      end)
+
+    case existing do
+      [target] -> valid_deletion_reference?(root, target, generation_id, nil)
+      _ -> false
+    end
+  end
+
+  defp deletion_reference_matches?(entry, record) do
+    root = entry.directory |> Path.dirname()
+    target = target_atom(record["target"])
+
+    target in [:web, :desktop] and
+      valid_deletion_reference?(
+        root,
+        target,
+        record["generation_id"],
+        record["artifact_id"]
+      )
+  end
+
+  defp valid_deletion_reference?(root, target, generation_id, expected_artifact_id) do
+    path = Path.join([root, "references", Atom.to_string(target), generation_id <> ".json"])
+
+    with :ok <- qualify_private_file(path),
+         {:ok, reference} <- read_canonical(path),
+         {:ok, generation} <- generation_from_reference(reference),
+         true <- generation.target == target,
+         true <- generation.generation_id == generation_id,
+         true <- is_nil(expected_artifact_id) or generation.artifact_id == expected_artifact_id do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp validate_state_destination_presence(%{kind: :rollback_pointer}), do: :ok
+
+  defp validate_state_destination_presence(%{kind: :project_id, destination_path: path}) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular}} -> qualify_private_file(path)
+      {:error, :enoent} -> :ok
+      _ -> :error
+    end
+  end
+
+  defp validate_state_destination_presence(%{destination_path: path}) do
+    case File.lstat(path) do
+      {:error, :enoent} -> :ok
+      _ -> :error
+    end
+  end
+
+  defp resolve_state_temporaries(entries) do
+    entries
+    |> Enum.group_by(&state_temporary_resolution/1)
+    |> Enum.reduce_while(:ok, fn
+      {{:attempt, directory}, _group}, :ok ->
+        case Filesystem.remove_tree(directory) do
+          :ok ->
+            case Filesystem.sync_directory(Path.dirname(directory)) do
+              :ok -> {:cont, :ok}
+              _ -> {:halt, state_temporary_failure("Artifact record recovery was not durable")}
+            end
+
+          _ ->
+            {:halt, state_temporary_failure("Artifact record temporary could not be removed")}
+        end
+
+      {{:project_id, destination}, [entry]}, :ok ->
+        case read_state_temporary(entry.path) do
+          {:ok, ""} ->
+            resolve_removed_state_temporary(entry)
+
+          {:ok, _project_id} ->
+            if File.exists?(destination) do
+              resolve_removed_state_temporary(entry)
+            else
+              case File.rename(entry.path, destination) do
+                :ok ->
+                  case Filesystem.sync_directory(entry.directory) do
+                    :ok ->
+                      {:cont, :ok}
+
+                    _ ->
+                      {:halt,
+                       state_temporary_failure("Project identity recovery was not durable")}
+                  end
+
+                _ ->
+                  {:halt, state_temporary_failure("Project identity could not be restored")}
+              end
+            end
+
+          _ ->
+            {:halt, state_temporary_failure("Project identity could not be restored")}
+        end
+
+      {{:quarantine, destination}, [entry]}, :ok ->
+        case read_state_temporary(entry.path) do
+          {:ok, ""} ->
+            with :ok <- remove_state_temporary(entry),
+                 :ok <- Filesystem.sync_directory(entry.directory) do
+              {:halt, state_temporary_failure("Interrupted quarantine publication was recovered")}
+            else
+              _ ->
+                {:halt, state_temporary_failure("Artifact record temporary could not be removed")}
+            end
+
+          {:ok, _bytes} ->
+            with :ok <- File.rename(entry.path, destination),
+                 :ok <- Filesystem.sync_directory(entry.directory) do
+              {:halt, state_temporary_failure("Artifact store requires explicit cleanup")}
+            else
+              _ -> {:halt, state_temporary_failure("Artifact quarantine could not be restored")}
+            end
+
+          _ ->
+            {:halt, state_temporary_failure("Artifact quarantine could not be restored")}
+        end
+
+      {{:files, directory}, group}, :ok ->
+        with :ok <- remove_state_temporary_files(group),
+             :ok <- Filesystem.sync_directory(directory) do
+          {:cont, :ok}
+        else
+          _ -> {:halt, state_temporary_failure("Artifact record temporary could not be removed")}
+        end
+    end)
+  end
+
+  defp state_temporary_resolution(%{
+         kind: :attempt_marker,
+         destination_path: destination,
+         directory: directory
+       }) do
+    if File.exists?(destination), do: {:files, directory}, else: {:attempt, directory}
+  end
+
+  defp state_temporary_resolution(%{kind: :project_id} = entry),
+    do: {:project_id, entry.destination_path}
+
+  defp state_temporary_resolution(%{kind: :quarantine} = entry),
+    do: {:quarantine, entry.destination_path}
+
+  defp state_temporary_resolution(entry), do: {:files, entry.directory}
+
+  defp remove_state_temporary_files(entries) do
+    Enum.reduce_while(entries, :ok, fn entry, :ok ->
+      case remove_state_temporary(entry) do
+        :ok -> {:cont, :ok}
+        _ -> {:halt, :error}
+      end
+    end)
+  end
+
+  defp remove_state_temporary(entry) do
+    case File.rm(entry.path) do
+      :ok -> :ok
+      _ -> :error
+    end
+  end
+
+  defp resolve_removed_state_temporary(entry) do
+    with :ok <- remove_state_temporary(entry),
+         :ok <- Filesystem.sync_directory(entry.directory) do
+      {:cont, :ok}
+    else
+      _ -> {:halt, state_temporary_failure("Artifact record temporary could not be removed")}
+    end
+  end
+
+  defp state_temporary_failure(message),
+    do: {:error, invalid(:artifact, :cache_corrupt, message)}
+
   defp recover_activation_temporaries(root) do
     with {:ok, entries} <- activation_temporary_entries(root),
          :ok <- validate_activation_temporaries(root, entries),
@@ -1483,6 +2151,9 @@ defmodule Rekindle.ArtifactStore do
     Enum.reduce_while(Enum.sort(names), {:ok, []}, fn name, {:ok, entries} ->
       cond do
         name in ["web.json", "desktop.json"] ->
+          {:cont, {:ok, entries}}
+
+        kind in [:current, :fallback] and String.starts_with?(name, ".rekindle-state-") ->
           {:cont, {:ok, entries}}
 
         true ->
@@ -1802,7 +2473,7 @@ defmodule Rekindle.ArtifactStore do
 
     case read_canonical(path) do
       {:ok, ^record} -> :ok
-      :none -> Filesystem.atomic_write(path, record)
+      :none -> Filesystem.atomic_write(path, record, :seal_metadata)
       _ -> {:error, invalid(:artifact, :cache_corrupt, "Seal metadata is invalid")}
     end
   end
@@ -1827,7 +2498,7 @@ defmodule Rekindle.ArtifactStore do
            else: invalid_record()
 
       :none ->
-        Filesystem.atomic_write(path, record)
+        Filesystem.atomic_write(path, record, :generation_reference)
 
       {:error, _} = error ->
         error
@@ -2066,7 +2737,7 @@ defmodule Rekindle.ArtifactStore do
   defp quarantine(root, reason) do
     record = %{"v" => 1, "state" => "cleanup_required", "reason" => reason}
 
-    case Filesystem.atomic_write(Path.join(root, "quarantine-v1.json"), record) do
+    case Filesystem.atomic_write(Path.join(root, "quarantine-v1.json"), record, :quarantine) do
       :ok -> {:ok, true}
       {:error, _} = error -> error
     end
