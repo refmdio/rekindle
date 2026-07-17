@@ -416,7 +416,14 @@ defmodule Rekindle.ArtifactStore do
 
     case File.lstat(path) do
       {:error, :enoent} ->
-        Filesystem.atomic_write(path, Filesystem.random_id(), :project_id)
+        with :ok <- validate_first_start_layout(root, []),
+             :ok <- Filesystem.atomic_write(path, Filesystem.random_id(), :project_id) do
+          :ok
+        else
+          _ ->
+            {:error,
+             invalid(:configuration, :path_invalid, "Project identity is missing from state")}
+        end
 
       {:ok, _stat} ->
         with :ok <- qualify_private_file(path),
@@ -1832,9 +1839,13 @@ defmodule Rekindle.ArtifactStore do
   end
 
   defp validate_first_start_project_identity(root, entry) do
+    validate_first_start_layout(root, [entry.name])
+  end
+
+  defp validate_first_start_layout(root, additional_entries) do
     root_entries =
       ~w[activations current deletions fallback generations references seals staging] ++
-        [entry.name]
+        additional_entries
 
     empty_directories =
       ~w[activations current deletions fallback staging] ++

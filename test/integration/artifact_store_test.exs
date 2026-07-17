@@ -1059,6 +1059,38 @@ defmodule Rekindle.ArtifactStoreTest do
     end
   end
 
+  test "does not replace a missing project identity in durable state" do
+    for state <- [:sealed, :pointers, :staging] do
+      root = state_root()
+      {:ok, store} = start_store(root)
+
+      case state do
+        :sealed ->
+          sealed_web_generations(store, ["missing-id-sealed"])
+
+        :pointers ->
+          [first, second] = sealed_web_generations(store, ["missing-id-old", "missing-id-new"])
+          assert :ok = ArtifactStore.activate(store, first, 1)
+          assert :ok = ArtifactStore.activate(store, second, 2)
+
+        :staging ->
+          assert {:ok, _staging} = ArtifactStore.allocate(store, :web)
+      end
+
+      :ok = GenServer.stop(store)
+      File.rm!(Path.join(root, "project-id"))
+      state_before = private_tree_state(root)
+
+      {:ok, recovered} = start_store(root)
+      refute File.exists?(Path.join(root, "project-id"))
+
+      assert recovered_state_without_quarantine(root) == state_before
+      assert File.regular?(Path.join(root, "quarantine-v1.json"))
+      assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
   test "does not initialize child state when a quarantine control already exists" do
     for kind <- [:dangling_symlink, :directory, :regular] do
       root = state_root()
@@ -1809,6 +1841,12 @@ defmodule Rekindle.ArtifactStoreTest do
   end
 
   defp private_tree_state(root), do: Map.new(private_tree_entries(root, root))
+
+  defp recovered_state_without_quarantine(root) do
+    root
+    |> private_tree_state()
+    |> Map.delete("quarantine-v1.json")
+  end
 
   defp private_tree_entries(root, path) do
     {:ok, stat} = File.lstat(path)
