@@ -135,7 +135,7 @@ defmodule Rekindle.ArtifactStore do
          true <- is_integer(max_bytes) and max_bytes in 67_108_864..17_179_869_184,
          :ok <- initialize_layout(root),
          {:ok, temporary_quarantine?} <- recover_temporaries_before_identity(root),
-         :ok <- ensure_project_id(root),
+         :ok <- ensure_project_identity(root, temporary_quarantine?),
          {:ok, quarantined?} <-
            if(temporary_quarantine?, do: {:ok, true}, else: recover(root)) do
       {:ok,
@@ -416,6 +416,9 @@ defmodule Rekindle.ArtifactStore do
         {:error, invalid(:execution, :io_failed, "Project identity could not be read")}
     end
   end
+
+  defp ensure_project_identity(_root, true), do: :ok
+  defp ensure_project_identity(root, false), do: ensure_project_id(root)
 
   defp ensure_directories(root) do
     directories =
@@ -1689,13 +1692,15 @@ defmodule Rekindle.ArtifactStore do
     _ -> :error
   end
 
-  defp validate_state_temporary_record(_root, %{kind: :project_id} = entry, :empty) do
-    if File.exists?(entry.destination_path), do: :error, else: :ok
+  defp validate_state_temporary_record(root, %{kind: :project_id} = entry, :empty) do
+    if File.exists?(entry.destination_path),
+      do: :error,
+      else: validate_first_start_project_identity(root, entry)
   end
 
-  defp validate_state_temporary_record(_root, %{kind: :project_id} = entry, project_id) do
+  defp validate_state_temporary_record(root, %{kind: :project_id} = entry, project_id) do
     with true <- id?(project_id),
-         :ok <- validate_project_identity_destination(entry.destination_path, project_id) do
+         :ok <- validate_project_identity_destination(root, entry, project_id) do
       :ok
     else
       _ -> :error
@@ -1773,12 +1778,51 @@ defmodule Rekindle.ArtifactStore do
 
   defp validate_state_temporary_record(_root, _entry, _record), do: :error
 
-  defp validate_project_identity_destination(path, project_id) do
-    case File.read(path) do
-      {:ok, ^project_id} -> qualify_private_file(path)
+  defp validate_project_identity_destination(root, entry, project_id) do
+    case File.read(entry.destination_path) do
+      {:ok, ^project_id} -> qualify_private_file(entry.destination_path)
       {:ok, _different} -> :error
-      {:error, :enoent} -> :ok
+      {:error, :enoent} -> validate_first_start_project_identity(root, entry)
       _ -> :error
+    end
+  end
+
+  defp validate_first_start_project_identity(root, entry) do
+    root_entries =
+      ~w[activations current deletions fallback generations references seals staging] ++
+        [entry.name]
+
+    empty_directories =
+      ~w[activations current deletions fallback staging] ++
+        for(parent <- ~w[generations references seals], target <- ~w[web desktop]) do
+          Path.join(parent, target)
+        end
+
+    with {:ok, names} <- File.ls(root),
+         true <- Enum.sort(names) == Enum.sort(root_entries),
+         :ok <- validate_first_start_container(root, "generations"),
+         :ok <- validate_first_start_container(root, "references"),
+         :ok <- validate_first_start_container(root, "seals"),
+         true <-
+           Enum.all?(empty_directories, fn relative ->
+             case File.ls(Path.join(root, relative)) do
+               {:ok, []} -> true
+               _ -> false
+             end
+           end) do
+      :ok
+    else
+      _ -> :error
+    end
+  end
+
+  defp validate_first_start_container(root, relative) do
+    case File.ls(Path.join(root, relative)) do
+      {:ok, names} when length(names) == 2 ->
+        if Enum.sort(names) == ["desktop", "web"], do: :ok, else: :error
+
+      _ ->
+        :error
     end
   end
 

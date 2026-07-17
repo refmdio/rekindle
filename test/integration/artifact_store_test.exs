@@ -951,6 +951,50 @@ defmodule Rekindle.ArtifactStoreTest do
     end
   end
 
+  test "preserves missing project identity ambiguity in a nonempty store" do
+    for state <- [:sealed, :pointers], temporary_payload <- [:empty, :filled] do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      [first, second] = sealed_web_generations(store, ["identity-old", "identity-new"])
+
+      if state == :pointers do
+        assert :ok = ArtifactStore.activate(store, first, 1)
+        assert :ok = ArtifactStore.activate(store, second, 2)
+      end
+
+      :ok = GenServer.stop(store)
+      old_project_id = File.read!(Path.join(root, "project-id"))
+      File.rm!(Path.join(root, "project-id"))
+      durable_before = project_identity_state(root, [first, second])
+
+      intended =
+        if old_project_id == String.duplicate("a", 32),
+          do: String.duplicate("b", 32),
+          else: String.duplicate("a", 32)
+
+      name =
+        Filesystem.state_temporary_name(
+          :project_id,
+          "project-id",
+          Filesystem.sha256_bytes(intended),
+          "00000000000000000000000000000000"
+        )
+
+      temporary = Path.join(root, name)
+      contents = if temporary_payload == :empty, do: "", else: intended
+      File.write!(temporary, contents)
+      File.chmod!(temporary, 0o600)
+
+      {:ok, recovered} = start_store(root)
+      refute File.exists?(Path.join(root, "project-id"))
+      assert File.read!(temporary) == contents
+      assert project_identity_state(root, [first, second]) == durable_before
+      assert File.regular?(Path.join(root, "quarantine-v1.json"))
+      assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
   test "recovers publication record writes at every state write boundary" do
     previous = Process.flag(:trap_exit, true)
     on_exit(fn -> Process.flag(:trap_exit, previous) end)
@@ -1619,6 +1663,31 @@ defmodule Rekindle.ArtifactStoreTest do
     File.write!(temporary, bytes)
     File.chmod!(temporary, 0o600)
     temporary
+  end
+
+  defp project_identity_state(root, generations) do
+    files =
+      Enum.flat_map(generations, fn generation ->
+        reference =
+          Path.join([root, "references", "web", generation.generation_id <> ".json"])
+
+        artifact = artifact_path(root, :web, generation.artifact_id)
+
+        [reference] ++
+          (Path.wildcard(Path.join(artifact, "**/*"))
+           |> Enum.filter(&File.regular?/1))
+      end) ++
+        for(
+          kind <- ~w[current fallback],
+          path = Path.join([root, kind, "web.json"]),
+          File.regular?(path),
+          do: path
+        )
+
+    files
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Map.new(&{Path.relative_to(&1, root), File.read!(&1)})
   end
 
   defp state_root do
