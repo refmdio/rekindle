@@ -61,8 +61,25 @@ defmodule Rekindle.ArtifactStore do
   def acquire(server, generation, source_revision),
     do: GenServer.call(server, {:acquire, generation, source_revision}, :infinity)
 
-  @spec release(Lease.t()) :: :ok
+  @type release_authority ::
+          {:rekindle_artifact_release, GenServer.server(), reference(), reference()}
+
+  @spec authorize_release(Lease.t()) ::
+          {:ok, release_authority()} | {:error, Failure.t()}
+  def authorize_release(%Lease{store: store} = lease),
+    do: GenServer.call(store, {:authorize_release, lease})
+
+  @spec release(Lease.t() | release_authority()) :: :ok | {:error, Failure.t()}
   def release(%Lease{store: store} = lease), do: GenServer.call(store, {:release, lease})
+
+  def release({:rekindle_artifact_release, store, token, authority})
+      when is_pid(store) and is_reference(token) and is_reference(authority),
+      do: GenServer.call(store, {:release_authority, token, authority})
+
+  @spec revoke_release_authority(release_authority()) :: :ok | {:error, Failure.t()}
+  def revoke_release_authority({:rekindle_artifact_release, store, token, authority})
+      when is_pid(store) and is_reference(token) and is_reference(authority),
+      do: GenServer.call(store, {:revoke_release_authority, token, authority})
 
   @spec valid_lease?(Lease.t()) :: boolean()
   def valid_lease?(%Lease{store: store} = lease),
@@ -185,7 +202,7 @@ defmodule Rekindle.ArtifactStore do
         artifact_id: generation.artifact_id
       }
 
-      entry = %{lease: lease, owner: owner, monitor: monitor}
+      entry = %{lease: lease, owner: owner, monitor: monitor, release_authorities: MapSet.new()}
 
       state = %{
         state
@@ -203,14 +220,53 @@ defmodule Rekindle.ArtifactStore do
     end
   end
 
-  def handle_call({:release, %Lease{token: token}}, {owner, _tag}, state) do
-    state =
-      case Map.get(state.leases, token) do
-        %{owner: ^owner} -> drop_lease(state, token)
-        _ -> state
-      end
+  def handle_call({:authorize_release, %Lease{token: token} = lease}, {owner, _tag}, state) do
+    case Map.get(state.leases, token) do
+      %{owner: ^owner, lease: ^lease} = entry ->
+        authority = make_ref()
+        release = {:rekindle_artifact_release, self(), token, authority}
+        entry = %{entry | release_authorities: MapSet.put(entry.release_authorities, authority)}
+        {:reply, {:ok, release}, put_in(state.leases[token], entry)}
 
-    {:reply, :ok, state}
+      _ ->
+        {:reply, {:error, release_denied()}, state}
+    end
+  end
+
+  def handle_call({:release, %Lease{token: token} = lease}, {owner, _tag}, state) do
+    case Map.get(state.leases, token) do
+      %{owner: ^owner, lease: ^lease} -> {:reply, :ok, drop_lease(state, token)}
+      _ -> {:reply, {:error, release_denied()}, state}
+    end
+  end
+
+  def handle_call({:release_authority, token, authority}, _from, state) do
+    case Map.get(state.leases, token) do
+      %{release_authorities: authorities} ->
+        if MapSet.member?(authorities, authority) do
+          {:reply, :ok, drop_lease(state, token)}
+        else
+          {:reply, {:error, release_denied()}, state}
+        end
+
+      _ ->
+        {:reply, {:error, release_denied()}, state}
+    end
+  end
+
+  def handle_call({:revoke_release_authority, token, authority}, _from, state) do
+    case Map.get(state.leases, token) do
+      %{release_authorities: authorities} = entry ->
+        if MapSet.member?(authorities, authority) do
+          entry = %{entry | release_authorities: MapSet.delete(authorities, authority)}
+          {:reply, :ok, put_in(state.leases[token], entry)}
+        else
+          {:reply, {:error, release_denied()}, state}
+        end
+
+      _ ->
+        {:reply, {:error, release_denied()}, state}
+    end
   end
 
   def handle_call({:valid_lease, %Lease{} = lease}, {owner, _tag}, state) do
@@ -1822,6 +1878,9 @@ defmodule Rekindle.ArtifactStore do
 
   defp invalid_record,
     do: {:error, invalid(:artifact, :cache_corrupt, "Artifact store record is invalid")}
+
+  defp release_denied,
+    do: invalid(:internal, :contract_violation, "Artifact lease release is not authorized")
 
   defp invalid(stage, code, message),
     do: Failure.new!(target: nil, stage: stage, code: code, message: message)

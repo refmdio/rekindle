@@ -4,7 +4,7 @@ defmodule Rekindle.ArtifactStoreTest do
   import Bitwise
   import ExUnit.CaptureLog
 
-  alias Rekindle.ArtifactStore
+  alias Rekindle.{ArtifactStore, Shutdown}
   alias Rekindle.ArtifactStore.{Descriptor, Filesystem, Member}
   alias Rekindle.GenerationRef
 
@@ -172,6 +172,48 @@ defmodule Rekindle.ArtifactStoreTest do
     refute File.exists?(artifact_path(root, :web, first.artifact_id))
     assert File.dir?(artifact_path(root, :web, third.artifact_id))
     assert File.dir?(artifact_path(root, :web, fourth.artifact_id))
+  end
+
+  test "lease release rejects non-owners and accepts an explicit release authority" do
+    root = state_root()
+    {:ok, store} = start_store(root)
+    {staging, descriptor} = stage_web(store, "delegated-release")
+    {:ok, generation} = ArtifactStore.seal(staging, descriptor)
+    {:ok, lease} = ArtifactStore.acquire(store, generation)
+
+    authorize_task = Task.async(fn -> ArtifactStore.authorize_release(lease) end)
+    release_task = Task.async(fn -> ArtifactStore.release(lease) end)
+
+    assert {:error, %{code: :contract_violation}} = Task.await(authorize_task)
+    assert {:error, %{code: :contract_violation}} = Task.await(release_task)
+    assert ArtifactStore.valid_lease?(lease)
+    assert {:ok, authority} = ArtifactStore.authorize_release(lease)
+
+    task = Task.async(fn -> ArtifactStore.release(authority) end)
+
+    assert :ok = Task.await(task)
+    refute ArtifactStore.valid_lease?(lease)
+    assert {:error, %{code: :contract_violation}} = ArtifactStore.release(authority)
+  end
+
+  test "shutdown releases a real artifact lease before collection" do
+    root = state_root()
+    {:ok, store} = start_store(root, retained_generations: 1)
+
+    {first_staging, first_descriptor} = stage_web(store, "shutdown-release", 1)
+    {:ok, first} = ArtifactStore.seal(first_staging, first_descriptor)
+    {second_staging, second_descriptor} = stage_web(store, "retained", 2)
+    {:ok, _second} = ArtifactStore.seal(second_staging, second_descriptor)
+
+    {:ok, lease} = ArtifactStore.acquire(store, first)
+    coordinator = start_supervised!({Shutdown, []})
+    assert {:ok, _reference} = Shutdown.track_lease(coordinator, lease)
+    assert ArtifactStore.valid_lease?(lease)
+
+    assert %Shutdown.Result{status: :clean, failures: []} = Shutdown.shutdown(coordinator)
+    refute ArtifactStore.valid_lease?(lease)
+    assert {:ok, %{removed_generations: 1}} = ArtifactStore.collect(store)
+    refute File.exists?(artifact_path(root, :web, first.artifact_id))
   end
 
   test "collection enforces the configured byte bound independently of count" do

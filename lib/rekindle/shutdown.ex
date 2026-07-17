@@ -3,8 +3,9 @@ defmodule Rekindle.Shutdown do
 
   use GenServer
 
+  alias Rekindle.ArtifactStore.Lease
   alias Rekindle.Shutdown.{Resource, Result}
-  alias Rekindle.{EventBus, Failure, ProcessRunner}
+  alias Rekindle.{ArtifactStore, EventBus, Failure, ProcessRunner}
 
   @max_shutdown_workers 32
 
@@ -34,8 +35,23 @@ defmodule Rekindle.Shutdown do
           {:ok, reference()} | {:error, Failure.t()}
   def track(server, kind, callbacks), do: GenServer.call(server, {:track, kind, callbacks})
 
+  @spec track_lease(GenServer.server(), Lease.t()) ::
+          {:ok, reference()} | {:error, Failure.t()}
+  def track_lease(server, %Lease{} = lease) do
+    with {:ok, release} <- ArtifactStore.authorize_release(lease) do
+      case track(server, :lease, release: fn -> ArtifactStore.release(release) end) do
+        {:ok, _reference} = tracked ->
+          tracked
+
+        {:error, %Failure{}} = error ->
+          _ = ArtifactStore.revoke_release_authority(release)
+          error
+      end
+    end
+  end
+
   @spec untrack(GenServer.server(), reference()) :: :ok
-  def untrack(server, reference), do: GenServer.call(server, {:untrack, self(), reference})
+  def untrack(server, reference), do: GenServer.call(server, {:untrack, reference})
 
   @spec shutdown(GenServer.server(), :shutdown | :supervisor | :configuration_changed) ::
           Result.t()
@@ -97,10 +113,10 @@ defmodule Rekindle.Shutdown do
   def handle_call({:track, _kind, _callbacks}, _from, state),
     do: {:reply, {:error, cancelled("Shutdown has stopped new work")}, state}
 
-  def handle_call({:untrack, _owner, _reference}, _from, %{resource_table: nil} = state),
+  def handle_call({:untrack, _reference}, _from, %{resource_table: nil} = state),
     do: {:reply, :ok, state}
 
-  def handle_call({:untrack, owner, reference}, _from, state) do
+  def handle_call({:untrack, reference}, {owner, _tag}, state) do
     state =
       case :ets.lookup(state.resource_table, reference) do
         [{^reference, %{owner: ^owner, resource: resource}}] ->
