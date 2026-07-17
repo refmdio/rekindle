@@ -24,19 +24,24 @@ defmodule Rekindle.ProcessRunnerTest do
         {:cancel, header} ->
           send(test, {:fake_cancel, header})
 
-          receive do
-            :finish_cancel -> :ok
-          end
+          case (receive do
+                  :finish_cancel -> :ok
+                  {:error, reason} -> {:error, reason}
+                end) do
+            :ok ->
+              {:ok,
+               %{
+                 outcome: :signaled,
+                 code: nil,
+                 signal: 15,
+                 cleanup: :confirmed,
+                 discarded_stdout: 0,
+                 discarded_stderr: 0
+               }, "", ""}
 
-          {:ok,
-           %{
-             outcome: :signaled,
-             code: nil,
-             signal: 15,
-             cleanup: :confirmed,
-             discarded_stdout: 0,
-             discarded_stderr: 0
-           }, "", ""}
+            {:error, reason} ->
+              {:error, reason}
+          end
 
         :crash ->
           raise "adapter crash"
@@ -149,6 +154,40 @@ defmodule Rekindle.ProcessRunnerTest do
     assert result.stderr == <<255, 0, 1>>
     assert result.execution.stdout_tail == "<redacted>-json"
     refute result.execution.stderr_tail == result.stderr
+  end
+
+  test "shutdown rejects admission, cancels every job, and is idempotent", %{runner: runner} do
+    assert {:ok, first} = ProcessRunner.run(runner, request())
+    assert_receive {:fake_spawn, first_worker, _spawn, _state, _options}
+    assert {:ok, second} = ProcessRunner.run(runner, request())
+    assert_receive {:fake_spawn, second_worker, _spawn, _state, _options}
+
+    assert {:ok, shutdown} = ProcessRunner.begin_shutdown(runner)
+    assert is_reference(shutdown)
+    assert {:error, %{code: :cancelled}} = ProcessRunner.run(runner, request())
+
+    assert_receive {:fake_cancel, %{"reason" => "shutdown"}}
+    assert_receive {:fake_cancel, %{"reason" => "shutdown"}}
+    send(first_worker, :finish_cancel)
+    send(second_worker, :finish_cancel)
+
+    assert_receive {:rekindle_process, ^first, {:error, %{code: :cancelled}}}
+    assert_receive {:rekindle_process, ^second, {:error, %{code: :cancelled}}}
+    assert_receive {:rekindle_process_runner_shutdown, ^shutdown, :ok}
+    assert {:ok, :stopped} = ProcessRunner.begin_shutdown(runner)
+  end
+
+  test "shutdown reports cleanup that cannot be confirmed", %{runner: runner} do
+    assert {:ok, job} = ProcessRunner.run(runner, request())
+    assert_receive {:fake_spawn, worker, _spawn, _state, _options}
+    assert {:ok, shutdown} = ProcessRunner.begin_shutdown(runner)
+    assert_receive {:fake_cancel, %{"reason" => "shutdown"}}
+    send(worker, {:error, :helper_protocol})
+
+    assert_receive {:rekindle_process, ^job, {:error, %{code: :cleanup_unconfirmed}}}
+
+    assert_receive {:rekindle_process_runner_shutdown, ^shutdown,
+                    {:error, [%{code: :cleanup_unconfirmed}]}}
   end
 
   defp request do

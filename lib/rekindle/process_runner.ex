@@ -6,7 +6,12 @@ defmodule Rekindle.ProcessRunner do
   alias Rekindle.Toolchain.Exec
   alias Rekindle.{ExecutionResult, Failure, Redactor}
 
-  defstruct adapter: Rekindle.ProcessRunner.DefaultAdapter, jobs: %{}, monitors: %{}
+  defstruct adapter: Rekindle.ProcessRunner.DefaultAdapter,
+            jobs: %{},
+            monitors: %{},
+            admission: :open,
+            shutdown_waiters: [],
+            shutdown_failures: []
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(options \\ []),
@@ -20,6 +25,9 @@ defmodule Rekindle.ProcessRunner do
   def cancel(server, reference, reason),
     do: GenServer.call(server, {:cancel, self(), reference, reason})
 
+  @spec begin_shutdown(GenServer.server()) :: {:ok, :stopped | reference()}
+  def begin_shutdown(server), do: GenServer.call(server, {:begin_shutdown, self()})
+
   @impl true
   def init(options),
     do:
@@ -27,7 +35,7 @@ defmodule Rekindle.ProcessRunner do
        %__MODULE__{adapter: Keyword.get(options, :adapter, Rekindle.ProcessRunner.DefaultAdapter)}}
 
   @impl true
-  def handle_call({:run, caller, request}, _from, state) do
+  def handle_call({:run, caller, request}, _from, %{admission: :open} = state) do
     with {:ok, admitted} <- admit(request),
          {:ok, spawn, exec_state} <- Exec.spawn_request(admitted.spawn) do
       reference = make_ref()
@@ -66,6 +74,10 @@ defmodule Rekindle.ProcessRunner do
     end
   end
 
+  def handle_call({:run, _caller, _request}, _from, state) do
+    {:reply, failure(:cancelled, nil, "Process runner is stopping"), state}
+  end
+
   def handle_call({:cancel, caller, reference, reason}, _from, state) do
     case Map.fetch(state.jobs, reference) do
       {:ok, %{caller: ^caller} = job} when reason in [:obsolete, :shutdown, :caller] ->
@@ -74,6 +86,28 @@ defmodule Rekindle.ProcessRunner do
 
       _ ->
         {:reply, failure(:cancelled, nil, "Process job is not owned by the caller"), state}
+    end
+  end
+
+  def handle_call({:begin_shutdown, _caller}, _from, %{admission: :stopped} = state) do
+    {:reply, {:ok, :stopped}, state}
+  end
+
+  def handle_call({:begin_shutdown, caller}, _from, state) do
+    reference = make_ref()
+    state = %{state | admission: :stopping}
+
+    state =
+      Enum.reduce(state.jobs, state, fn {job_reference, job}, acc ->
+        {_reply, acc} = request_cancel(acc, job_reference, job, :shutdown)
+        acc
+      end)
+
+    if map_size(state.jobs) == 0 do
+      {:reply, {:ok, :stopped}, finish_shutdown(state)}
+    else
+      waiter = %{pid: caller, reference: reference}
+      {:reply, {:ok, reference}, %{state | shutdown_waiters: [waiter | state.shutdown_waiters]}}
     end
   end
 
@@ -93,8 +127,17 @@ defmodule Rekindle.ProcessRunner do
 
       {job, jobs} ->
         cleanup_job(job)
-        send(job.caller, {:rekindle_process, reference, map_result(job, raw_result)})
-        {:noreply, %{state | jobs: jobs, monitors: drop_monitors(state.monitors, job)}}
+        result = map_result(job, raw_result)
+        send(job.caller, {:rekindle_process, reference, result})
+
+        state = %{
+          state
+          | jobs: jobs,
+            monitors: drop_monitors(state.monitors, job),
+            shutdown_failures: record_shutdown_failure(state, result)
+        }
+
+        {:noreply, maybe_finish_shutdown(state)}
     end
   end
 
@@ -285,6 +328,39 @@ defmodule Rekindle.ProcessRunner do
           code: :io_failed,
           message: "Process runner stopped unexpectedly"
         )
+  end
+
+  defp record_shutdown_failure(
+         %{admission: :stopping, shutdown_failures: failures},
+         {:error, %Failure{code: :cleanup_unconfirmed} = failure}
+       ),
+       do: [failure | failures]
+
+  defp record_shutdown_failure(state, _result), do: state.shutdown_failures
+
+  defp maybe_finish_shutdown(%{admission: :stopping, jobs: jobs} = state)
+       when map_size(jobs) == 0,
+       do: finish_shutdown(state)
+
+  defp maybe_finish_shutdown(state), do: state
+
+  defp finish_shutdown(state) do
+    result =
+      case Enum.reverse(state.shutdown_failures) do
+        [] -> :ok
+        failures -> {:error, failures}
+      end
+
+    Enum.each(state.shutdown_waiters, fn waiter ->
+      send(waiter.pid, {:rekindle_process_runner_shutdown, waiter.reference, result})
+    end)
+
+    %{
+      state
+      | admission: :stopped,
+        shutdown_waiters: [],
+        shutdown_failures: []
+    }
   end
 
   defp public_tail(<<>>), do: <<>>
