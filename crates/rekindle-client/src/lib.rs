@@ -2,6 +2,9 @@
 
 use core::fmt;
 
+#[cfg(feature = "state-handoff")]
+mod handoff;
+
 #[cfg(all(feature = "web", not(target_arch = "wasm32")))]
 compile_error!("feature `web` is supported only for target_arch = wasm32");
 
@@ -25,6 +28,29 @@ pub type HandoffFuture<'a, T> =
     core::pin::Pin<Box<dyn core::future::Future<Output = T> + Send + 'a>>;
 
 /// Optional application-owned portable state snapshot and restore hooks.
+///
+/// The same implementation can be installed for Web and desktop builds. The
+/// payload is opaque to Rekindle and should contain only application state that
+/// the matching schema version can restore.
+///
+/// ```
+/// use rekindle_client::{HandoffError, HandoffFuture, StateHandoff};
+///
+/// struct EditorState;
+///
+/// impl StateHandoff for EditorState {
+///     fn schema_version(&self) -> u32 { 1 }
+///
+///     fn snapshot(&self) -> HandoffFuture<'_, Result<Option<Vec<u8>>, HandoffError>> {
+///         Box::pin(async { Ok(Some(Vec::new())) })
+///     }
+///
+///     fn restore<'a>(&'a self, bytes: &'a [u8])
+///         -> HandoffFuture<'a, Result<(), HandoffError>> {
+///         Box::pin(async move { let _ = bytes; Ok(()) })
+///     }
+/// }
+/// ```
 pub trait StateHandoff: Send + Sync {
     fn schema_version(&self) -> u32;
 

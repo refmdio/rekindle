@@ -11,10 +11,15 @@ description = "Target startup and portable state handoff facade for Rekindle GPU
 default = []
 web = ["dep:gpui"]
 desktop = ["dep:gpui"]
-state-handoff = []
+state-handoff = ["dep:futures-util", "dep:sha2"]
 
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "18f35ffac2da72ccdfb0e1bf756218fa1995162b", optional = true, default-features = false }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
+sha2 = { version = "0.10", optional = true }
+
+[dev-dependencies]
+futures-executor = "0.3"
 
 [lints.rust]
 unsafe_code = "forbid"
