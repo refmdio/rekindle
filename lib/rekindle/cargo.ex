@@ -3,9 +3,10 @@ defmodule Rekindle.Cargo do
   use GenServer
 
   alias Rekindle.Cargo.{Arguments, BuildStream, Discovery, Metadata}
+  alias Rekindle.BuildGraph.Identity
   alias Rekindle.Scheduler.ResourcePool
   alias Rekindle.Toolchain.{Executable, Rustup}
-  alias Rekindle.{Failure, ProcessRunner}
+  alias Rekindle.{Failure, ProcessRunner, Scheduler}
 
   defmodule MetadataResult do
     @moduledoc false
@@ -25,7 +26,16 @@ defmodule Rekindle.Cargo do
     defstruct @enforce_keys
   end
 
-  defstruct [:runner, :helper, :pool, jobs: %{}, runner_jobs: %{}]
+  defstruct [
+    :runner,
+    :helper,
+    :pool,
+    jobs: %{},
+    runner_jobs: %{},
+    latest_revisions: %{},
+    identities: %{},
+    supersessions: []
+  ]
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(options),
@@ -44,6 +54,10 @@ defmodule Rekindle.Cargo do
   def cancel(server, reference, reason),
     do: GenServer.call(server, {:cancel, self(), reference, reason})
 
+  @spec supersede(GenServer.server(), Scheduler.t()) :: :ok | {:error, Failure.t()}
+  def supersede(server, %Scheduler{} = scheduler),
+    do: GenServer.call(server, {:supersede, scheduler})
+
   @impl true
   def init(options) do
     runner = Keyword.fetch!(options, :runner)
@@ -56,6 +70,7 @@ defmodule Rekindle.Cargo do
   @impl true
   def handle_call({:start, caller, operation, options}, _from, state) do
     with {:ok, job} <- admit(operation, caller, options, state.helper),
+         {:ok, state} <- register_authority(state, job),
          {:ok, pool} <- ResourcePool.acquire_cargo(state.pool, job.reference, job.cache_key),
          {:ok, runner_reference} <- ProcessRunner.run(state.runner, runner_request(job)) do
       job = %{job | runner_reference: runner_reference}
@@ -70,6 +85,24 @@ defmodule Rekindle.Cargo do
     else
       {:busy, reason, _pool} -> {:reply, {:busy, reason}, state}
       {:error, %Failure{} = failure} -> {:reply, {:error, failure}, state}
+    end
+  end
+
+  def handle_call({:supersede, scheduler}, _from, state) do
+    case supersession(scheduler, state) do
+      {:ok, target, running_revision, latest_revision} ->
+        state = advance_authority(state, target, running_revision, latest_revision)
+
+        case cancel_obsolete(state, target, running_revision) do
+          :ok -> {:reply, :ok, state}
+          {:error, %Failure{} = failure} -> {:reply, {:error, failure}, state}
+        end
+
+      {:already, _revision} ->
+        {:reply, :ok, state}
+
+      {:error, %Failure{} = failure} ->
+        {:reply, {:error, failure}, state}
     end
   end
 
@@ -91,7 +124,7 @@ defmodule Rekindle.Cargo do
 
       {reference, runner_jobs} ->
         {job, jobs} = Map.pop(state.jobs, reference)
-        mapped = map_result(job, result)
+        mapped = authoritative_result(job, result, state)
         send(job.caller, {:rekindle_cargo, reference, mapped})
         {:ok, pool} = ResourcePool.release_cargo(state.pool, reference)
         {:noreply, %{state | pool: pool, jobs: jobs, runner_jobs: runner_jobs}}
@@ -105,15 +138,16 @@ defmodule Rekindle.Cargo do
     client_root = Keyword.get(options, :client_root)
     mode = Keyword.get(options, :mode, :dev)
     rust_target = Keyword.get(options, :rust_target)
-    build_key = Keyword.get(options, :build_key)
-    cache_key = Keyword.get(options, :cache_key, build_key)
+    identity = Keyword.get(options, :identity)
+    scheduler = Keyword.get(options, :scheduler)
     target_directory = Keyword.get(options, :target_directory)
 
     with true <- target in [:web, :desktop],
-         true <- sha256?(build_key) and sha256?(cache_key),
          true <- normalized_absolute?(target_directory),
          {:ok, request} <-
            apply(Arguments, operation, [client_root, target, config, mode, rust_target]),
+         {:ok, build_key, source_revision} <-
+           execution_authority(identity, scheduler, target, request.selection.profile),
          {:ok, executable, argv} <- command(config, request.argv, target),
          :ok <- Executable.revalidate(executable),
          {:ok, environment} <- environment(config.environment, target_directory),
@@ -127,8 +161,10 @@ defmodule Rekindle.Cargo do
          target: target,
          request: request,
          config: config,
+         identity: identity,
+         source_revision: source_revision,
          build_key: build_key,
-         cache_key: cache_key,
+         cache_key: cache_key(target_directory),
          target_directory: target_directory,
          project_root: Keyword.get(options, :project_root),
          inventory: Keyword.get(options, :inventory),
@@ -146,6 +182,145 @@ defmodule Rekindle.Cargo do
 
   defp admit(_operation, _caller, _options, _helper),
     do: failure(:cargo_protocol, nil, "Canonical Cargo request is invalid")
+
+  defp execution_authority(
+         %Identity.NodeKey{} = identity,
+         %Scheduler{} = scheduler,
+         target,
+         profile
+       ) do
+    node = cargo_node(target)
+
+    with {:ok, digest} <- Identity.digest("rekindle-node-v1\0", identity.input),
+         true <- identity.key == digest.digest,
+         true <- identity.preimage == digest.preimage,
+         true <- identity.model_slice_digest == identity.input["model_slice_digest"],
+         true <- identity.config_digest == identity.input["config_digest"],
+         true <- identity.input["node"] == Atom.to_string(node),
+         true <- identity.input["target"] == Atom.to_string(target),
+         true <- identity.input["profile"] == profile,
+         true <- scheduler.target == target,
+         true <- scheduler.state == :building,
+         revision when is_integer(revision) and revision > 0 <- scheduler.running_revision,
+         true <- scheduler.latest_source_revision == revision,
+         true <- scheduler.queued_revision == nil,
+         true <- scheduler.cancel_requested? == false,
+         true <- node in scheduler.affected_nodes do
+      {:ok, identity.key, revision}
+    else
+      _ -> failure(:cargo_protocol, target, "Cargo execution authority is invalid")
+    end
+  end
+
+  defp execution_authority(_identity, _scheduler, target, _profile),
+    do: failure(:cargo_protocol, target, "Cargo execution authority is invalid")
+
+  defp register_authority(state, job) do
+    latest = Map.get(state.latest_revisions, job.target, 0)
+    key = {job.target, job.source_revision}
+
+    cond do
+      job.source_revision < latest ->
+        failure(:cancelled, job.target, "Cargo source revision is obsolete")
+
+      Map.has_key?(state.identities, key) and state.identities[key] != job.identity ->
+        failure(
+          :cargo_protocol,
+          job.target,
+          "Cargo build identity changed within a source revision"
+        )
+
+      true ->
+        {:ok,
+         %{
+           state
+           | latest_revisions: Map.put(state.latest_revisions, job.target, job.source_revision),
+             identities: Map.put(state.identities, key, job.identity)
+         }}
+    end
+  end
+
+  defp supersession(%Scheduler{} = scheduler, state) do
+    current = Map.get(state.latest_revisions, scheduler.target, 0)
+    key = {scheduler.target, scheduler.running_revision, scheduler.latest_source_revision}
+
+    cond do
+      scheduler.state not in [:building, :validating] ->
+        failure(:cargo_protocol, scheduler.target, "Cargo supersession state is invalid")
+
+      not scheduler.cancel_requested? ->
+        failure(:cargo_protocol, scheduler.target, "Cargo supersession was not requested")
+
+      not is_integer(scheduler.running_revision) or scheduler.running_revision <= 0 ->
+        failure(:cargo_protocol, scheduler.target, "Cargo running revision is invalid")
+
+      scheduler.latest_source_revision <= scheduler.running_revision ->
+        failure(:cargo_protocol, scheduler.target, "Cargo supersession revision is invalid")
+
+      scheduler.queued_revision != scheduler.latest_source_revision ->
+        failure(:cargo_protocol, scheduler.target, "Cargo queued revision is invalid")
+
+      scheduler.running_revision != current ->
+        if key in state.supersessions,
+          do: {:already, scheduler.latest_source_revision},
+          else: failure(:cargo_protocol, scheduler.target, "Cargo running revision is not owned")
+
+      true ->
+        {:ok, scheduler.target, scheduler.running_revision, scheduler.latest_source_revision}
+    end
+  end
+
+  defp advance_authority(state, target, running_revision, latest_revision) do
+    identities =
+      state.identities
+      |> Enum.reject(fn {{identity_target, revision}, _identity} ->
+        identity_target == target and revision < latest_revision
+      end)
+      |> Map.new()
+
+    %{
+      state
+      | latest_revisions: Map.put(state.latest_revisions, target, latest_revision),
+        identities: identities,
+        supersessions:
+          [{target, running_revision, latest_revision} | state.supersessions] |> Enum.take(16)
+    }
+  end
+
+  defp cancel_obsolete(state, target, running_revision) do
+    state.jobs
+    |> Map.values()
+    |> Enum.filter(&(&1.target == target and &1.source_revision <= running_revision))
+    |> Enum.reduce_while(:ok, fn job, :ok ->
+      case ProcessRunner.cancel(state.runner, job.runner_reference, :obsolete) do
+        :ok -> {:cont, :ok}
+        {:error, %Failure{} = failure} -> {:halt, {:error, failure}}
+      end
+    end)
+  end
+
+  defp authoritative_result(job, result, state) do
+    if job.source_revision < Map.get(state.latest_revisions, job.target, 0) do
+      obsolete_result(job, result)
+    else
+      map_result(job, result)
+    end
+  end
+
+  defp obsolete_result(job, {:ok, %{execution: %{cleanup: :uncertain}}}),
+    do: failure(:cleanup_unconfirmed, job.target, "Cargo cleanup was not confirmed")
+
+  defp obsolete_result(_job, {:error, %Failure{code: :cleanup_unconfirmed} = failure}),
+    do: {:error, failure}
+
+  defp obsolete_result(job, _result),
+    do: failure(:cancelled, job.target, "Cargo source revision was superseded")
+
+  defp cache_key(target_directory),
+    do: sha256("rekindle-cargo-cache-v1\0" <> target_directory)
+
+  defp cargo_node(:web), do: :cargo_web
+  defp cargo_node(:desktop), do: :cargo_desktop
 
   defp command(%{toolchain: %{kind: :rustup, name: name}}, argv, _target) do
     with {:ok, rustup} <- Rustup.resolve() do
@@ -290,7 +465,7 @@ defmodule Rekindle.Cargo do
         left.minor_device == right.minor_device and left.size == right.size and
         left.mtime == right.mtime and right.size == byte_size(bytes)
 
-  defp sha256?(value), do: is_binary(value) and Regex.match?(~r/\A[0-9a-f]{64}\z/, value)
+  defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
 
   defp normalized_absolute?(value),
     do: is_binary(value) and Path.type(value) == :absolute and Path.expand(value) == value

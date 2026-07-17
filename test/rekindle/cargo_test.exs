@@ -1,12 +1,12 @@
 defmodule Rekindle.CargoTest do
   use ExUnit.Case, async: true
 
+  alias Rekindle.BuildGraph.Identity
   alias Rekindle.Cargo
   alias Rekindle.Config.{DesktopTarget, EnvironmentPolicy, ProcessPolicy, WebTarget}
-  alias Rekindle.ProcessRunner
+  alias Rekindle.{Failure, ProcessRunner, Scheduler}
 
-  @build_key String.duplicate("a", 64)
-  @cache_key String.duplicate("b", 64)
+  @digest String.duplicate("a", 64)
   @package_id "path+file:///project/client#client@0.1.0"
 
   defmodule Adapter do
@@ -22,8 +22,13 @@ defmodule Rekindle.CargoTest do
         {:finish, terminal, stdout, stderr} ->
           {:ok, terminal, stdout, stderr}
 
-        {:cancel, _header} ->
-          {:ok, %{terminal() | outcome: :signaled, code: nil, signal: 15}, "", ""}
+        {:cancel, header} ->
+          send(test, {:cargo_cancel, self(), header})
+
+          receive do
+            {:finish_cancel, terminal, stdout, stderr} ->
+              {:ok, terminal, stdout, stderr}
+          end
       end
     end
 
@@ -111,7 +116,7 @@ defmodule Rekindle.CargoTest do
 
     send(build_worker, {:finish, Adapter.terminal(), output, "warning from cargo"})
     assert_receive {:rekindle_cargo, ^build_reference, {:ok, build}}
-    assert build.build_key == @build_key
+    assert build.build_key == options[:identity].key
     assert build.artifact.path == artifact
     assert build.artifact.sha256 == sha256("wasm-bytes")
     assert Enum.any?(build.diagnostics, &(&1.code == :cargo_tool_output))
@@ -143,14 +148,94 @@ defmodule Rekindle.CargoTest do
     refute_receive {:cargo_spawn, _worker, _spawn, _state}
   end
 
+  test "execution rejects forged identities and target mismatches", context do
+    options = base_options(context)
+    forged = %{options[:identity] | key: @digest}
+
+    assert {:error, %{code: :cargo_protocol}} =
+             Cargo.metadata(context.cargo, Keyword.put(options, :identity, forged))
+
+    assert {:error, %{code: :cargo_protocol}} =
+             Cargo.metadata(context.cargo, Keyword.put(options, :identity, identity(:desktop)))
+
+    refute_receive {:cargo_spawn, _worker, _spawn, _state}
+  end
+
+  test "execution rejects a scheduler snapshot with newer source work", context do
+    options = base_options(context)
+    assert {:ok, changed, [{:cancel, 1}]} = Scheduler.change(options[:scheduler], [:cargo_web], 1)
+
+    assert {:error, %{code: :cargo_protocol}} =
+             Cargo.metadata(context.cargo, Keyword.put(options, :scheduler, changed))
+
+    refute_receive {:cargo_spawn, _worker, _spawn, _state}
+  end
+
+  test "one source revision cannot change its canonical build identity", context do
+    options = base_options(context)
+    assert {:ok, reference} = Cargo.metadata(context.cargo, options)
+    assert_receive {:cargo_spawn, worker, _spawn, _state}
+    send(worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""})
+    assert_receive {:rekindle_cargo, ^reference, {:ok, _metadata}}
+
+    changed_identity = identity(:web, "different-inputs-in-same-revision")
+
+    assert {:error, %{code: :cargo_protocol}} =
+             Cargo.metadata(context.cargo, Keyword.put(options, :identity, changed_identity))
+
+    refute_receive {:cargo_spawn, _worker, _spawn, _state}
+  end
+
+  test "supersession cancels obsolete work and rejects a late successful completion", context do
+    options = base_options(context)
+    assert {:ok, old_reference} = Cargo.metadata(context.cargo, options)
+    assert_receive {:cargo_spawn, old_worker, _spawn, _state}
+
+    assert {:ok, changed, [{:cancel, 1}]} = Scheduler.change(options[:scheduler], [:cargo_web], 1)
+    assert :ok = Cargo.supersede(context.cargo, changed)
+    assert_receive {:cargo_cancel, ^old_worker, %{"reason" => "obsolete"}}
+
+    assert :ok = Cargo.supersede(context.cargo, changed)
+    refute_receive {:cargo_cancel, ^old_worker, _header}
+
+    send(
+      old_worker,
+      {:finish_cancel, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""}
+    )
+
+    assert_receive {:rekindle_cargo, ^old_reference, {:error, %{code: :cancelled}}}
+
+    failure =
+      Failure.new!(
+        target: :web,
+        stage: elem(Failure.stage_for(:cancelled), 1),
+        code: :cancelled,
+        message: "superseded"
+      )
+
+    assert {:ok, queued, _effects} = Scheduler.fail(changed, 1, failure, 1)
+    assert {:ok, current, {:start, 2, [:cargo_web]}} = Scheduler.ready(queued, 1)
+
+    current_options =
+      options
+      |> Keyword.put(:scheduler, current)
+      |> Keyword.put(:identity, identity(:web, "revision-2"))
+
+    assert {:ok, current_reference} = Cargo.metadata(context.cargo, current_options)
+    assert_receive {:cargo_spawn, current_worker, _spawn, _state}
+
+    send(
+      current_worker,
+      {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""}
+    )
+
+    assert_receive {:rekindle_cargo, ^current_reference, {:ok, _metadata}}
+  end
+
   test "desktop uses the same facade and selects only compiler-artifact executable", context do
     config = desktop_config()
 
-    options =
-      base_options(context)
-      |> Keyword.put(:target, :desktop)
-      |> Keyword.put(:config, config)
-      |> Keyword.put(:rust_target, "x86_64-unknown-linux-gnu")
+    options = target_options(context, :desktop, config)
 
     assert {:ok, metadata_reference} = Cargo.metadata(context.cargo, options)
     assert_receive {:cargo_spawn, worker, _spawn, _state}
@@ -215,11 +300,105 @@ defmodule Rekindle.CargoTest do
       project_root: context.root,
       mode: :dev,
       rust_target: "wasm32-unknown-unknown",
-      build_key: @build_key,
-      cache_key: @cache_key,
+      identity: identity(:web),
+      scheduler: scheduler(:web),
       target_directory: context.target_directory,
       process: process_policy()
     ]
+  end
+
+  defp target_options(context, :desktop, config) do
+    base_options(context)
+    |> Keyword.put(:target, :desktop)
+    |> Keyword.put(:config, config)
+    |> Keyword.put(:rust_target, "x86_64-unknown-linux-gnu")
+    |> Keyword.put(:identity, identity(:desktop))
+    |> Keyword.put(:scheduler, scheduler(:desktop))
+  end
+
+  defp identity(target, salt \\ "revision-1") do
+    node = if target == :web, do: :cargo_web, else: :cargo_desktop
+    binary = if target == :web, do: "web", else: "desktop"
+
+    rust_target =
+      if target == :web, do: "wasm32-unknown-unknown", else: "x86_64-unknown-linux-gnu"
+
+    package = portable_package()
+
+    model = %{
+      "v" => 1,
+      "node" => Atom.to_string(node),
+      "target" => Atom.to_string(target),
+      "package_identity" => package,
+      "binary" => binary,
+      "local_package_identities" => [package],
+      "has_local_build_script" => false,
+      "cargo_input_paths" => [],
+      "source_roots" => ["client"]
+    }
+
+    config = %{
+      "v" => 1,
+      "node" => Atom.to_string(node),
+      "target" => Atom.to_string(target),
+      "fields" => %{
+        "package_identity" => package,
+        "binary" => binary,
+        "rust_target" => rust_target,
+        "profile" => "dev",
+        "features" => [],
+        "default_features" => true,
+        "toolchain" => %{
+          "kind" => "path",
+          "declared_identity" => "test",
+          "cargo_sha256" => @digest,
+          "rustc_sha256" => @digest,
+          "cargo_version" => "cargo 1.95.0",
+          "rustc_vv" => "rustc 1.95.0",
+          "rust_target" => rust_target
+        },
+        "environment_digest" => @digest
+      }
+    }
+
+    direct_inputs = [
+      %{"kind" => "value", "name" => "revision", "value_digest" => sha256(salt)}
+    ]
+
+    tools = [
+      %{"name" => "cargo", "version" => "cargo 1.95.0", "content_digest" => nil},
+      %{"name" => "rustc", "version" => "rustc 1.95.0", "content_digest" => nil}
+    ]
+
+    assert {:ok, identity} =
+             Identity.node_key(
+               node: node,
+               target: target,
+               profile: "dev",
+               model_slice: model,
+               config: config,
+               direct_inputs: direct_inputs,
+               tools: tools
+             )
+
+    identity
+  end
+
+  defp scheduler(target) do
+    node = if target == :web, do: :cargo_web, else: :cargo_desktop
+    assert {:ok, scheduler} = Scheduler.new(target, 0)
+    assert {:ok, scheduler, []} = Scheduler.change(scheduler, [node], 0)
+    assert {:ok, scheduler, {:start, 1, [^node]}} = Scheduler.ready(scheduler, 0)
+    scheduler
+  end
+
+  defp portable_package do
+    %{
+      "kind" => "local",
+      "manifest_path" => "client/Cargo.toml",
+      "name" => "client",
+      "version" => "0.1.0"
+    }
   end
 
   defp web_config do
