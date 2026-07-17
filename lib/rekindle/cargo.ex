@@ -46,31 +46,31 @@ defmodule Rekindle.Cargo do
 
   @spec metadata(GenServer.server(), keyword()) ::
           {:ok, reference()} | {:busy, atom()} | {:error, Failure.t()}
-  def metadata(server, options), do: GenServer.call(server, {:start, self(), :metadata, options})
+  def metadata(server, options), do: GenServer.call(server, {:start, :metadata, options})
 
   @spec build(GenServer.server(), keyword()) ::
           {:ok, reference()} | {:busy, atom()} | {:error, Failure.t()}
-  def build(server, options), do: GenServer.call(server, {:start, self(), :build, options})
+  def build(server, options), do: GenServer.call(server, {:start, :build, options})
 
   @spec cancel(GenServer.server(), reference(), :obsolete | :shutdown | :caller) ::
           :ok | {:error, Failure.t()}
   def cancel(server, reference, reason),
-    do: GenServer.call(server, {:cancel, self(), reference, reason})
+    do: GenServer.call(server, {:cancel, reference, reason})
 
   @spec authorize(GenServer.server(), %Identity.NodeKey{}, Scheduler.t()) ::
           {:ok, reference()} | {:error, Failure.t()}
   def authorize(server, %Identity.NodeKey{} = identity, %Scheduler{} = scheduler),
-    do: GenServer.call(server, {:authorize, self(), identity, scheduler})
+    do: GenServer.call(server, {:authorize, identity, scheduler})
 
   @spec supersede(GenServer.server(), reference(), Scheduler.t()) ::
           :ok | {:error, Failure.t()}
   def supersede(server, authority, %Scheduler{} = scheduler),
-    do: GenServer.call(server, {:supersede, self(), authority, scheduler})
+    do: GenServer.call(server, {:supersede, authority, scheduler})
 
   @spec result(GenServer.server(), reference(), reference()) ::
           {:ok, %MetadataResult{} | %BuildResult{}} | {:error, Failure.t()}
   def result(server, reference, authority),
-    do: GenServer.call(server, {:result, self(), reference, authority})
+    do: GenServer.call(server, {:result, reference, authority})
 
   @impl true
   def init(options) do
@@ -90,7 +90,7 @@ defmodule Rekindle.Cargo do
   end
 
   @impl true
-  def handle_call({:start, caller, operation, options}, _from, state) do
+  def handle_call({:start, operation, options}, {caller, _tag}, state) do
     with {:ok, job} <- admit(operation, caller, options, state),
          {:ok, pool} <- ResourcePool.acquire_cargo(state.pool, job.reference, job.cache_key),
          {:ok, runner_reference} <- ProcessRunner.run(state.runner, runner_request(job)) do
@@ -109,7 +109,7 @@ defmodule Rekindle.Cargo do
     end
   end
 
-  def handle_call({:authorize, caller, identity, scheduler}, _from, state) do
+  def handle_call({:authorize, identity, scheduler}, {caller, _tag}, state) do
     with true <- caller == state.authority_owner,
          {:ok, build_key, source_revision} <-
            execution_authority(
@@ -135,7 +135,7 @@ defmodule Rekindle.Cargo do
     end
   end
 
-  def handle_call({:supersede, caller, authority_token, scheduler}, _from, state) do
+  def handle_call({:supersede, authority_token, scheduler}, {caller, _tag}, state) do
     authority = Map.get(state.authorities, authority_token)
 
     case supersession(caller, authority, scheduler, state) do
@@ -155,7 +155,7 @@ defmodule Rekindle.Cargo do
     end
   end
 
-  def handle_call({:result, caller, reference, authority_token}, _from, state) do
+  def handle_call({:result, reference, authority_token}, {caller, _tag}, state) do
     with true <- caller == state.authority_owner,
          {{job, process_result}, completed} <- Map.pop(state.completed, reference),
          true <- job.authority == authority_token do
@@ -170,7 +170,7 @@ defmodule Rekindle.Cargo do
     end
   end
 
-  def handle_call({:cancel, caller, reference, reason}, _from, state) do
+  def handle_call({:cancel, reference, reason}, {caller, _tag}, state) do
     case Map.fetch(state.jobs, reference) do
       {:ok, %{caller: ^caller} = job} ->
         {:reply, ProcessRunner.cancel(state.runner, job.runner_reference, reason), state}
@@ -179,6 +179,9 @@ defmodule Rekindle.Cargo do
         {:reply, failure(:cancelled, nil, "Cargo job is not owned by the caller"), state}
     end
   end
+
+  def handle_call(_request, _from, state),
+    do: {:reply, failure(:cargo_protocol, nil, "Cargo request envelope is invalid"), state}
 
   @impl true
   def handle_info({:rekindle_process, runner_reference, result}, state) do

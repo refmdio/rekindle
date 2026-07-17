@@ -215,6 +215,30 @@ defmodule Rekindle.CargoTest do
     refute_receive {:cargo_spawn, _worker, _spawn, _state}
   end
 
+  test "request envelopes cannot impersonate the configured coordinator", context do
+    owner = self()
+    options = base_options(context)
+
+    task =
+      Task.async(fn ->
+        messages = [
+          {:authorize, owner, context.web_identity, context.web_scheduler},
+          {:start, owner, :metadata, options},
+          {:supersede, owner, context.web_authority, context.web_scheduler},
+          {:result, owner, make_ref(), context.web_authority},
+          {:cancel, owner, make_ref(), :caller}
+        ]
+
+        Enum.map(messages, &GenServer.call(context.cargo, &1))
+      end)
+
+    for response <- Task.await(task) do
+      assert {:error, %{code: :cargo_protocol}} = response
+    end
+
+    refute_receive {:cargo_spawn, _worker, _spawn, _state}
+  end
+
   test "only the configured coordinator can authorize a completed result", context do
     options = base_options(context)
     assert {:ok, reference} = Cargo.metadata(context.cargo, options)
