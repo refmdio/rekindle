@@ -3,7 +3,7 @@ defmodule Rekindle.AdmittedSealTest do
 
   alias Rekindle.ArtifactStore
   alias Rekindle.ArtifactStore.{Descriptor, Filesystem, Member}
-  alias Rekindle.SealedArtifact.{Desktop, Web}
+  alias Rekindle.SealedArtifact.{Desktop, Validation, Web}
   alias Rekindle.{AdmittedSeal, CanonicalValue, GenerationRef}
 
   test "canonical and extension producers admit both target unions without publication" do
@@ -220,6 +220,27 @@ defmodule Rekindle.AdmittedSealTest do
     end
   end
 
+  test "artifact paths require canonical Unicode without control characters" do
+    assert Validation.relative?("assets/café.js")
+
+    refute Validation.relative?("assets/café.js")
+    refute Validation.relative?("assets/app\n.js")
+    refute Validation.relative?("assets/app\t.js")
+    refute Validation.relative?("assets/app" <> <<0x7F>> <> ".js")
+    refute Validation.relative?(<<0xFF>>)
+
+    store = store()
+    sealed = seal(store, :web, :extension, 54)
+    original = sealed.manifest["entry"]
+
+    for replacement <- ["bootstrap/café.js", "bootstrap/app\n.js"] do
+      manifest = rename_web_path(sealed.manifest, original, replacement)
+
+      assert {:error, %{code: :manifest_invalid}} =
+               rebuild_bound_web_contract(sealed, manifest)
+    end
+  end
+
   test "web contracts apply canonical metadata to every member role" do
     store = store()
     sealed = seal(store, :web, :extension, 53)
@@ -412,6 +433,24 @@ defmodule Rekindle.AdmittedSealTest do
     |> Map.put("members", members)
     |> Map.put("edges", edges)
     |> Map.put("hot_styles", ["styles/app.css"])
+  end
+
+  defp rename_web_path(manifest, original, replacement) do
+    manifest
+    |> Map.update!("entry", fn ^original -> replacement end)
+    |> Map.update!("members", fn members ->
+      Enum.map(members, fn
+        %{"path" => ^original} = member -> %{member | "path" => replacement}
+        member -> member
+      end)
+    end)
+    |> Map.update!("edges", fn edges ->
+      Enum.map(edges, fn edge ->
+        edge
+        |> Map.update!("from", &if(&1 == original, do: replacement, else: &1))
+        |> Map.update!("to", &if(&1 == original, do: replacement, else: &1))
+      end)
+    end)
   end
 
   defp expected_mime(role) when role in ~w[bootstrap javascript],

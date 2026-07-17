@@ -369,7 +369,17 @@ defmodule Rekindle.ArtifactStoreTest do
   end
 
   test "rejects escaping, aliased, extra, changed, linked, and special members" do
-    for mutation <- [:traversal, :collision, :extra, :digest, :manifest, :symlink, :hard_link] do
+    for mutation <- [
+          :traversal,
+          :noncanonical_unicode,
+          :control_character,
+          :collision,
+          :extra,
+          :digest,
+          :manifest,
+          :symlink,
+          :hard_link
+        ] do
       root = state_root()
       {:ok, store} = start_store(root)
       {staging, descriptor} = stage_web(store, "entry")
@@ -378,6 +388,12 @@ defmodule Rekindle.ArtifactStoreTest do
         case mutation do
           :traversal ->
             %{descriptor | members: [%{hd(descriptor.members) | path: "../entry.js"}]}
+
+          :noncanonical_unicode ->
+            %{descriptor | members: [%{hd(descriptor.members) | path: "members/café.js"}]}
+
+          :control_character ->
+            %{descriptor | members: [%{hd(descriptor.members) | path: "members/app\n.js"}]}
 
           :collision ->
             member = hd(descriptor.members)

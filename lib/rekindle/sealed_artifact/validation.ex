@@ -48,9 +48,11 @@ defmodule Rekindle.SealedArtifact.Validation do
 
   @spec relative?(term()) :: boolean()
   def relative?(value) do
-    is_binary(value) and byte_size(value) in 1..4_096 and Path.type(value) == :relative and
+    is_binary(value) and byte_size(value) in 1..4_096 and String.valid?(value) and
+      String.normalize(value, :nfc) == value and not Regex.match?(~r/\p{Cc}/u, value) and
+      Path.type(value) == :relative and
       Path.split(value) |> Enum.all?(&(&1 not in ["", ".", ".."])) and
-      Path.expand(value, "/") == "/" <> value and not String.contains?(value, [<<0>>, "\\"])
+      Path.expand(value, "/") == "/" <> value and not String.contains?(value, "\\")
   end
 
   @spec sorted_unique?(term(), (term() -> term())) :: boolean()

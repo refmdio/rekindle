@@ -6,7 +6,7 @@ defmodule Rekindle.ArtifactStore do
   import Bitwise
 
   alias Rekindle.ArtifactStore.{Descriptor, Filesystem, Lease, Member, Staging}
-  alias Rekindle.SealedArtifact.Identity
+  alias Rekindle.SealedArtifact.{Identity, Validation}
   alias Rekindle.{CanonicalValue, Failure, GenerationRef}
 
   @manifest_limit 67_108_864
@@ -3225,16 +3225,7 @@ defmodule Rekindle.ArtifactStore do
 
   defp valid_member?(_member), do: false
 
-  defp safe_path?(value) when is_binary(value) do
-    segments = Path.split(value)
-
-    value != "" and byte_size(value) <= 4_096 and String.valid?(value) and
-      String.normalize(value, :nfc) == value and Path.type(value) == :relative and
-      not String.contains?(value, ["\\", <<0>>]) and
-      Enum.all?(segments, &(&1 not in ["", ".", ".."]))
-  end
-
-  defp safe_path?(_value), do: false
+  defp safe_path?(value), do: Validation.relative?(value)
 
   defp unique_paths?(paths) do
     keys = Enum.map(paths, &:string.casefold/1)
