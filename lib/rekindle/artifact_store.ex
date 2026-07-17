@@ -1438,9 +1438,7 @@ defmodule Rekindle.ArtifactStore do
   end
 
   defp recover(root) do
-    quarantine = Path.join(root, "quarantine-v1.json")
-
-    if File.exists?(quarantine) do
+    if quarantine_control_present?(root) do
       {:ok, true}
     else
       case recover_staging(root) do
@@ -1469,7 +1467,7 @@ defmodule Rekindle.ArtifactStore do
   end
 
   defp recover_temporaries_before_identity(root) do
-    if File.exists?(Path.join(root, "quarantine-v1.json")) do
+    if quarantine_control_present?(root) do
       {:ok, true}
     else
       result =
@@ -1483,6 +1481,13 @@ defmodule Rekindle.ArtifactStore do
         :ok -> {:ok, false}
         {:error, %Failure{} = failure} -> quarantine(root, failure.message)
       end
+    end
+  end
+
+  defp quarantine_control_present?(root) do
+    case File.lstat(Path.join(root, "quarantine-v1.json")) do
+      {:error, :enoent} -> false
+      _present_or_ambiguous -> true
     end
   end
 

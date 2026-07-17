@@ -995,6 +995,44 @@ defmodule Rekindle.ArtifactStoreTest do
     end
   end
 
+  test "blocks first startup when the quarantine control path is not a regular file" do
+    for kind <- [:dangling_symlink, :directory] do
+      root = state_root()
+      File.mkdir!(root)
+      File.chmod!(root, 0o700)
+      quarantine = Path.join(root, "quarantine-v1.json")
+      quarantine_control!(quarantine, kind)
+      control_before = quarantine_control_state(quarantine)
+
+      {:ok, store} = start_store(root)
+      refute File.exists?(Path.join(root, "project-id"))
+      assert quarantine_control_state(quarantine) == control_before
+      assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(store, :web)
+      :ok = GenServer.stop(store)
+    end
+  end
+
+  test "preserves durable state when the quarantine control path is not a regular file" do
+    for kind <- [:dangling_symlink, :directory] do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      [generation] = sealed_web_generations(store, ["quarantine-control"])
+      assert :ok = ArtifactStore.activate(store, generation, 1)
+      :ok = GenServer.stop(store)
+
+      quarantine = Path.join(root, "quarantine-v1.json")
+      durable_before = project_identity_state(root, [generation])
+      quarantine_control!(quarantine, kind)
+      control_before = quarantine_control_state(quarantine)
+
+      {:ok, recovered} = start_store(root)
+      assert quarantine_control_state(quarantine) == control_before
+      assert project_identity_state(root, [generation]) == durable_before
+      assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
   test "recovers publication record writes at every state write boundary" do
     previous = Process.flag(:trap_exit, true)
     on_exit(fn -> Process.flag(:trap_exit, previous) end)
@@ -1688,6 +1726,24 @@ defmodule Rekindle.ArtifactStoreTest do
     |> Enum.uniq()
     |> Enum.sort()
     |> Map.new(&{Path.relative_to(&1, root), File.read!(&1)})
+  end
+
+  defp quarantine_control!(path, :dangling_symlink) do
+    :ok = File.ln_s("missing-quarantine", path)
+  end
+
+  defp quarantine_control!(path, :directory) do
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+  end
+
+  defp quarantine_control_state(path) do
+    {:ok, stat} = File.lstat(path)
+
+    case stat.type do
+      :symlink -> {:symlink, File.read_link!(path)}
+      :directory -> {:directory, stat.mode &&& 0o777, File.ls!(path)}
+    end
   end
 
   defp state_root do
