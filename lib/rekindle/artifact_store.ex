@@ -47,10 +47,12 @@ defmodule Rekindle.ArtifactStore do
   def activate(server, generation, source_revision, options \\ []),
     do: GenServer.call(server, {:activate, generation, source_revision, options}, :infinity)
 
-  @spec current(GenServer.server(), Rekindle.target()) :: {:ok, GenerationRef.t()} | :none
+  @spec current(GenServer.server(), Rekindle.target()) ::
+          {:ok, GenerationRef.t()} | :none | {:error, Failure.t()}
   def current(server, target), do: GenServer.call(server, {:current, target}, :infinity)
 
-  @spec fallback(GenServer.server(), Rekindle.target()) :: {:ok, GenerationRef.t()} | :none
+  @spec fallback(GenServer.server(), Rekindle.target()) ::
+          {:ok, GenerationRef.t()} | :none | {:error, Failure.t()}
   def fallback(server, target), do: GenServer.call(server, {:fallback, target}, :infinity)
 
   @spec acquire(GenServer.server(), GenerationRef.t()) ::
@@ -144,6 +146,9 @@ defmodule Rekindle.ArtifactStore do
 
       {:error, %Failure{} = failure} ->
         {:reply, {:error, failure}, state}
+
+      {:quarantine, %Failure{} = failure} ->
+        {:reply, {:error, failure}, %{state | quarantined?: true}}
     end
   end
 
@@ -164,6 +169,9 @@ defmodule Rekindle.ArtifactStore do
         state = drop_attempt(state, staging.attempt_id, false)
         failure = if cleanup == :ok, do: failure, else: elem(cleanup, 1)
         {:reply, {:error, failure}, state}
+
+      {:quarantine, %Failure{} = failure} ->
+        {:reply, {:error, failure}, %{state | quarantined?: true}}
     end
   end
 
@@ -184,6 +192,9 @@ defmodule Rekindle.ArtifactStore do
 
         {:error, %Failure{} = failure} ->
           {:error, failure}
+
+        {:quarantine, %Failure{} = failure} ->
+          {:quarantine, failure}
       end
 
     case result do
@@ -199,11 +210,11 @@ defmodule Rekindle.ArtifactStore do
   end
 
   def handle_call({:current, target}, _from, state) do
-    {:reply, pointer_generation(state, :current, target), state}
+    pointer_reply(state, :current, target)
   end
 
   def handle_call({:fallback, target}, _from, state) do
-    {:reply, pointer_generation(state, :fallback, target), state}
+    pointer_reply(state, :fallback, target)
   end
 
   def handle_call({:acquire, generation, source_revision}, {owner, _tag}, state) do
@@ -334,6 +345,9 @@ defmodule Rekindle.ArtifactStore do
 
       {:error, %Failure{} = failure} ->
         {:reply, {:error, failure}, state}
+
+      {:quarantine, %Failure{} = failure} ->
+        {:reply, {:error, failure}, %{state | quarantined?: true}}
     end
   end
 
@@ -1054,10 +1068,10 @@ defmodule Rekindle.ArtifactStore do
   end
 
   defp pointer_value(state, kind, target) do
-    case read_pointer(state, kind, target) do
+    case pointer_entry(state, kind, target) do
       :none -> {:ok, nil}
-      {:ok, record} -> {:ok, record}
-      {:error, %Failure{} = failure} -> {:error, failure}
+      {:ok, record, _generation} -> {:ok, record}
+      {:error, %Failure{} = failure} -> {:quarantine, failure}
     end
   end
 
@@ -1065,21 +1079,47 @@ defmodule Rekindle.ArtifactStore do
     do: Keyword.keyword?(options) and Keyword.keys(options) -- [:checkpoint] == []
 
   defp pointer_generation(state, kind, target) when target in [:web, :desktop] do
-    case read_pointer(state, kind, target) do
-      {:ok, record} ->
-        with {:ok, reference} <- reference_from_record(state, record),
-             {:ok, generation} <- validate_generation(state, reference) do
-          {:ok, generation}
-        else
-          _ -> :none
+    case pointer_entry(state, kind, target) do
+      :none ->
+        :none
+
+      {:ok, _record, reference} ->
+        case validate_generation(state, reference) do
+          {:ok, generation} -> {:ok, generation}
+          {:error, %Failure{} = failure} -> {:error, failure}
         end
 
-      _ ->
-        :none
+      {:error, %Failure{} = failure} ->
+        {:error, failure}
     end
   end
 
   defp pointer_generation(_state, _kind, _target), do: :none
+
+  defp pointer_reply(state, kind, target) do
+    case pointer_generation(state, kind, target) do
+      {:error, %Failure{} = failure} ->
+        {:reply, {:error, failure}, %{state | quarantined?: true}}
+
+      result ->
+        {:reply, result, state}
+    end
+  end
+
+  defp pointer_entry(state, kind, target) do
+    case read_pointer(state, kind, target) do
+      :none ->
+        :none
+
+      {:ok, record} ->
+        with {:ok, reference} <- reference_from_record(state, record) do
+          {:ok, record, reference}
+        end
+
+      {:error, %Failure{} = failure} ->
+        {:error, failure}
+    end
+  end
 
   defp read_pointer(state, kind, target) do
     case read_canonical(pointer_path(state, kind, target)) do
@@ -1125,12 +1165,10 @@ defmodule Rekindle.ArtifactStore do
     do: {:error, invalid(:configuration, :config_invalid, "Protected generations are invalid")}
 
   defp collect_unreferenced(state, protected, options) do
-    with {:ok, references} <- all_references(state) do
-      protected =
-        protected
-        |> protect_pointer(state, :current)
-        |> protect_pointer(state, :fallback)
-        |> protect_leases(state)
+    with {:ok, references} <- all_references(state),
+         {:ok, protected} <- protect_pointer(protected, state, :current),
+         {:ok, protected} <- protect_pointer(protected, state, :fallback) do
+      protected = protect_leases(protected, state)
 
       inactive =
         references
@@ -1149,6 +1187,9 @@ defmodule Rekindle.ArtifactStore do
            retained_bytes: remaining_bytes
          }}
       end
+    else
+      {:quarantine, %Failure{} = failure} -> {:quarantine, failure}
+      {:error, %Failure{} = failure} -> {:error, failure}
     end
   end
 
@@ -1273,10 +1314,11 @@ defmodule Rekindle.ArtifactStore do
   end
 
   defp protect_pointer(protected, state, kind) do
-    Enum.reduce([:web, :desktop], protected, fn target, acc ->
-      case read_pointer(state, kind, target) do
-        {:ok, record} -> MapSet.put(acc, record["generation_id"])
-        _ -> acc
+    Enum.reduce_while([:web, :desktop], {:ok, protected}, fn target, {:ok, acc} ->
+      case pointer_entry(state, kind, target) do
+        :none -> {:cont, {:ok, acc}}
+        {:ok, _record, generation} -> {:cont, {:ok, MapSet.put(acc, generation.generation_id)}}
+        {:error, %Failure{} = failure} -> {:halt, {:quarantine, failure}}
       end
     end)
   end
@@ -1619,7 +1661,7 @@ defmodule Rekindle.ArtifactStore do
          {:ok, record} <- read_canonical(path),
          true <- valid_deletion_record?(record, name),
          {:ok, target} <- target(record["target"]),
-         false <- pointer_references?(state, record["generation_id"]),
+         {:ok, false} <- pointer_references?(state, record["generation_id"]),
          :ok <- remove_deletion_reference(state, target, record),
          {:ok, references} <- all_references(state),
          :ok <- remove_deleted_artifact(state, target, record["artifact_id"], references),
@@ -1689,13 +1731,25 @@ defmodule Rekindle.ArtifactStore do
   end
 
   defp pointer_references?(state, generation_id) do
-    Enum.any?([:current, :fallback], fn kind ->
-      Enum.any?([:web, :desktop], fn target ->
-        case read_pointer(state, kind, target) do
-          {:ok, record} -> record["generation_id"] == generation_id
-          _ -> false
+    Enum.reduce_while([:current, :fallback], {:ok, false}, fn kind, {:ok, false} ->
+      Enum.reduce_while([:web, :desktop], {:ok, false}, fn target, {:ok, false} ->
+        case pointer_entry(state, kind, target) do
+          :none ->
+            {:cont, {:ok, false}}
+
+          {:ok, record, _generation} ->
+            if record["generation_id"] == generation_id,
+              do: {:halt, {:ok, true}},
+              else: {:cont, {:ok, false}}
+
+          {:error, %Failure{} = failure} ->
+            {:halt, {:error, failure}}
         end
       end)
+      |> case do
+        {:ok, false} -> {:cont, {:ok, false}}
+        result -> {:halt, result}
+      end
     end)
   end
 
@@ -1779,15 +1833,12 @@ defmodule Rekindle.ArtifactStore do
   defp validate_pointers(state) do
     Enum.reduce_while([:current, :fallback], :ok, fn kind, :ok ->
       Enum.reduce_while([:web, :desktop], :ok, fn target, :ok ->
-        case read_pointer(state, kind, target) do
+        case pointer_entry(state, kind, target) do
           :none ->
             {:cont, :ok}
 
-          {:ok, record} ->
-            case reference_from_record(state, record) do
-              {:ok, _generation} -> {:cont, :ok}
-              {:error, _} = error -> {:halt, error}
-            end
+          {:ok, _record, _generation} ->
+            {:cont, :ok}
 
           {:error, _} = error ->
             {:halt, error}
@@ -2028,7 +2079,12 @@ defmodule Rekindle.ArtifactStore do
       {:error,
        invalid(:execution, :cleanup_unconfirmed, "Artifact store requires explicit cleanup")}
 
-  defp writable(_state), do: :ok
+  defp writable(state) do
+    case validate_pointers(state) do
+      :ok -> :ok
+      {:error, %Failure{} = failure} -> {:quarantine, failure}
+    end
+  end
 
   defp artifact_path(state, target, artifact_id),
     do: Path.join([state.root, "generations", Atom.to_string(target), artifact_id])

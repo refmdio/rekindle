@@ -305,6 +305,91 @@ defmodule Rekindle.ArtifactStoreTest do
     assert File.dir?(artifact_path(root, :web, fourth.artifact_id))
   end
 
+  test "pointer reads quarantine malformed and unreadable current or fallback state" do
+    for kind <- [:current, :fallback], mutation <- [:malformed, :unreadable] do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      [first, second] = sealed_web_generations(store, ["read-first", "read-second"])
+      assert :ok = ArtifactStore.activate(store, first, 1)
+      assert :ok = ArtifactStore.activate(store, second, 2)
+
+      corrupt_pointer(root, kind, mutation)
+
+      result =
+        case kind do
+          :current -> ArtifactStore.current(store, :web)
+          :fallback -> ArtifactStore.fallback(store, :web)
+        end
+
+      assert {:error, %{code: :cache_corrupt}} = result
+      assert_generation_preserved(root, first)
+      assert_generation_preserved(root, second)
+
+      assert {:error, %{code: :cleanup_unconfirmed}} =
+               ArtifactStore.allocate(store, :web)
+
+      :ok = GenServer.stop(store)
+    end
+  end
+
+  test "pointer corruption stops every artifact mutation before disk state changes" do
+    for operation <- [:allocate, :seal, :activate, :collect],
+        kind <- [:current, :fallback],
+        mutation <- [:malformed, :unreadable] do
+      root = state_root()
+      {:ok, store} = start_store(root, retained_generations: 1)
+
+      [first, second, third] =
+        sealed_web_generations(store, [
+          "#{operation}-first",
+          "#{operation}-second",
+          "#{operation}-third"
+        ])
+
+      assert :ok = ArtifactStore.activate(store, first, 1)
+      assert :ok = ArtifactStore.activate(store, second, 2)
+
+      pending =
+        if operation == :seal,
+          do: stage_web(store, "#{operation}-pending", 4),
+          else: nil
+
+      staging_before = File.ls!(Path.join(root, "staging")) |> Enum.sort()
+      corrupt_pointer(root, kind, mutation)
+
+      result =
+        case operation do
+          :allocate ->
+            ArtifactStore.allocate(store, :web)
+
+          :seal ->
+            pending
+            |> then(fn {staging, descriptor} -> ArtifactStore.seal(staging, descriptor) end)
+
+          :activate ->
+            ArtifactStore.activate(store, third, 3)
+
+          :collect ->
+            ArtifactStore.collect(store)
+        end
+
+      assert {:error, %{code: :cache_corrupt}} = result
+
+      for generation <- [first, second, third] do
+        assert_generation_preserved(root, generation)
+      end
+
+      assert File.ls!(Path.join(root, "staging")) |> Enum.sort() == staging_before
+      assert File.ls!(Path.join(root, "activations")) == []
+      assert File.ls!(Path.join(root, "deletions")) == []
+
+      assert {:error, %{code: :cleanup_unconfirmed}} =
+               ArtifactStore.allocate(store, :web)
+
+      :ok = GenServer.stop(store)
+    end
+  end
+
   test "lease release rejects non-owners and accepts an explicit release authority" do
     root = state_root()
     {:ok, store} = start_store(root)
@@ -417,6 +502,37 @@ defmodule Rekindle.ArtifactStoreTest do
       assert File.dir?(artifact_path(root, :web, second.artifact_id))
       assert File.ls!(Path.join(root, "deletions")) == []
       assert {:ok, %{removed_generations: 0}} = ArtifactStore.collect(recovered)
+    end
+  end
+
+  test "deletion recovery preserves all artifacts when pointer state is ambiguous" do
+    for kind <- [:current, :fallback], mutation <- [:malformed, :unreadable] do
+      root = state_root()
+      {:ok, store} = start_store(root, retained_generations: 1)
+      [first, second] = sealed_web_generations(store, ["pending-delete", "retained"])
+      :ok = GenServer.stop(store)
+
+      journal = %{
+        "v" => 1,
+        "target" => "web",
+        "generation_id" => first.generation_id,
+        "artifact_id" => first.artifact_id
+      }
+
+      journal_path = Path.join(root, "deletions/#{first.generation_id}.json")
+      assert :ok = Filesystem.atomic_write(journal_path, journal)
+      corrupt_pointer(root, kind, mutation)
+
+      {:ok, recovered} = start_store(root, retained_generations: 1)
+      assert File.exists?(Path.join(root, "quarantine-v1.json"))
+      assert File.regular?(journal_path)
+      assert_generation_preserved(root, first)
+      assert_generation_preserved(root, second)
+
+      assert {:error, %{code: :cleanup_unconfirmed}} =
+               ArtifactStore.allocate(recovered, :web)
+
+      :ok = GenServer.stop(recovered)
     end
   end
 
@@ -536,7 +652,7 @@ defmodule Rekindle.ArtifactStoreTest do
 
     {:ok, quarantined} = start_store(root)
     assert File.exists?(Path.join(root, "quarantine-v1.json"))
-    assert :none = ArtifactStore.current(quarantined, :web)
+    assert {:error, %{code: :artifact_missing}} = ArtifactStore.current(quarantined, :web)
 
     assert {:error, %{code: :cleanup_unconfirmed}} =
              ArtifactStore.allocate(quarantined, :web)
@@ -721,6 +837,31 @@ defmodule Rekindle.ArtifactStoreTest do
 
   defp artifact_path(root, target, artifact_id),
     do: Path.join([root, "generations", Atom.to_string(target), artifact_id])
+
+  defp corrupt_pointer(root, kind, :malformed) do
+    path = Path.join([root, Atom.to_string(kind), "web.json"])
+    if File.exists?(path), do: File.chmod!(path, 0o600)
+    File.write!(path, "{")
+  end
+
+  defp corrupt_pointer(root, kind, :unreadable) do
+    path = Path.join([root, Atom.to_string(kind), "web.json"])
+    unless File.exists?(path), do: File.write!(path, "{}")
+    File.chmod!(path, 0o000)
+  end
+
+  defp assert_generation_preserved(root, generation) do
+    assert File.regular?(
+             Path.join([
+               root,
+               "references",
+               Atom.to_string(generation.target),
+               generation.generation_id <> ".json"
+             ])
+           )
+
+    assert File.dir?(artifact_path(root, generation.target, generation.artifact_id))
+  end
 
   defp digest(value),
     do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
