@@ -293,6 +293,62 @@ defmodule Rekindle.Toolchain.ExecutableTest do
     assert descriptors == descriptor_count()
   end
 
+  test "reaps descendants spawned by TERM handlers on hook failure and timeout" do
+    root = temp_root()
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    for mode <- [:hook_failure, :timeout] do
+      leader_file = Path.join(root, "#{mode}-leader.pid")
+      initial_file = Path.join(root, "#{mode}-initial.pid")
+      late_file = Path.join(root, "#{mode}-late.pid")
+
+      executable =
+        script!(
+          root,
+          "#{mode}-tool",
+          """
+          trap 'sleep 30 & echo $! > #{late_file}; wait' TERM
+          echo $$ > #{leader_file}
+          sleep 30 &
+          echo $! > #{initial_file}
+          wait
+          """
+        )
+
+      assert {:ok, authority} = Executable.qualify(executable)
+
+      around_spawn = fn _authority, _launch_path, spawn ->
+        result = spawn.()
+        assert wait_file(leader_file, 1_000)
+        assert wait_file(initial_file, 1_000)
+        result
+      end
+
+      options =
+        case mode do
+          :hook_failure ->
+            [around_spawn: around_spawn, after_spawn: fn -> {:error, :forced} end]
+
+          :timeout ->
+            [around_spawn: around_spawn, timeout_ms: 25]
+        end
+
+      expected =
+        case mode do
+          :hook_failure -> {:error, :executable_changed}
+          :timeout -> {:error, :executable_timeout}
+        end
+
+      assert ^expected = Executable.run(authority, [], options)
+      assert wait_file(late_file, 1_000)
+
+      for file <- [leader_file, initial_file, late_file] do
+        pid = file |> File.read!() |> String.trim() |> String.to_integer()
+        assert wait_process_absent(pid, 1_000), "#{mode} left process #{pid} from #{file}"
+      end
+    end
+  end
+
   test "preserves a foreign entry instead of removing a changed launch root" do
     root = temp_root()
     executable = script!(root, "tool", "exit 0\n")

@@ -7,6 +7,8 @@ defmodule Rekindle.Toolchain.Executable do
   @max_bytes 1_073_741_824
   @identity_fields [:inode, :uid, :gid, :major_device, :minor_device, :size, :type, :mode]
   @launch_root_prefix ".rekindle-launch-"
+  @session_launchers ["/usr/bin/setsid", "/bin/setsid"]
+  @argument_launchers ["/usr/bin/env", "/bin/env"]
   @termination_grace_ms 100
   @termination_kill_wait_ms 500
 
@@ -86,14 +88,14 @@ defmodule Rekindle.Toolchain.Executable do
          :ok <- revalidate(admitted),
          {:ok, handle, launch_path, launch_authority} <- launch_handle(admitted) do
       case spawn_handle(admitted, launch_path, argv, options) do
-        {:ok, port} ->
+        {:ok, port, group} ->
           case {invoke_hook(options, :after_spawn, admitted),
                 admit_launch_handle(handle, launch_authority)} do
             {:ok, :ok} ->
-              {:ok, port, handle}
+              {:ok, port, {:execution_handle, handle, group}}
 
             _error ->
-              terminate(port)
+              terminate(port, group)
               release(handle)
               {:error, :executable_changed}
           end
@@ -116,9 +118,12 @@ defmodule Rekindle.Toolchain.Executable do
   def run(%__MODULE__{} = admitted, argv, options \\ []) do
     with {:ok, port, handle} <- open(admitted, argv, options) do
       try do
+        group = execution_group(handle)
+
         result =
           collect(
             port,
+            group,
             <<>>,
             0,
             Keyword.get(options, :max_output_bytes, 4_194_304),
@@ -138,6 +143,8 @@ defmodule Rekindle.Toolchain.Executable do
 
   @doc false
   @spec release(tuple() | :file.io_device()) :: :ok
+  def release({:execution_handle, handle, _group}), do: release(handle)
+
   def release({:launch_handle, handle, root, root_identity}) do
     release(handle)
     remove_launch_root(root, root_identity)
@@ -169,17 +176,102 @@ defmodule Rekindle.Toolchain.Executable do
   end
 
   defp spawn_handle(admitted, launch_path, argv, options) do
-    spawn = fn -> open_port(launch_path, admitted.path, argv, options) end
+    with {:ok, launcher} <- session_launcher(),
+         {:ok, launcher_handle, launcher_path, _authority} <- launch_handle(launcher) do
+      try do
+        with {:ok, argument_launcher} <- argument_launcher(),
+             {:ok, argument_handle, argument_path, _authority} <-
+               launch_handle(argument_launcher) do
+          try do
+            command = [
+              "--wait",
+              argument_path,
+              "--argv0",
+              admitted.path,
+              launch_path
+              | argv
+            ]
 
-    case Keyword.get(options, :around_spawn) do
-      nil -> spawn.()
-      hook when is_function(hook, 3) -> hook.(admitted, launch_path, spawn)
-      _ -> {:error, :invalid_hook}
+            case Keyword.get(options, :around_spawn) do
+              nil ->
+                open_port(launcher_path, launcher.path, command, options)
+
+              hook when is_function(hook, 3) ->
+                spawn_around_hook(
+                  hook,
+                  admitted,
+                  launch_path,
+                  launcher_path,
+                  launcher.path,
+                  command,
+                  options
+                )
+
+              _ ->
+                {:error, :invalid_hook}
+            end
+          after
+            release(argument_handle)
+          end
+        end
+      after
+        release(launcher_handle)
+      end
     end
   rescue
     _ -> {:error, :executable_changed}
   catch
     _, _ -> {:error, :executable_changed}
+  end
+
+  defp spawn_around_hook(
+         hook,
+         admitted,
+         launch_path,
+         launcher_path,
+         launcher_arg0,
+         command,
+         options
+       ) do
+    key = {__MODULE__, make_ref()}
+
+    spawn = fn ->
+      case Process.get(key) do
+        nil ->
+          case open_port(launcher_path, launcher_arg0, command, options) do
+            {:ok, port, group} ->
+              Process.put(key, {port, group})
+              {:ok, port}
+
+            {:error, _reason} = error ->
+              error
+          end
+
+        _spawned ->
+          {:error, :executable_changed}
+      end
+    end
+
+    try do
+      result = hook.(admitted, launch_path, spawn)
+
+      case {result, Process.delete(key)} do
+        {{:ok, port}, {port, group}} ->
+          {:ok, port, group}
+
+        {error, nil} ->
+          error
+
+        {_error, {port, group}} ->
+          terminate(port, group)
+          {:error, :executable_changed}
+      end
+    after
+      case Process.delete(key) do
+        {port, group} -> terminate(port, group)
+        nil -> :ok
+      end
+    end
   end
 
   defp open_port(path, arg0, argv, options) do
@@ -202,7 +294,40 @@ defmodule Rekindle.Toolchain.Executable do
         port_options
       )
 
-    {:ok, port}
+    with {:ok, root_pid} <- port_pid(port),
+         {:ok, group} <- await_process_group(port, root_pid, monotonic_ms() + 1_000) do
+      {:ok, port, {:process_group, root_pid, group}}
+    else
+      {:error, _reason} = error ->
+        terminate(port)
+        error
+    end
+  end
+
+  defp port_pid(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} when is_integer(pid) and pid > 0 -> {:ok, pid}
+      _ -> {:error, :executable_changed}
+    end
+  end
+
+  defp execution_group({:execution_handle, _handle, group}), do: group
+
+  defp session_launcher do
+    launcher(@session_launchers)
+  end
+
+  defp argument_launcher do
+    launcher(@argument_launchers)
+  end
+
+  defp launcher(candidates) do
+    Enum.find_value(candidates, {:error, :executable_changed}, fn path ->
+      case qualify(path) do
+        {:ok, launcher} -> {:ok, launcher}
+        {:error, _reason} -> false
+      end
+    end)
   end
 
   defp launch_handle(admitted) do
@@ -507,22 +632,22 @@ defmodule Rekindle.Toolchain.Executable do
     Map.take(stat, fields)
   end
 
-  defp collect(port, output, discarded, maximum, deadline) do
+  defp collect(port, group, output, discarded, maximum, deadline) do
     receive do
       {^port, {:data, bytes}} ->
         remaining = max(maximum - byte_size(output), 0)
         kept = min(byte_size(bytes), remaining)
         output = if kept == 0, do: output, else: output <> binary_part(bytes, 0, kept)
-        collect(port, output, discarded + byte_size(bytes) - kept, maximum, deadline)
+        collect(port, group, output, discarded + byte_size(bytes) - kept, maximum, deadline)
 
       {^port, {:exit_status, status}} ->
         {:ok, {output, status}}
 
       {^port, :closed} ->
-        collect(port, output, discarded, maximum, deadline)
+        collect(port, group, output, discarded, maximum, deadline)
     after
       max(deadline - monotonic_ms(), 0) ->
-        terminate(port)
+        terminate(port, group)
         {:error, :executable_timeout}
     end
   end
@@ -726,10 +851,23 @@ defmodule Rekindle.Toolchain.Executable do
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
-  defp terminate(port) do
-    case Port.info(port, :os_pid) do
-      {:os_pid, pid} when is_integer(pid) and pid > 0 -> terminate_process_tree(pid)
-      _ -> :ok
+  defp terminate(port, group \\ nil) do
+    case group do
+      {:process_group, root_pid, process_group} ->
+        terminate_process_group(process_group)
+
+        if root_pid != process_group do
+          terminate_process_snapshot(root_pid)
+        end
+
+      nil ->
+        terminate_port_process(port)
+
+      pid when is_integer(pid) and pid > 0 ->
+        terminate_process_tree(pid)
+
+      _other ->
+        :ok
     end
 
     close(port)
@@ -739,7 +877,39 @@ defmodule Rekindle.Toolchain.Executable do
     _, _ -> close(port)
   end
 
+  defp terminate_port_process(port) do
+    case port_os_pid(port) do
+      pid when is_integer(pid) and pid > 0 -> terminate_process_tree(pid)
+      _other -> :ok
+    end
+  end
+
+  defp port_os_pid(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} when is_integer(pid) and pid > 0 -> pid
+      _other -> nil
+    end
+  end
+
   defp terminate_process_tree(root_pid) do
+    case process_group(root_pid) do
+      ^root_pid -> terminate_process_group(root_pid)
+      _other -> terminate_process_snapshot(root_pid)
+    end
+  end
+
+  defp terminate_process_group(group) do
+    signal_process_group(group, "TERM")
+    wait_for_process_group(group, monotonic_ms() + @termination_grace_ms)
+
+    if process_group_alive?(group) do
+      kill_process_group(group, monotonic_ms() + @termination_kill_wait_ms)
+    end
+
+    :ok
+  end
+
+  defp terminate_process_snapshot(root_pid) do
     records = process_tree(root_pid)
     signal_records(records, "TERM")
     wait_for_processes(records, monotonic_ms() + @termination_grace_ms)
@@ -748,6 +918,87 @@ defmodule Rekindle.Toolchain.Executable do
     signal_records(survivors, "KILL")
     wait_for_processes(survivors, monotonic_ms() + @termination_kill_wait_ms)
     :ok
+  end
+
+  defp await_process_group(port, root_pid, deadline) do
+    cond do
+      group = session_process_group(root_pid) ->
+        {:ok, group}
+
+      is_nil(port_os_pid(port)) ->
+        {:ok, root_pid}
+
+      monotonic_ms() >= deadline ->
+        {:error, :executable_changed}
+
+      true ->
+        Process.sleep(1)
+        await_process_group(port, root_pid, deadline)
+    end
+  end
+
+  defp session_process_group(root_pid) do
+    root_pid
+    |> process_tree()
+    |> Enum.find_value(fn
+      %{pid: pid, pgrp: pid, state: state} when pid != root_pid and state != "Z" -> pid
+      _record -> nil
+    end)
+  end
+
+  defp process_group(pid) do
+    case process_record(pid) do
+      %{pgrp: group, state: state} when state != "Z" -> group
+      _ -> nil
+    end
+  end
+
+  defp process_record(pid) do
+    case :os.type() do
+      {:unix, :linux} -> linux_process_record("/proc/#{pid}/stat")
+      {:unix, _name} -> Enum.find(ps_process_records(), &(&1.pid == pid))
+      _other -> nil
+    end
+  end
+
+  defp process_group_alive?(group) do
+    Enum.any?(process_records(), &(&1.pgrp == group and &1.state != "Z"))
+  end
+
+  defp wait_for_process_group(group, deadline) do
+    if not process_group_alive?(group) or monotonic_ms() >= deadline do
+      :ok
+    else
+      Process.sleep(5)
+      wait_for_process_group(group, deadline)
+    end
+  end
+
+  defp signal_process_group(group, signal) do
+    group
+    |> process_group_records()
+    |> signal_records(signal)
+  end
+
+  defp kill_process_group(group, deadline) do
+    records = process_group_records(group)
+
+    cond do
+      records == [] ->
+        :ok
+
+      monotonic_ms() >= deadline ->
+        signal_records(records, "KILL")
+
+      true ->
+        signal_records(records, "KILL")
+        Process.sleep(5)
+        kill_process_group(group, deadline)
+    end
+  end
+
+  defp process_group_records(group) do
+    Enum.filter(process_records(), &(&1.pgrp == group and &1.state != "Z"))
   end
 
   defp process_tree(root_pid) do
@@ -839,33 +1090,59 @@ defmodule Rekindle.Toolchain.Executable do
     "/proc/[0-9]*/stat"
     |> Path.wildcard()
     |> Enum.flat_map(fn path ->
-      with {pid, ""} <- path |> Path.dirname() |> Path.basename() |> Integer.parse(),
-           {:ok, bytes} <- File.read(path),
-           [{offset, 2} | _] <- :binary.matches(bytes, ") ") |> Enum.reverse(),
-           fields <-
-             binary_part(bytes, offset + 2, byte_size(bytes) - offset - 2) |> String.split(),
-           state when is_binary(state) <- Enum.at(fields, 0),
-           ppid when is_binary(ppid) <- Enum.at(fields, 1),
-           start_time when is_binary(start_time) <- Enum.at(fields, 19),
-           {ppid, ""} <- Integer.parse(ppid) do
-        [%{pid: pid, ppid: ppid, identity: {:linux, start_time}, state: state, depth: 0}]
-      else
-        _ -> []
+      case linux_process_record(path) do
+        nil -> []
+        record -> [record]
       end
     end)
   end
 
+  defp linux_process_record(path) do
+    with {pid, ""} <- path |> Path.dirname() |> Path.basename() |> Integer.parse(),
+         {:ok, bytes} <- File.read(path),
+         [{offset, 2} | _] <- :binary.matches(bytes, ") ") |> Enum.reverse(),
+         fields <-
+           binary_part(bytes, offset + 2, byte_size(bytes) - offset - 2) |> String.split(),
+         state when is_binary(state) <- Enum.at(fields, 0),
+         ppid when is_binary(ppid) <- Enum.at(fields, 1),
+         pgrp when is_binary(pgrp) <- Enum.at(fields, 2),
+         start_time when is_binary(start_time) <- Enum.at(fields, 19),
+         {ppid, ""} <- Integer.parse(ppid),
+         {pgrp, ""} <- Integer.parse(pgrp) do
+      %{
+        pid: pid,
+        ppid: ppid,
+        pgrp: pgrp,
+        identity: {:linux, start_time},
+        state: state,
+        depth: 0
+      }
+    else
+      _ -> nil
+    end
+  end
+
   defp ps_process_records do
     with path when is_binary(path) <- system_executable(["/bin/ps", "/usr/bin/ps"]),
-         {output, 0} <- System.cmd(path, ["-axo", "pid=,ppid=,state=,lstart="]) do
+         {output, 0} <- System.cmd(path, ["-axo", "pid=,ppid=,pgid=,state=,lstart="]) do
       output
       |> String.split("\n", trim: true)
       |> Enum.flat_map(fn line ->
-        case String.split(line, ~r/\s+/, parts: 4, trim: true) do
-          [pid, ppid, state, started] ->
+        case String.split(line, ~r/\s+/, parts: 5, trim: true) do
+          [pid, ppid, pgrp, state, started] ->
             with {pid, ""} <- Integer.parse(pid),
-                 {ppid, ""} <- Integer.parse(ppid) do
-              [%{pid: pid, ppid: ppid, identity: {:ps, started}, state: state, depth: 0}]
+                 {ppid, ""} <- Integer.parse(ppid),
+                 {pgrp, ""} <- Integer.parse(pgrp) do
+              [
+                %{
+                  pid: pid,
+                  ppid: ppid,
+                  pgrp: pgrp,
+                  identity: {:ps, started},
+                  state: state,
+                  depth: 0
+                }
+              ]
             else
               _ -> []
             end
