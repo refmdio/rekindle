@@ -123,6 +123,14 @@ defmodule Rekindle.Scheduler do
   @spec succeed(t(), pos_integer(), term(), non_neg_integer()) ::
           {:ok, t(), [term()]} | {:error, Failure.t()}
   def succeed(
+        %__MODULE__{state: :stopping, running_revision: revision} = scheduler,
+        revision,
+        _generation,
+        _now_ms
+      ),
+      do: {:ok, scheduler, []}
+
+  def succeed(
         %__MODULE__{state: :publishing, running_revision: revision} = scheduler,
         revision,
         generation,
@@ -147,11 +155,20 @@ defmodule Rekindle.Scheduler do
   @spec fail(t(), pos_integer(), Failure.t(), non_neg_integer()) ::
           {:ok, t(), [term()]} | {:error, Failure.t()}
   def fail(
+        %__MODULE__{state: :stopping, running_revision: revision} = scheduler,
+        revision,
+        %Failure{},
+        _now_ms
+      ),
+      do: {:ok, scheduler, []}
+
+  def fail(
         %__MODULE__{running_revision: revision} = scheduler,
         revision,
         %Failure{} = failure,
         now_ms
-      ),
+      )
+      when scheduler.state in [:building, :validating, :publishing],
       do: terminal(scheduler, now_ms, [{:failed, revision, failure}])
 
   def fail(%__MODULE__{}, _revision, _failure, _now_ms),

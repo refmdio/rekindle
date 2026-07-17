@@ -136,6 +136,58 @@ defmodule Rekindle.SchedulerTest do
     assert stopped.state == :stopping
   end
 
+  test "stopping absorbs every late terminal result and never reopens admission" do
+    failure =
+      Failure.new!(
+        target: :web,
+        stage: :execution,
+        code: :cargo_failed,
+        message: "late failure"
+      )
+
+    cancellation =
+      Failure.new!(
+        target: :web,
+        stage: :execution,
+        code: :cancelled,
+        message: "late cancellation"
+      )
+
+    building = start_build(:web)
+    assert {:ok, stopped, [{:cancel, 1}]} = Scheduler.stop(building)
+
+    for terminal <- [
+          {:succeed, :generation_one},
+          {:fail, failure},
+          {:fail, cancellation},
+          {:succeed, :duplicate_generation},
+          {:fail, failure}
+        ] do
+      result =
+        case terminal do
+          {:succeed, generation} -> Scheduler.succeed(stopped, 1, generation, 10)
+          {:fail, reason} -> Scheduler.fail(stopped, 1, reason, 10)
+        end
+
+      assert {:ok, ^stopped, []} = result
+      assert {:ok, ^stopped, [:rejected]} = Scheduler.change(stopped, [:cargo_web], 11)
+    end
+
+    assert stopped.state == :stopping
+    assert stopped.active_generation == nil
+
+    publishing = start_build(:web)
+    assert {:ok, publishing} = Scheduler.advance(publishing, 1, :validating)
+    assert {:ok, publishing} = Scheduler.advance(publishing, 1, :publishing)
+    assert {:ok, publishing_stopped, []} = Scheduler.stop(publishing)
+
+    assert {:ok, ^publishing_stopped, []} =
+             Scheduler.succeed(publishing_stopped, 1, :forbidden_generation, 20)
+
+    assert publishing_stopped.state == :stopping
+    assert publishing_stopped.active_generation == nil
+  end
+
   test "resource leases serialize matching Cargo caches and bound independent work" do
     assert {:ok, pool} = ResourcePool.new(2, 1)
     assert {:ok, pool} = ResourcePool.acquire_cargo(pool, :web, "cache-a")
