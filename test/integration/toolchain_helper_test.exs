@@ -2,6 +2,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
   use ExUnit.Case, async: false
 
   alias Rekindle.CanonicalValue
+  alias Rekindle.ProcessRunner
 
   alias Rekindle.Toolchain.{
     Exec,
@@ -186,6 +187,46 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     assert terminal.outcome == :signaled
     assert terminal.cleanup == :confirmed
     refute process_exists?(descendant)
+  end
+
+  test "semantic runner cancellation preserves helper-owned descendant cleanup", %{helper: helper} do
+    root = temp_root("semantic-runner")
+    File.mkdir_p!(root)
+    script = Path.join(root, "descendants")
+    descendant_file = Path.join(root, "descendant.pid")
+
+    File.write!(
+      script,
+      "#!/bin/sh\n/bin/sleep 30 &\necho $! > #{descendant_file}\nwait\n"
+    )
+
+    File.chmod!(script, 0o700)
+    on_exit(fn -> File.rm_rf!(root) end)
+    runner = start_supervised!({ProcessRunner, []})
+
+    assert {:ok, reference} =
+             ProcessRunner.run(runner,
+               target: :desktop,
+               build_key: String.duplicate("a", 64),
+               helper: helper,
+               executable: script,
+               argv: [],
+               cwd: root,
+               env_mode: :replace,
+               env_set: [],
+               env_unset: [],
+               terminate_grace_ms: 100,
+               kill_grace_ms: 100,
+               output_bytes_per_stream: 1_048_576,
+               build_timeout_ms: 5_000,
+               cleanup_timeout_ms: 2_000
+             )
+
+    assert wait_file(descendant_file, 1_000)
+    descendant = descendant_file |> File.read!() |> String.trim() |> String.to_integer()
+    assert :ok = ProcessRunner.cancel(runner, reference, :caller)
+    assert_receive {:rekindle_process, ^reference, {:error, %{code: :cancelled}}}, 3_000
+    assert wait_process_absent(descendant, 2_000)
   end
 
   test "a fresh BEAM decodes a real signaled timeout without relying on existing atoms", %{
