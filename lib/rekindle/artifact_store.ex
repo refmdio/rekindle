@@ -53,7 +53,13 @@ defmodule Rekindle.ArtifactStore do
 
   @spec acquire(GenServer.server(), GenerationRef.t()) ::
           {:ok, Lease.t()} | {:error, Failure.t()}
-  def acquire(server, generation), do: GenServer.call(server, {:acquire, generation}, :infinity)
+  def acquire(server, generation),
+    do: GenServer.call(server, {:acquire, generation, :any}, :infinity)
+
+  @spec acquire(GenServer.server(), GenerationRef.t(), non_neg_integer()) ::
+          {:ok, Lease.t()} | {:error, Failure.t()}
+  def acquire(server, generation, source_revision),
+    do: GenServer.call(server, {:acquire, generation, source_revision}, :infinity)
 
   @spec release(Lease.t()) :: :ok
   def release(%Lease{store: store} = lease), do: GenServer.call(store, {:release, lease})
@@ -164,8 +170,10 @@ defmodule Rekindle.ArtifactStore do
     {:reply, pointer_generation(state, :fallback, target), state}
   end
 
-  def handle_call({:acquire, generation}, {owner, _tag}, state) do
-    with {:ok, generation} <- validate_generation(state, generation) do
+  def handle_call({:acquire, generation, source_revision}, {owner, _tag}, state) do
+    with true <- source_revision == :any or uint?(source_revision),
+         {:ok, generation} <- validate_generation(state, generation),
+         :ok <- maybe_generation_source_revision(state, generation, source_revision) do
       token = make_ref()
       monitor = Process.monitor(owner)
 
@@ -187,7 +195,11 @@ defmodule Rekindle.ArtifactStore do
 
       {:reply, {:ok, lease}, state}
     else
-      {:error, %Failure{} = failure} -> {:reply, {:error, failure}, state}
+      false ->
+        {:reply, {:error, invalid(:configuration, :config_invalid, "Revision is invalid")}, state}
+
+      {:error, %Failure{} = failure} ->
+        {:reply, {:error, failure}, state}
     end
   end
 
@@ -726,6 +738,11 @@ defmodule Rekindle.ArtifactStore do
       _ -> {:error, invalid(:artifact, :artifact_missing, "Generation revision is unavailable")}
     end
   end
+
+  defp maybe_generation_source_revision(_state, _generation, :any), do: :ok
+
+  defp maybe_generation_source_revision(state, generation, expected),
+    do: generation_source_revision(state, generation, expected)
 
   defp write_pointer(state, kind, generation, revision) do
     record = %{
