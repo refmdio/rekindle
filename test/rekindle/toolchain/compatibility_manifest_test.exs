@@ -20,7 +20,6 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
       "sha256" => sha256(bytes)
     }
 
-    assert Helper.compatibility()["helper_version"] == "0.1.0"
     manifest = Rekindle.CompatibilityFixture.encode(asset)
 
     File.write!(manifest_path, manifest)
@@ -62,10 +61,18 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
     release = Rekindle.CompatibilityFixture.release(asset)
     File.write!(path, CompatibilityManifest.encode_release!(release))
     assert {:ok, manifest} = CompatibilityManifest.load(manifest_path: path)
+    assert manifest.helper_version == Helper.compatibility()["helper_version"]
     assert manifest.root["targets"]["web"]["rust_toolchain"] == "nightly-2026-04-01"
     assert length(manifest.root["tuples"]) == 2
 
+    runtime_mismatch =
+      coherent_helper_version(
+        release,
+        next_patch_version(Helper.compatibility()["helper_version"])
+      )
+
     tampered_values = [
+      runtime_mismatch,
       put_in(release, ["client_template", "manifest_sha256"], String.duplicate("b", 64)),
       put_in(release, ["helper", "assets", Access.at(0), "sha256"], String.duplicate("b", 64)),
       update_in(release["evidence"], &tl/1),
@@ -116,7 +123,8 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
       "sha256" => sha256(bytes)
     }
 
-    File.write!(manifest_path, Rekindle.CompatibilityFixture.encode(asset))
+    release = Rekindle.CompatibilityFixture.release(asset)
+    File.write!(manifest_path, CompatibilityManifest.encode_release!(release))
 
     result =
       File.cd!(shadow, fn ->
@@ -136,7 +144,11 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
 
     assert String.contains?(
              path,
-             Path.join(["0.1.0", "#{host.os}-#{host.arch}", asset["sha256"]])
+             Path.join([
+               release["rekindle_version"],
+               "#{host.os}-#{host.arch}",
+               asset["sha256"]
+             ])
            )
 
     mismatch = bytes <> "mismatch"
@@ -180,6 +192,35 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
   end
 
   defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+
+  defp next_patch_version(version) do
+    parsed = Version.parse!(version)
+    "#{parsed.major}.#{parsed.minor}.#{parsed.patch + 1}"
+  end
+
+  defp coherent_helper_version(release, version) do
+    {tuples, tuple_ids} =
+      Enum.map_reduce(release["tuples"], %{}, fn tuple, tuple_ids ->
+        old_id = tuple["tuple_id"]
+
+        tuple =
+          tuple
+          |> put_in(["helper", "version"], version)
+          |> then(&Map.put(&1, "tuple_id", CompatibilityManifest.tuple_id(&1)))
+
+        {tuple, Map.put(tuple_ids, old_id, tuple["tuple_id"])}
+      end)
+
+    evidence =
+      release["evidence"]
+      |> Enum.map(&Map.update!(&1, "tuple_id", fn id -> Map.fetch!(tuple_ids, id) end))
+      |> Enum.sort_by(&{&1["tuple_id"], &1["ci_job"]})
+
+    release
+    |> put_in(["helper", "version"], version)
+    |> Map.put("tuples", Enum.sort_by(tuples, & &1["tuple_id"]))
+    |> Map.put("evidence", evidence)
+  end
 
   defp build_helper_bytes!(source) do
     rustup = System.find_executable("rustup") || raise "rustup is required"
