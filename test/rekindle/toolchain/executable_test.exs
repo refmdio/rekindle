@@ -205,7 +205,11 @@ defmodule Rekindle.Toolchain.ExecutableTest do
   test "settles every unique launch root, descriptor and port on success and failure" do
     root = temp_root()
     executable = script!(root, "tool", "exit 0\n")
-    sleeper = script!(root, "sleeper", "sleep 30\n")
+    descendant_file = Path.join(root, "descendant.pid")
+
+    sleeper =
+      script!(root, "sleeper", "sleep 30 &\necho $! > #{descendant_file}\nwait\n")
+
     on_exit(fn -> File.rm_rf!(root) end)
 
     assert {:ok, authority} = Executable.qualify(executable)
@@ -233,15 +237,56 @@ defmodule Rekindle.Toolchain.ExecutableTest do
     assert ports == MapSet.new(Port.list())
     assert descriptors == descriptor_count()
 
+    parent = self()
+
     assert {:error, :executable_changed} =
-             Executable.run(authority, [], after_spawn: fn -> {:error, :forced} end)
+             Executable.run(sleep_authority, [],
+               around_spawn: fn _authority, _launch_path, spawn ->
+                 case spawn.() do
+                   {:ok, port} = result ->
+                     assert wait_file(descendant_file, 1_000)
+                     {:os_pid, pid} = Port.info(port, :os_pid)
+                     send(parent, {:hook_failure_parent, pid})
+                     result
+
+                   error ->
+                     error
+                 end
+               end,
+               after_spawn: fn -> {:error, :forced} end
+             )
+
+    assert_receive {:hook_failure_parent, hook_parent_pid}
+    hook_descendant_pid = descendant_file |> File.read!() |> String.trim() |> String.to_integer()
+    assert wait_process_absent(hook_parent_pid, 1_000)
+    assert wait_process_absent(hook_descendant_pid, 1_000)
+    File.rm!(descendant_file)
 
     assert roots == launch_roots()
     assert ports == MapSet.new(Port.list())
     assert descriptors == descriptor_count()
 
     assert {:error, :executable_timeout} =
-             Executable.run(sleep_authority, [], timeout_ms: 25)
+             Executable.run(sleep_authority, [],
+               timeout_ms: 25,
+               around_spawn: fn _authority, _launch_path, spawn ->
+                 case spawn.() do
+                   {:ok, port} = result ->
+                     assert wait_file(descendant_file, 1_000)
+                     {:os_pid, pid} = Port.info(port, :os_pid)
+                     send(parent, {:timeout_parent, pid})
+                     result
+
+                   error ->
+                     error
+                 end
+               end
+             )
+
+    assert_receive {:timeout_parent, parent_pid}
+    descendant_pid = descendant_file |> File.read!() |> String.trim() |> String.to_integer()
+    assert wait_process_absent(parent_pid, 1_000)
+    assert wait_process_absent(descendant_pid, 1_000)
 
     assert roots == launch_roots()
     assert ports == MapSet.new(Port.list())

@@ -7,6 +7,8 @@ defmodule Rekindle.Toolchain.Executable do
   @max_bytes 1_073_741_824
   @identity_fields [:inode, :uid, :gid, :major_device, :minor_device, :size, :type, :mode]
   @launch_root_prefix ".rekindle-launch-"
+  @termination_grace_ms 100
+  @termination_kill_wait_ms 500
 
   @type t :: %__MODULE__{
           path: Path.t(),
@@ -91,7 +93,7 @@ defmodule Rekindle.Toolchain.Executable do
               {:ok, port, handle}
 
             _error ->
-              close(port)
+              terminate(port)
               release(handle)
               {:error, :executable_changed}
           end
@@ -277,38 +279,67 @@ defmodule Rekindle.Toolchain.Executable do
     name = "exec-#{System.unique_integer([:positive, :monotonic])}"
     path = Path.join(root, name)
 
-    with {:ok, destination} <- :file.open(path, [:write, :binary, :raw, :exclusive]) do
-      with {:ok, entry_record} <- :file.read_file_info(destination) do
-        entry_identity = entry_record |> File.Stat.from_record() |> node_identity()
-
-        try do
-          result =
-            try do
-              with :ok <- copy_handle(source, destination, admitted.size),
-                   :ok <- :file.sync(destination) do
-                :ok
+    try do
+      case :file.open(path, [:write, :binary, :raw, :exclusive]) do
+        {:ok, destination} ->
+          case launch_entry_identity(destination, path) do
+            {:ok, entry_identity} ->
+              try do
+                with {:ok, entry_record} <- :file.read_file_info(destination),
+                     true <- node_identity(File.Stat.from_record(entry_record)) == entry_identity,
+                     :ok <- copy_handle(source, destination, admitted.size),
+                     :ok <- :file.sync(destination),
+                     :ok <- release(destination),
+                     :ok <- File.chmod(path, 0o500) do
+                  open_unlinked_seal(path, admitted)
+                else
+                  _ -> {:error, :executable_changed}
+                end
+              after
+                release(destination)
+                remove_launch_entry(path, entry_identity)
               end
-            after
-              release(destination)
-            end
 
-          with :ok <- result,
-               :ok <- File.chmod(path, 0o500) do
-            open_unlinked_seal(path, admitted)
-          else
-            _ -> {:error, :executable_changed}
+            _error ->
+              release(destination)
+              remove_unidentified_launch_entry(path)
+              {:error, :executable_changed}
           end
-        after
-          remove_launch_entry(path, entry_identity)
-        end
-      else
-        _ ->
-          release(destination)
+
+        _error ->
           {:error, :executable_changed}
       end
-    else
+    rescue
+      _error ->
+        remove_unidentified_launch_entry(path)
+        {:error, :executable_changed}
+    catch
+      _, _ ->
+        remove_unidentified_launch_entry(path)
+        {:error, :executable_changed}
+    end
+  end
+
+  defp remove_unidentified_launch_entry(_path), do: :ok
+
+  defp launch_entry_identity(destination, path) do
+    case :file.read_file_info(destination) do
+      {:ok, record} -> {:ok, record |> File.Stat.from_record() |> node_identity()}
+      _ -> launch_entry_path_identity(path)
+    end
+  rescue
+    _ -> launch_entry_path_identity(path)
+  catch
+    _, _ -> launch_entry_path_identity(path)
+  end
+
+  defp launch_entry_path_identity(path) do
+    case File.lstat(path) do
+      {:ok, stat} -> {:ok, node_identity(stat)}
       _ -> {:error, :executable_changed}
     end
+  rescue
+    _ -> {:error, :executable_changed}
   end
 
   defp open_unlinked_seal(path, admitted) do
@@ -491,7 +522,7 @@ defmodule Rekindle.Toolchain.Executable do
         collect(port, output, discarded, maximum, deadline)
     after
       max(deadline - monotonic_ms(), 0) ->
-        close(port)
+        terminate(port)
         {:error, :executable_timeout}
     end
   end
@@ -694,6 +725,176 @@ defmodule Rekindle.Toolchain.Executable do
   end
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
+
+  defp terminate(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} when is_integer(pid) and pid > 0 -> terminate_process_tree(pid)
+      _ -> :ok
+    end
+
+    close(port)
+  rescue
+    _ -> close(port)
+  catch
+    _, _ -> close(port)
+  end
+
+  defp terminate_process_tree(root_pid) do
+    records = process_tree(root_pid)
+    signal_records(records, "TERM")
+    wait_for_processes(records, monotonic_ms() + @termination_grace_ms)
+
+    survivors = surviving_records(records)
+    signal_records(survivors, "KILL")
+    wait_for_processes(survivors, monotonic_ms() + @termination_kill_wait_ms)
+    :ok
+  end
+
+  defp process_tree(root_pid) do
+    records = process_records()
+    by_pid = Map.new(records, &{&1.pid, &1})
+    children = Enum.group_by(records, & &1.ppid)
+    collect_process_tree([{root_pid, 0}], by_pid, children, MapSet.new(), [])
+  end
+
+  defp collect_process_tree([], _by_pid, _children, _seen, records),
+    do: Enum.sort_by(records, &{-&1.depth, &1.pid})
+
+  defp collect_process_tree(
+         [{pid, depth} | pending],
+         by_pid,
+         children,
+         seen,
+         records
+       ) do
+    if MapSet.member?(seen, pid) do
+      collect_process_tree(pending, by_pid, children, seen, records)
+    else
+      seen = MapSet.put(seen, pid)
+      descendants = Enum.map(Map.get(children, pid, []), &{&1.pid, depth + 1})
+
+      records =
+        case by_pid do
+          %{^pid => record} -> [%{record | depth: depth} | records]
+          %{} -> records
+        end
+
+      collect_process_tree(descendants ++ pending, by_pid, children, seen, records)
+    end
+  end
+
+  defp signal_records([], _signal), do: :ok
+
+  defp signal_records(records, signal) do
+    current = Map.new(process_records(), &{&1.pid, &1})
+
+    Enum.each(records, fn %{pid: pid} = record ->
+      case current do
+        %{^pid => %{identity: identity, state: state}}
+        when identity == record.identity and state != "Z" ->
+          signal_process(pid, signal)
+
+        _ ->
+          :ok
+      end
+    end)
+  end
+
+  defp wait_for_processes(records, deadline) do
+    if surviving_records(records) == [] or monotonic_ms() >= deadline do
+      :ok
+    else
+      Process.sleep(5)
+      wait_for_processes(records, deadline)
+    end
+  end
+
+  defp surviving_records(records) do
+    current = Map.new(process_records(), &{&1.pid, &1})
+
+    Enum.filter(records, fn %{pid: pid} = record ->
+      case current do
+        %{^pid => %{identity: identity, state: state}} ->
+          identity == record.identity and state != "Z"
+
+        _ ->
+          false
+      end
+    end)
+  end
+
+  defp process_records do
+    case :os.type() do
+      {:unix, :linux} -> linux_process_records()
+      {:unix, _name} -> ps_process_records()
+      _ -> []
+    end
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  defp linux_process_records do
+    "/proc/[0-9]*/stat"
+    |> Path.wildcard()
+    |> Enum.flat_map(fn path ->
+      with {pid, ""} <- path |> Path.dirname() |> Path.basename() |> Integer.parse(),
+           {:ok, bytes} <- File.read(path),
+           [{offset, 2} | _] <- :binary.matches(bytes, ") ") |> Enum.reverse(),
+           fields <-
+             binary_part(bytes, offset + 2, byte_size(bytes) - offset - 2) |> String.split(),
+           state when is_binary(state) <- Enum.at(fields, 0),
+           ppid when is_binary(ppid) <- Enum.at(fields, 1),
+           start_time when is_binary(start_time) <- Enum.at(fields, 19),
+           {ppid, ""} <- Integer.parse(ppid) do
+        [%{pid: pid, ppid: ppid, identity: {:linux, start_time}, state: state, depth: 0}]
+      else
+        _ -> []
+      end
+    end)
+  end
+
+  defp ps_process_records do
+    with path when is_binary(path) <- system_executable(["/bin/ps", "/usr/bin/ps"]),
+         {output, 0} <- System.cmd(path, ["-axo", "pid=,ppid=,state=,lstart="]) do
+      output
+      |> String.split("\n", trim: true)
+      |> Enum.flat_map(fn line ->
+        case String.split(line, ~r/\s+/, parts: 4, trim: true) do
+          [pid, ppid, state, started] ->
+            with {pid, ""} <- Integer.parse(pid),
+                 {ppid, ""} <- Integer.parse(ppid) do
+              [%{pid: pid, ppid: ppid, identity: {:ps, started}, state: state, depth: 0}]
+            else
+              _ -> []
+            end
+
+          _ ->
+            []
+        end
+      end)
+    else
+      _ -> []
+    end
+  end
+
+  defp signal_process(pid, signal) do
+    case system_executable(["/bin/kill", "/usr/bin/kill"]) do
+      path when is_binary(path) ->
+        System.cmd(path, ["-#{signal}", Integer.to_string(pid)], stderr_to_stdout: true)
+        :ok
+
+      nil ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp system_executable(paths), do: Enum.find(paths, &File.regular?/1)
 
   defp close(port) do
     if Port.info(port), do: Port.close(port)
