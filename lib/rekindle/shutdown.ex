@@ -14,8 +14,7 @@ defmodule Rekindle.Shutdown do
     :result,
     status: :accepting,
     process_runners: [],
-    resources: %{},
-    waiters: []
+    resources: %{}
   ]
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -93,25 +92,14 @@ defmodule Rekindle.Shutdown do
   def handle_call({:shutdown, _reason}, _from, %{status: :stopped} = state),
     do: {:reply, state.result, state}
 
-  def handle_call({:shutdown, _reason}, from, %{status: :stopping} = state),
-    do: {:noreply, %{state | waiters: [from | state.waiters]}}
-
-  def handle_call({:shutdown, reason}, from, %{status: :accepting} = state)
+  def handle_call({:shutdown, reason}, _from, %{status: :accepting} = state)
       when reason in [:shutdown, :supervisor, :configuration_changed] do
-    parent = self()
-    snapshot = state
-    spawn(fn -> send(parent, {:shutdown_finished, perform(snapshot, reason)}) end)
-    {:noreply, %{state | status: :stopping, waiters: [from]}}
+    result = perform(state, reason)
+    {:reply, result, %{state | status: :stopped, result: result, resources: %{}}}
   end
 
   def handle_call({:shutdown, _reason}, _from, state),
     do: {:reply, Result.new([contract("Shutdown reason is invalid")]), state}
-
-  @impl true
-  def handle_info({:shutdown_finished, %Result{} = result}, state) do
-    Enum.each(state.waiters, &GenServer.reply(&1, result))
-    {:noreply, %{state | status: :stopped, result: result, resources: %{}, waiters: []}}
-  end
 
   @impl true
   def terminate(_reason, %{status: :stopped}), do: :ok
