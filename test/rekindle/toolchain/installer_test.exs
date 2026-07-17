@@ -132,10 +132,12 @@ defmodule Rekindle.Toolchain.InstallerTest do
     assert {:error, %{code: :unsupported_host}} = Installer.ensure(asset, options(root))
   end
 
-  test "rejects symlinked cache ancestors and cached executable symlinks" do
+  test "preserves an XDG-style symlink ancestor and quarantines only the cached entry" do
     real_root = temp_root()
     linked_root = real_root <> "-link"
+    sibling = Path.join(real_root, "sibling")
     File.mkdir_p!(real_root)
+    File.write!(sibling, "owned elsewhere")
     File.ln_s!(real_root, linked_root)
     bytes = "trusted-helper"
     asset = asset(bytes)
@@ -143,19 +145,17 @@ defmodule Rekindle.Toolchain.InstallerTest do
     on_exit(fn ->
       File.rm(linked_root)
       File.rm_rf!(real_root)
-
-      Path.dirname(linked_root)
-      |> File.ls!()
-      |> Enum.filter(&String.starts_with?(&1, Path.basename(linked_root) <> ".quarantine-"))
-      |> Enum.each(&File.rm(Path.join(Path.dirname(linked_root), &1)))
     end)
 
-    assert {:error, %{code: :helper_checksum_mismatch}} =
+    assert {:error, %{code: :io_failed}} =
              Installer.ensure(asset, options(linked_root, fetcher: fn _ -> bytes end))
 
-    refute File.exists?(linked_root)
+    assert {:ok, %{type: :symlink}} = File.lstat(linked_root)
+    assert File.read_link!(linked_root) == real_root
+    assert File.read!(sibling) == "owned elsewhere"
+    assert File.ls!(real_root) == ["sibling"]
 
-    assert Enum.any?(File.ls!(Path.dirname(linked_root)), fn entry ->
+    refute Enum.any?(File.ls!(Path.dirname(linked_root)), fn entry ->
              String.starts_with?(entry, Path.basename(linked_root) <> ".quarantine-")
            end)
 

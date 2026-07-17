@@ -47,10 +47,17 @@ defmodule Rekindle.Toolchain.Installer do
     error -> {:error, :helper_missing, Exception.message(error)}
   end
 
-  defp acquire({:corrupt, path}, _destination, _asset, _source_build?, _offline?, _options) do
+  defp acquire(
+         {:corrupt, path, parent_stat},
+         _destination,
+         _asset,
+         _source_build?,
+         _offline?,
+         _options
+       ) do
     quarantine = path <> ".quarantine-" <> Integer.to_string(System.unique_integer([:positive]))
 
-    case quarantine(path, quarantine) do
+    case quarantine(path, quarantine, parent_stat) do
       :ok ->
         {:error, :helper_checksum_mismatch,
          "cached helper failed integrity or owner-only mode validation and was quarantined"}
@@ -124,7 +131,7 @@ defmodule Rekindle.Toolchain.Installer do
                required_mode: 0o700
              ) do
           {:ok, _executable} -> {:ok, path}
-          {:error, _reason} -> {:corrupt, path}
+          {:error, _reason} -> corrupt_entry(path)
         end
 
       {:error, :enoent} ->
@@ -132,12 +139,25 @@ defmodule Rekindle.Toolchain.Installer do
 
       {:error, :invalid_path} ->
         case Executable.first_unsafe_component(path) do
-          {:ok, unsafe_path} -> {:corrupt, unsafe_path}
-          {:error, reason} -> {:error, :io_failed, "helper cache path is unsafe: #{reason}"}
+          {:ok, ^path} ->
+            corrupt_entry(path)
+
+          {:ok, _unsafe_ancestor} ->
+            {:error, :io_failed, "helper cache path has an unsafe unowned ancestor"}
+
+          {:error, reason} ->
+            {:error, :io_failed, "helper cache path is unsafe: #{reason}"}
         end
 
       {:error, reason} ->
         {:error, :io_failed, "helper cache path qualification failed: #{reason}"}
+    end
+  end
+
+  defp corrupt_entry(path) do
+    case Executable.stat(Path.dirname(path)) do
+      {:ok, %{type: :directory} = parent_stat} -> {:corrupt, path, parent_stat}
+      _ -> {:error, :io_failed, "helper cache parent authority is unavailable"}
     end
   end
 
@@ -173,11 +193,17 @@ defmodule Rekindle.Toolchain.Installer do
     end
   end
 
-  defp quarantine(path, quarantine) do
-    with {:ok, before_stat} <- File.lstat(path),
+  defp quarantine(path, quarantine, expected_parent) do
+    parent = Path.dirname(path)
+
+    with {:ok, parent_before} <- Executable.stat(parent),
+         true <- same_directory_node?(expected_parent, parent_before),
+         {:ok, before_stat} <- File.lstat(path),
          :ok <- File.rename(path, quarantine),
          {:ok, after_stat} <- File.lstat(quarantine),
-         true <- same_node?(before_stat, after_stat) do
+         true <- same_node?(before_stat, after_stat),
+         {:ok, parent_after} <- Executable.stat(parent),
+         true <- same_directory_node?(expected_parent, parent_after) do
       :ok
     else
       {:error, reason} -> {:error, reason}
@@ -187,6 +213,11 @@ defmodule Rekindle.Toolchain.Installer do
 
   defp same_node?(left, right) do
     fields = [:inode, :uid, :gid, :major_device, :minor_device, :size, :type, :mode]
+    Map.take(left, fields) == Map.take(right, fields)
+  end
+
+  defp same_directory_node?(left, right) do
+    fields = [:inode, :uid, :gid, :major_device, :minor_device, :type, :mode]
     Map.take(left, fields) == Map.take(right, fields)
   end
 
