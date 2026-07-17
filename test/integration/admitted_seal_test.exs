@@ -83,6 +83,39 @@ defmodule Rekindle.AdmittedSealTest do
              |> rebuild_manifest(sealed)
   end
 
+  test "sealed contracts reject self-consistent asserted identities" do
+    store = store()
+
+    for {target, revision} <- [web: 21, desktop: 22] do
+      sealed = seal(store, target, :extension, revision)
+      asserted = String.duplicate(if(target == :web, do: "a", else: "e"), 64)
+
+      manifest =
+        sealed.manifest
+        |> Map.put("artifact_id", asserted)
+        |> Map.delete("manifest_digest")
+
+      manifest_digest = manifest_digest(target, manifest)
+      manifest = Map.put(manifest, "manifest_digest", manifest_digest)
+
+      generation = %{
+        sealed.generation
+        | artifact_id: asserted,
+          manifest_digest: manifest_digest
+      }
+
+      module = if target == :web, do: Web, else: Desktop
+
+      assert {:error, %{code: :manifest_invalid}} =
+               module.new(
+                 generation: generation,
+                 source_revision: sealed.source_revision,
+                 manifest: manifest,
+                 seal_result: :sealed
+               )
+    end
+  end
+
   test "lease substitution, union changes, and post-admission mutation are detected" do
     store = store()
     first = seal(store, :web, :canonical, 30)
@@ -263,8 +296,8 @@ defmodule Rekindle.AdmittedSealTest do
     {:ok, staging} = ArtifactStore.allocate(store, target)
     profile = if target == :web, do: "dev", else: "release"
     producer = producer(target, producer_kind)
-    artifact_id = digest("#{target}:#{producer_kind}:#{source_revision}")
     {manifest_path, members} = write_members(staging.path, target, source_revision)
+    artifact_id = artifact_id(target, build(profile)["build_key"], members)
 
     manifest = manifest(target, artifact_id, profile, producer, members)
     manifest_digest = manifest_digest(target, manifest)
@@ -298,9 +331,9 @@ defmodule Rekindle.AdmittedSealTest do
     {:ok, staging} = ArtifactStore.allocate(store, target)
     profile = if target == :web, do: "dev", else: "release"
     producer = producer(target, producer_kind)
-    artifact_id = digest("mismatch:#{target}:#{producer_kind}:#{source_revision}")
     {manifest_path, members} = write_members(staging.path, target, source_revision)
     {members, manifest_members} = mismatch_members(staging.path, target, members, mismatch)
+    artifact_id = artifact_id(target, build(profile)["build_key"], manifest_members)
 
     manifest = manifest(target, artifact_id, profile, producer, manifest_members)
     manifest_digest = manifest_digest(target, manifest)
@@ -513,6 +546,26 @@ defmodule Rekindle.AdmittedSealTest do
 
     :crypto.hash(:sha256, domain <> CanonicalValue.encode!(manifest))
     |> Base.encode16(case: :lower)
+  end
+
+  defp artifact_id(:web, build_key, members) do
+    identity = %{
+      "v" => 1,
+      "build_key" => build_key,
+      "members" => Enum.map(members, &Map.take(&1.manifest, ~w[path role sha256 size]))
+    }
+
+    digest("rekindle-web-artifact-v1\0" <> CanonicalValue.encode!(identity))
+  end
+
+  defp artifact_id(:desktop, build_key, [executable]) do
+    identity = %{
+      "v" => 1,
+      "build_key" => build_key,
+      "executable" => Map.take(executable.manifest, ~w[path sha256 size mode])
+    }
+
+    digest("rekindle-native-artifact-v1\0" <> CanonicalValue.encode!(identity))
   end
 
   defp digest(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)

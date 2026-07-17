@@ -2,6 +2,7 @@ defmodule Rekindle.SealedArtifact.Validation do
   @moduledoc false
 
   alias Rekindle.{CanonicalValue, Failure, GenerationRef}
+  alias Rekindle.SealedArtifact.Identity
   alias Rekindle.SealedArtifact.Producer
 
   @spec common(map(), GenerationRef.t(), non_neg_integer(), Rekindle.target(), [String.t()]) ::
@@ -13,6 +14,8 @@ defmodule Rekindle.SealedArtifact.Validation do
          true <- uint?(source_revision),
          true <- manifest["contract_version"] == 1,
          true <- manifest["target"] == Atom.to_string(target),
+         {:ok, artifact_id} <- Identity.derive(target, manifest),
+         true <- manifest["artifact_id"] == artifact_id,
          true <- manifest["artifact_id"] == generation.artifact_id,
          true <- manifest["manifest_digest"] == generation.manifest_digest,
          true <- manifest["build"]["profile"] == generation.profile,

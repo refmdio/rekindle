@@ -6,6 +6,7 @@ defmodule Rekindle.ArtifactStore do
   import Bitwise
 
   alias Rekindle.ArtifactStore.{Descriptor, Filesystem, Lease, Member, Staging}
+  alias Rekindle.SealedArtifact.Identity
   alias Rekindle.{CanonicalValue, Failure, GenerationRef}
 
   @manifest_limit 67_108_864
@@ -677,6 +678,8 @@ defmodule Rekindle.ArtifactStore do
          true <- Map.keys(value) |> Enum.all?(&is_binary/1),
          true <- value["contract_version"] == 1,
          true <- value["target"] == Atom.to_string(target),
+         {:ok, artifact_id} <- Identity.derive(target, value),
+         true <- artifact_id == value["artifact_id"],
          true <- value["artifact_id"] == descriptor.artifact_id,
          true <- value["manifest_digest"] == descriptor.manifest_digest,
          true <- manifest_digest(target, value) == descriptor.manifest_digest do

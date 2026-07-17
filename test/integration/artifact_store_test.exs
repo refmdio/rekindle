@@ -320,6 +320,54 @@ defmodule Rekindle.ArtifactStoreTest do
              ArtifactStore.allocate(recovered, :web)
   end
 
+  test "rejects self-consistent artifact identity forgeries and identity field mutations" do
+    web_mutations = [
+      fn manifest -> put_in(manifest, ["build", "build_key"], String.duplicate("1", 64)) end,
+      fn manifest -> put_in(manifest, ["members", Access.at(0), "path"], "other.js") end,
+      fn manifest -> put_in(manifest, ["members", Access.at(0), "role"], "asset") end,
+      fn manifest ->
+        put_in(manifest, ["members", Access.at(0), "sha256"], String.duplicate("2", 64))
+      end,
+      fn manifest -> put_in(manifest, ["members", Access.at(0), "size"], 999) end,
+      fn manifest -> Map.put(manifest, "artifact_id", wrong_artifact_id(:web, manifest)) end
+    ]
+
+    desktop_mutations = [
+      fn manifest -> put_in(manifest, ["build", "build_key"], String.duplicate("1", 64)) end,
+      fn manifest -> put_in(manifest, ["executable", "path"], "other") end,
+      fn manifest ->
+        put_in(manifest, ["executable", "sha256"], String.duplicate("2", 64))
+      end,
+      fn manifest -> put_in(manifest, ["executable", "size"], 999) end,
+      fn manifest -> put_in(manifest, ["executable", "mode"], "regular") end,
+      fn manifest -> Map.put(manifest, "artifact_id", wrong_artifact_id(:desktop, manifest)) end
+    ]
+
+    for {target, mutations} <- [web: web_mutations, desktop: desktop_mutations],
+        mutation <- mutations do
+      root = state_root()
+      {:ok, store} = start_store(root)
+
+      {staging, descriptor} =
+        if target == :web,
+          do: stage_web(store, "identity-mutation"),
+          else: stage_sparse_desktop(store, 1, 8)
+
+      manifest_path = Path.join(staging.path, descriptor.manifest_path)
+      manifest = manifest_path |> File.read!() |> Jason.decode!() |> mutation.()
+      artifact_id = manifest["artifact_id"]
+      manifest = Map.delete(manifest, "manifest_digest")
+      digest = manifest_digest(target, manifest)
+      manifest = Map.put(manifest, "manifest_digest", digest)
+      File.write!(manifest_path, Rekindle.CanonicalValue.encode!(manifest))
+
+      descriptor = %{descriptor | artifact_id: artifact_id, manifest_digest: digest}
+
+      assert {:error, %{code: :manifest_invalid}} = ArtifactStore.seal(staging, descriptor)
+      refute File.exists?(artifact_path(root, target, artifact_id))
+    end
+  end
+
   test "rejects escaping, aliased, extra, changed, linked, and special members" do
     for mutation <- [:traversal, :collision, :extra, :digest, :manifest, :symlink, :hard_link] do
       root = state_root()
@@ -862,12 +910,23 @@ defmodule Rekindle.ArtifactStoreTest do
     File.mkdir_p!(Path.dirname(member_path))
     File.write!(member_path, content)
     {:ok, member_digest} = Filesystem.sha256(member_path)
-    artifact_id = digest("web:" <> content)
+    build_key = digest("web-build")
+
+    identity_member = %{
+      "path" => "entry.js",
+      "role" => "javascript",
+      "sha256" => member_digest,
+      "size" => byte_size(content)
+    }
+
+    artifact_id = artifact_id(:web, build_key, [identity_member])
 
     manifest_base = %{
       "contract_version" => 1,
       "target" => "web",
-      "artifact_id" => artifact_id
+      "artifact_id" => artifact_id,
+      "build" => %{"build_key" => build_key},
+      "members" => [identity_member]
     }
 
     manifest_digest = manifest_digest(:web, manifest_base)
@@ -925,12 +984,23 @@ defmodule Rekindle.ArtifactStoreTest do
     :ok = File.close(io)
     :ok = File.chmod(executable, 0o700)
     {:ok, executable_digest} = Filesystem.sha256(executable)
-    artifact_id = digest("desktop:#{marker}")
+    build_key = digest("desktop-build")
+
+    identity_executable = %{
+      "path" => "application",
+      "sha256" => executable_digest,
+      "size" => size,
+      "mode" => "executable_owner"
+    }
+
+    artifact_id = artifact_id(:desktop, build_key, identity_executable)
 
     manifest_base = %{
       "contract_version" => 1,
       "target" => "desktop",
-      "artifact_id" => artifact_id
+      "artifact_id" => artifact_id,
+      "build" => %{"build_key" => build_key},
+      "executable" => identity_executable
     }
 
     manifest_digest = manifest_digest(:desktop, manifest_base)
@@ -1009,6 +1079,34 @@ defmodule Rekindle.ArtifactStoreTest do
       end
 
     digest(domain <> Rekindle.CanonicalValue.encode!(value))
+  end
+
+  defp artifact_id(:web, build_key, members) do
+    identity = %{"v" => 1, "build_key" => build_key, "members" => members}
+    digest("rekindle-web-artifact-v1\0" <> Rekindle.CanonicalValue.encode!(identity))
+  end
+
+  defp artifact_id(:desktop, build_key, executable) do
+    identity = %{"v" => 1, "build_key" => build_key, "executable" => executable}
+    digest("rekindle-native-artifact-v1\0" <> Rekindle.CanonicalValue.encode!(identity))
+  end
+
+  defp wrong_artifact_id(:web, manifest) do
+    identity = %{
+      "build_key" => manifest["build"]["build_key"],
+      "members" => manifest["members"]
+    }
+
+    digest("wrong-web-artifact-v1\0" <> Rekindle.CanonicalValue.encode!(identity))
+  end
+
+  defp wrong_artifact_id(:desktop, manifest) do
+    identity = %{
+      "build_key" => manifest["build"]["build_key"],
+      "executable" => manifest["executable"]
+    }
+
+    digest("wrong-native-artifact-v1\0" <> Rekindle.CanonicalValue.encode!(identity))
   end
 
   defp mode(path) do

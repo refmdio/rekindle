@@ -2,6 +2,7 @@ defmodule Rekindle.Toolchain.Web do
   @moduledoc false
 
   alias Rekindle.CanonicalValue
+  alias Rekindle.SealedArtifact.Identity
   alias Rekindle.Toolchain.RootAuthority
 
   @root_keys ~w[id path mode device]
@@ -700,20 +701,13 @@ defmodule Rekindle.Toolchain.Web do
   end
 
   defp artifact_identity(manifest, terminal) do
-    members =
-      Enum.map(manifest["members"], &Map.take(&1, ~w[path role sha256 size]))
-
-    identity = %{
-      "v" => 1,
-      "build_key" => manifest["build"]["build_key"],
-      "members" => members
-    }
-
-    calculated = domain_digest("rekindle-web-artifact-v1\0", identity)
-
-    if manifest["artifact_id"] == calculated and terminal["artifact_id"] == calculated,
-      do: :ok,
-      else: {:error, :artifact_identity}
+    with {:ok, calculated} <- Identity.derive(:web, manifest),
+         true <- manifest["artifact_id"] == calculated,
+         true <- terminal["artifact_id"] == calculated do
+      :ok
+    else
+      _ -> {:error, :artifact_identity}
+    end
   end
 
   defp artifact_tree(root, manifest) do
