@@ -541,6 +541,26 @@ defmodule Rekindle.ArtifactStoreTest do
     end
   end
 
+  test "quarantines an untrusted project identity without consuming it" do
+    for mutation <- [:symlink, :hard_link, :unsafe_mode, :directory, :fifo] do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      :ok = GenServer.stop(store)
+
+      path = Path.join(root, "project-id")
+      external = substitute_private_record(root, path, mutation)
+      node_before = private_node_state(path)
+      external_before = if external, do: File.read!(external)
+
+      {:ok, recovered} = start_store(root)
+      assert private_node_state(path) == node_before
+      if external, do: assert(File.read!(external) == external_before)
+      assert File.regular?(Path.join(root, "quarantine-v1.json"))
+      assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
   test "pointer corruption stops every artifact mutation before disk state changes" do
     for operation <- [:allocate, :seal, :activate, :collect],
         kind <- [:current, :fallback],

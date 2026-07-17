@@ -139,9 +139,10 @@ defmodule Rekindle.ArtifactStore do
              do: {:ok, true},
              else: recover_temporaries_before_identity(root)
            ),
-         :ok <- ensure_project_identity(root, temporary_quarantine?),
+         {:ok, identity_quarantine?} <- ensure_project_identity(root, temporary_quarantine?),
+         quarantined_before_recovery? = temporary_quarantine? or identity_quarantine?,
          {:ok, quarantined?} <-
-           if(temporary_quarantine?, do: {:ok, true}, else: recover(root)) do
+           if(quarantined_before_recovery?, do: {:ok, true}, else: recover(root)) do
       {:ok,
        %__MODULE__{
          root: root,
@@ -438,8 +439,14 @@ defmodule Rekindle.ArtifactStore do
     end
   end
 
-  defp ensure_project_identity(_root, true), do: :ok
-  defp ensure_project_identity(root, false), do: ensure_project_id(root)
+  defp ensure_project_identity(_root, true), do: {:ok, true}
+
+  defp ensure_project_identity(root, false) do
+    case ensure_project_id(root) do
+      :ok -> {:ok, false}
+      {:error, %Failure{} = failure} -> quarantine(root, failure.message)
+    end
+  end
 
   defp ensure_directories(root) do
     directories =
@@ -1697,8 +1704,10 @@ defmodule Rekindle.ArtifactStore do
   defp validate_state_destination(_entry), do: :error
 
   defp read_state_temporary(path) do
-    case File.read(path) do
-      {:ok, bytes} when byte_size(bytes) <= @manifest_limit -> {:ok, bytes}
+    with :ok <- qualify_private_file(path),
+         {:ok, bytes} when byte_size(bytes) <= @manifest_limit <- File.read(path) do
+      {:ok, bytes}
+    else
       _ -> :error
     end
   end
@@ -2343,8 +2352,10 @@ defmodule Rekindle.ArtifactStore do
   end
 
   defp read_activation_temporary(path) do
-    case File.read(path) do
-      {:ok, bytes} when byte_size(bytes) <= @manifest_limit -> {:ok, bytes}
+    with :ok <- qualify_private_file(path),
+         {:ok, bytes} when byte_size(bytes) <= @manifest_limit <- File.read(path) do
+      {:ok, bytes}
+    else
       _ -> :error
     end
   end
