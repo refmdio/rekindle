@@ -78,13 +78,13 @@ defmodule Rekindle.Toolchain.Helper do
   defp run_admitted_web(executable, operation, state, options) do
     try do
       with {:ok, port, buffer} <- start(executable, "web-v1", options) do
-        case send_frame(port, operation) do
-          :ok ->
-            receive_web(port, buffer, operation, state, [], deadline(options))
-
-          {:error, reason} ->
-            close(port)
-            {:error, reason}
+        try do
+          case send_frame(port, operation) do
+            :ok -> receive_web(port, buffer, operation, state, [], deadline(options))
+            {:error, reason} -> {:error, reason}
+          end
+        after
+          close(port)
         end
       end
     after
@@ -95,20 +95,25 @@ defmodule Rekindle.Toolchain.Helper do
   @spec run_exec(Path.t(), map(), Exec.t(), keyword()) ::
           {:ok, map(), binary(), binary()} | {:error, atom()}
   def run_exec(executable, spawn, %Exec{} = state, options \\ []) do
-    with {:ok, port, buffer} <- start(executable, "exec-v1", options),
-         :ok <- send_frame(port, spawn) do
-      receive_exec(
-        port,
-        buffer,
-        state,
-        <<>>,
-        <<>>,
-        deadline(options),
-        false,
-        Keyword.get(options, :cleanup_timeout_ms, 5_000),
-        Keyword.get(options, :started_hook),
-        false
-      )
+    with {:ok, port, buffer} <- start(executable, "exec-v1", options) do
+      try do
+        with :ok <- send_frame(port, spawn) do
+          receive_exec(
+            port,
+            buffer,
+            state,
+            <<>>,
+            <<>>,
+            deadline(options),
+            false,
+            Keyword.get(options, :cleanup_timeout_ms, 5_000),
+            Keyword.get(options, :started_hook),
+            false
+          )
+        end
+      after
+        close(port)
+      end
     end
   end
 
@@ -119,20 +124,29 @@ defmodule Rekindle.Toolchain.Helper do
       host = Installer.host() |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
       hello = Handshake.hello(mode, @compatibility, host)
 
-      result =
+      try do
         with :ok <- send_frame(port, hello),
              {:ok, response, <<>>} <- receive_one(port, <<>>, deadline(options)),
              :ok <- Handshake.admit_response(response, hello),
-             :ok <- Executable.revalidate(executable) do
+             :ok <- Executable.revalidate(executable),
+             :ok <- invoke_port_hook(options, :after_handshake, port) do
           {:ok, port, <<>>}
         else
           _ ->
             close(port)
             {:error, :helper_protocol}
         end
-
-      Executable.release(handle)
-      result
+      rescue
+        _error ->
+          close(port)
+          {:error, :helper_protocol}
+      catch
+        _, _ ->
+          close(port)
+          {:error, :helper_protocol}
+      after
+        Executable.release(handle)
+      end
     else
       _ -> {:error, :helper_missing}
     end
@@ -363,6 +377,16 @@ defmodule Rekindle.Toolchain.Helper do
       :ok
     else
       _ -> {:error, :helper_io}
+    end
+  rescue
+    ArgumentError -> {:error, :helper_io}
+  end
+
+  defp invoke_port_hook(options, name, port) do
+    case Keyword.get(options, name) do
+      nil -> :ok
+      hook when is_function(hook, 1) -> hook.(port)
+      _other -> {:error, :invalid_hook}
     end
   end
 

@@ -312,6 +312,107 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
              )
   end
 
+  test "closed helper writes stay typed and settle ports across hello, operation and cancel races",
+       %{
+         helper: helper
+       } do
+    assert {:ok, spawn, state} =
+             Exec.spawn_request(
+               executable: System.find_executable("sleep") |> Path.expand(),
+               argv: ["30"],
+               cwd: System.tmp_dir!(),
+               terminate_grace_ms: 0,
+               kill_grace_ms: 500
+             )
+
+    close_during_spawn = fn _authority, _launch_path, launch ->
+      case launch.() do
+        {:ok, port} = result ->
+          Port.close(port)
+          result
+
+        error ->
+          error
+      end
+    end
+
+    close_after_handshake = fn port ->
+      Port.close(port)
+      :ok
+    end
+
+    close_after_started = fn port, _state ->
+      Port.close(port)
+      :ok
+    end
+
+    ports = MapSet.new(Port.list())
+
+    for iteration <- 1..10 do
+      assert {:error, :helper_protocol} =
+               Helper.run_exec(helper, spawn, state,
+                 around_spawn: close_during_spawn,
+                 timeout_ms: 100
+               )
+
+      assert ports == MapSet.new(Port.list()), "hello write iteration #{iteration}"
+
+      assert {:error, :helper_io} =
+               Helper.run_exec(helper, spawn, state,
+                 after_handshake: close_after_handshake,
+                 timeout_ms: 100
+               )
+
+      assert ports == MapSet.new(Port.list()), "operation write iteration #{iteration}"
+
+      assert {:error, :helper_protocol} =
+               Helper.run_exec(helper, spawn, state,
+                 started_hook: close_after_started,
+                 timeout_ms: 25,
+                 cleanup_timeout_ms: 100
+               )
+
+      assert ports == MapSet.new(Port.list()), "cancel write iteration #{iteration}"
+    end
+  end
+
+  test "a web operation close race releases its root lease and helper port", %{helper: helper} do
+    root = temp_root("web-close-race")
+    input = Path.join(root, "input")
+    output = Path.join(root, "output")
+    File.mkdir_p!(input)
+    File.mkdir_p!(output)
+    File.write!(Path.join(input, "app.wasm"), wasm_module())
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:ok, input_root} = Web.root(input, :read, id: id(1_001))
+    assert {:ok, wasm} = Web.file(input_root, "app.wasm")
+    assert {:ok, output_root} = Web.prepare_output_root(output, id: id(1_002))
+    lease_baseline = RootAuthority.stats().leases
+
+    assert {:ok, operation, state} =
+             bindgen_operation(input_root, wasm, output_root, limits())
+
+    assert RootAuthority.stats().leases == lease_baseline + 1
+    ports = MapSet.new(Port.list())
+
+    close_after_handshake = fn port ->
+      Port.close(port)
+      :ok
+    end
+
+    for iteration <- 1..10 do
+      assert {:error, :helper_io} =
+               Helper.run_web(helper, operation, state,
+                 after_handshake: close_after_handshake,
+                 timeout_ms: 100
+               )
+
+      assert ports == MapSet.new(Port.list()), "web operation iteration #{iteration}"
+      assert %{authorities: 0, leases: ^lease_baseline} = RootAuthority.stats()
+    end
+  end
+
   test "zero terminate grace escalates immediately and reaps the process group", %{
     helper: helper
   } do
