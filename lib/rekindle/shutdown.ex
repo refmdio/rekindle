@@ -6,6 +6,8 @@ defmodule Rekindle.Shutdown do
   alias Rekindle.Shutdown.{Resource, Result}
   alias Rekindle.{EventBus, Failure, ProcessRunner}
 
+  @max_shutdown_workers 32
+
   defstruct [
     :event_bus,
     :timeout_ms,
@@ -116,7 +118,7 @@ defmodule Rekindle.Shutdown do
   def terminate(_reason, state), do: perform(state, :supervisor) |> then(fn _ -> :ok end)
 
   defp perform(state, reason) do
-    resources = Enum.map(state.resources, fn {_reference, entry} -> entry.resource end)
+    resources = Stream.map(state.resources, fn {_reference, entry} -> entry.resource end)
     shutdown_deadline = deadline(state.timeout_ms)
     failures = emit_stopping(state.event_bus, reason, stage_deadline(shutdown_deadline, 7))
 
@@ -215,9 +217,21 @@ defmodule Rekindle.Shutdown do
 
   defp begin_runner_shutdown(runners, runner_deadline) do
     parent = self()
+    work_deadline = work_deadline(runner_deadline)
+    {selected, overflow?} = bounded_select(runners, work_deadline, fn _runner -> true end)
+    {pending, launch_overflow?} = spawn_runner_workers(selected, parent, work_deadline)
 
-    pending =
-      Map.new(runners, fn runner ->
+    failures =
+      if overflow? or launch_overflow?,
+        do: [cleanup_failure("Process runner shutdown initiation exceeded its bounded capacity")],
+        else: []
+
+    await_runner_starts(pending, work_deadline, runner_deadline, %{}, failures)
+  end
+
+  defp spawn_runner_workers(runners, parent, work_deadline) do
+    Enum.reduce_while(runners, {%{}, false}, fn runner, {pending, _overflow?} ->
+      if before_deadline?(work_deadline) do
         token = make_ref()
 
         {pid, monitor} =
@@ -225,10 +239,11 @@ defmodule Rekindle.Shutdown do
             begin_runner(parent, token, runner)
           end)
 
-        {token, %{pid: pid, monitor: monitor}}
-      end)
-
-    await_runner_starts(pending, work_deadline(runner_deadline), runner_deadline, %{}, [])
+        {:cont, {Map.put(pending, token, %{pid: pid, monitor: monitor}), false}}
+      else
+        {:halt, {pending, true}}
+      end
+    end)
   end
 
   defp begin_runner(parent, token, runner) do
@@ -374,11 +389,27 @@ defmodule Rekindle.Shutdown do
 
   defp invoke(resources, kinds, callback, callback_deadline) do
     parent = self()
+    work_deadline = work_deadline(callback_deadline)
 
-    pending =
-      resources
-      |> Enum.filter(&(&1.kind in kinds and not is_nil(Map.fetch!(&1, callback))))
-      |> Map.new(fn resource ->
+    {selected, overflow?} =
+      bounded_select(resources, work_deadline, fn resource ->
+        resource.kind in kinds and not is_nil(Map.fetch!(resource, callback))
+      end)
+
+    {pending, launch_overflow?} =
+      spawn_callback_workers(selected, parent, callback, work_deadline)
+
+    failures =
+      if overflow? or launch_overflow?,
+        do: [cleanup_failure("Shutdown #{callback} callbacks exceeded bounded capacity")],
+        else: []
+
+    await_callbacks(pending, callback, work_deadline, callback_deadline, failures)
+  end
+
+  defp spawn_callback_workers(resources, parent, callback, work_deadline) do
+    Enum.reduce_while(resources, {%{}, false}, fn resource, {pending, _overflow?} ->
+      if before_deadline?(work_deadline) do
         reference = make_ref()
 
         {pid, monitor} =
@@ -387,16 +418,12 @@ defmodule Rekindle.Shutdown do
             send(parent, {:shutdown_callback, reference, result})
           end)
 
-        {reference, %{pid: pid, monitor: monitor, kind: resource.kind}}
-      end)
-
-    await_callbacks(
-      pending,
-      callback,
-      work_deadline(callback_deadline),
-      callback_deadline,
-      []
-    )
+        entry = %{pid: pid, monitor: monitor, kind: resource.kind}
+        {:cont, {Map.put(pending, reference, entry), false}}
+      else
+        {:halt, {pending, true}}
+      end
+    end)
   end
 
   defp invoke_callback(resource, callback) do
@@ -536,6 +563,29 @@ defmodule Rekindle.Shutdown do
     remaining = max(stage_deadline - now, 0)
     min(now + max(div(remaining * 4, 5), 1), stage_deadline)
   end
+
+  defp bounded_select(enumerable, work_deadline, predicate) do
+    enumerable
+    |> Enum.reduce_while({[], 0, false}, fn item, {selected, count, _overflow?} ->
+      cond do
+        not before_deadline?(work_deadline) ->
+          {:halt, {selected, count, true}}
+
+        not predicate.(item) ->
+          {:cont, {selected, count, false}}
+
+        count < @max_shutdown_workers ->
+          {:cont, {[item | selected], count + 1, false}}
+
+        true ->
+          {:halt, {selected, count, true}}
+      end
+    end)
+    |> then(fn {selected, _count, overflow?} -> {Enum.reverse(selected), overflow?} end)
+  end
+
+  defp before_deadline?(deadline),
+    do: System.monotonic_time(:millisecond) < deadline
 
   defp valid_server?(value), do: is_pid(value) or is_atom(value) or is_tuple(value)
 

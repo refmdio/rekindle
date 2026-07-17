@@ -231,6 +231,36 @@ defmodule Rekindle.ShutdownTest do
     assert Enum.any?(failures, &(&1.message == "Shutdown event emission timed out"))
   end
 
+  test "shutdown worker admission remains bounded at high cardinality" do
+    silent_runner =
+      start_supervised!(
+        Supervisor.child_spec({RunnerStub, :silent}, id: {:runner_stub, :high_cardinality})
+      )
+
+    coordinator =
+      start_supervised!(
+        {Shutdown, process_runners: List.duplicate(silent_runner, 5_000), timeout_ms: 100}
+      )
+
+    for _index <- 1..5_000 do
+      assert {:ok, _reference} =
+               Shutdown.track(coordinator, :staging,
+                 cleanup: fn ->
+                   receive do
+                     :never -> :ok
+                   end
+                 end
+               )
+    end
+
+    started_at = System.monotonic_time(:millisecond)
+    assert %Result{status: :uncertain, failures: failures} = Shutdown.shutdown(coordinator)
+    assert System.monotonic_time(:millisecond) - started_at < 500
+
+    assert Enum.any?(failures, &(&1.message =~ "runner" and &1.message =~ "bounded capacity"))
+    assert Enum.any?(failures, &(&1.message =~ "cleanup callbacks exceeded bounded capacity"))
+  end
+
   test "untrack is owner-scoped" do
     parent = self()
     coordinator = start_supervised!({Shutdown, []})
