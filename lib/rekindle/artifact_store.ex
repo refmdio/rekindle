@@ -2633,13 +2633,29 @@ defmodule Rekindle.ArtifactStore do
   defp validate_persisted_state(root) do
     temporary = %__MODULE__{root: root}
 
-    with :ok <- validate_control_directories(temporary),
+    with :ok <- validate_root_entries(root),
+         :ok <- validate_control_directories(temporary),
          :ok <- validate_reference_directories(temporary),
          :ok <- validate_generation_directories(temporary),
          :ok <- validate_pointers(temporary) do
       {:ok, false}
     else
       {:error, %Failure{} = failure} -> quarantine(root, failure.message)
+    end
+  end
+
+  defp validate_root_entries(root) do
+    expected =
+      ~w[activations current deletions fallback generations project-id references seals staging]
+
+    case File.ls(root) do
+      {:ok, names} when length(names) == length(expected) ->
+        if Enum.sort(names) == expected,
+          do: :ok,
+          else: {:error, invalid(:artifact, :cache_corrupt, "Artifact root state is ambiguous")}
+
+      _ ->
+        {:error, invalid(:artifact, :cache_corrupt, "Artifact root state is ambiguous")}
     end
   end
 

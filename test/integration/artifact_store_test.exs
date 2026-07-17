@@ -915,6 +915,24 @@ defmodule Rekindle.ArtifactStoreTest do
              ArtifactStore.allocate(recovered, :web)
   end
 
+  test "quarantines unknown artifact-store root nodes without consuming them" do
+    for kind <- [:regular, :directory, :symlink, :fifo] do
+      root = state_root()
+      {:ok, store} = start_store(root)
+      :ok = GenServer.stop(store)
+
+      path = Path.join(root, "unknown-state")
+      unknown_root_node!(path, kind)
+      node_before = private_node_state(path)
+
+      {:ok, recovered} = start_store(root)
+      assert private_node_state(path) == node_before
+      assert File.regular?(Path.join(root, "quarantine-v1.json"))
+      assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
+      :ok = GenServer.stop(recovered)
+    end
+  end
+
   test "owner death removes only its marked incomplete staging" do
     root = state_root()
     {:ok, store} = start_store(root)
@@ -2081,6 +2099,22 @@ defmodule Rekindle.ArtifactStoreTest do
       :directory -> {:directory, stat.mode &&& 0o777, File.ls!(path)}
       type -> {type, stat.mode &&& 0o777, stat.size}
     end
+  end
+
+  defp unknown_root_node!(path, :regular) do
+    File.write!(path, "unknown")
+    File.chmod!(path, 0o600)
+  end
+
+  defp unknown_root_node!(path, :directory) do
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+  end
+
+  defp unknown_root_node!(path, :symlink), do: File.ln_s!("missing-state", path)
+
+  defp unknown_root_node!(path, :fifo) do
+    {_, 0} = System.cmd("mkfifo", [path])
   end
 
   defp assert_generation_preserved(root, generation) do
