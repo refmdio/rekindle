@@ -881,7 +881,7 @@ defmodule Rekindle.ArtifactStoreTest do
 
     {:ok, quarantined} = start_store(root)
     assert File.exists?(Path.join(root, "quarantine-v1.json"))
-    assert {:error, %{code: :artifact_missing}} = ArtifactStore.current(quarantined, :web)
+    assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.current(quarantined, :web)
 
     assert {:error, %{code: :cleanup_unconfirmed}} =
              ArtifactStore.allocate(quarantined, :web)
@@ -931,6 +931,44 @@ defmodule Rekindle.ArtifactStoreTest do
       assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.allocate(recovered, :web)
       :ok = GenServer.stop(recovered)
     end
+  end
+
+  test "quarantined state is not available to runtime consumers" do
+    root = state_root()
+    {:ok, store} = start_store(root)
+    [first, second] = sealed_web_generations(store, ["quarantine-old", "quarantine-new"])
+    assert :ok = ArtifactStore.activate(store, first, 1)
+    assert :ok = ArtifactStore.activate(store, second, 2)
+    :ok = GenServer.stop(store)
+    unknown_root_node!(Path.join(root, "unknown-state"), :regular)
+
+    {:ok, quarantined} = start_store(root)
+
+    for result <- [
+          ArtifactStore.current(quarantined, :web),
+          ArtifactStore.fallback(quarantined, :web),
+          ArtifactStore.acquire(quarantined, first),
+          ArtifactStore.acquire(quarantined, second)
+        ] do
+      assert {:error, %{code: :cleanup_unconfirmed}} = result
+    end
+
+    :ok = GenServer.stop(quarantined)
+  end
+
+  test "quarantine invalidates lease consumption but still permits release" do
+    root = state_root()
+    {:ok, store} = start_store(root)
+    [generation] = sealed_web_generations(store, ["leased-before-quarantine"])
+    assert :ok = ArtifactStore.activate(store, generation, 1)
+    assert {:ok, lease} = ArtifactStore.acquire(store, generation)
+    corrupt_pointer(root, :current, :malformed)
+
+    assert {:error, %{code: :cache_corrupt}} = ArtifactStore.current(store, :web)
+    refute ArtifactStore.valid_lease?(lease)
+    assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.sealed_descriptor(lease)
+    assert {:error, %{code: :cleanup_unconfirmed}} = ArtifactStore.authorize_release(lease)
+    assert :ok = ArtifactStore.release(lease)
   end
 
   test "owner death removes only its marked incomplete staging" do

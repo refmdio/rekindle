@@ -250,7 +250,8 @@ defmodule Rekindle.ArtifactStore do
   end
 
   def handle_call({:acquire, generation, source_revision}, {owner, _tag}, state) do
-    with true <- source_revision == :any or uint?(source_revision),
+    with :ok <- usable(state),
+         true <- source_revision == :any or uint?(source_revision),
          {:ok, generation} <- validate_generation(state, generation),
          :ok <- maybe_generation_source_revision(state, generation, source_revision) do
       token = make_ref()
@@ -283,15 +284,19 @@ defmodule Rekindle.ArtifactStore do
   end
 
   def handle_call({:authorize_release, %Lease{token: token} = lease}, {owner, _tag}, state) do
-    case Map.get(state.leases, token) do
-      %{owner: ^owner, lease: ^lease} = entry ->
-        authority = make_ref()
-        release = {:rekindle_artifact_release, self(), token, authority}
-        entry = %{entry | release_authorities: MapSet.put(entry.release_authorities, authority)}
-        {:reply, {:ok, release}, put_in(state.leases[token], entry)}
+    with :ok <- usable(state) do
+      case Map.get(state.leases, token) do
+        %{owner: ^owner, lease: ^lease} = entry ->
+          authority = make_ref()
+          release = {:rekindle_artifact_release, self(), token, authority}
+          entry = %{entry | release_authorities: MapSet.put(entry.release_authorities, authority)}
+          {:reply, {:ok, release}, put_in(state.leases[token], entry)}
 
-      _ ->
-        {:reply, {:error, lease_access_denied()}, state}
+        _ ->
+          {:reply, {:error, lease_access_denied()}, state}
+      end
+    else
+      {:error, %Failure{} = failure} -> {:reply, {:error, failure}, state}
     end
   end
 
@@ -333,31 +338,34 @@ defmodule Rekindle.ArtifactStore do
 
   def handle_call({:valid_lease, %Lease{} = lease}, {owner, _tag}, state) do
     valid? =
-      match?(
-        %{owner: ^owner, lease: ^lease},
-        Map.get(state.leases, lease.token)
-      )
+      not state.quarantined? and
+        match?(
+          %{owner: ^owner, lease: ^lease},
+          Map.get(state.leases, lease.token)
+        )
 
     {:reply, valid?, state}
   end
 
   def handle_call({:sealed_descriptor, %Lease{token: token} = lease}, {owner, _tag}, state) do
     result =
-      case Map.get(state.leases, token) do
-        %{owner: ^owner, lease: ^lease} ->
-          with {:ok, descriptor} <- load_descriptor(state, lease.target, lease.artifact_id),
-               :ok <-
-                 validate_tree(
-                   artifact_path(state, lease.target, lease.artifact_id),
-                   lease.target,
-                   descriptor,
-                   true
-                 ) do
-            {:ok, descriptor}
-          end
+      with :ok <- usable(state) do
+        case Map.get(state.leases, token) do
+          %{owner: ^owner, lease: ^lease} ->
+            with {:ok, descriptor} <- load_descriptor(state, lease.target, lease.artifact_id),
+                 :ok <-
+                   validate_tree(
+                     artifact_path(state, lease.target, lease.artifact_id),
+                     lease.target,
+                     descriptor,
+                     true
+                   ) do
+              {:ok, descriptor}
+            end
 
-        _ ->
-          {:error, lease_access_denied()}
+          _ ->
+            {:error, lease_access_denied()}
+        end
       end
 
     {:reply, result, state}
@@ -1191,12 +1199,16 @@ defmodule Rekindle.ArtifactStore do
   defp pointer_generation(_state, _kind, _target), do: :none
 
   defp pointer_reply(state, kind, target) do
-    case pointer_generation(state, kind, target) do
-      {:error, %Failure{} = failure} ->
-        {:reply, {:error, failure}, %{state | quarantined?: true}}
+    with :ok <- usable(state) do
+      case pointer_generation(state, kind, target) do
+        {:error, %Failure{} = failure} ->
+          {:reply, {:error, failure}, %{state | quarantined?: true}}
 
-      result ->
-        {:reply, result, state}
+        result ->
+          {:reply, result, state}
+      end
+    else
+      {:error, %Failure{} = failure} -> {:reply, {:error, failure}, state}
     end
   end
 
@@ -3108,15 +3120,19 @@ defmodule Rekindle.ArtifactStore do
     end
   end
 
-  defp writable(%{quarantined?: true}),
+  defp usable(%{quarantined?: true}),
     do:
       {:error,
        invalid(:execution, :cleanup_unconfirmed, "Artifact store requires explicit cleanup")}
 
+  defp usable(_state), do: :ok
+
   defp writable(state) do
-    case validate_pointers(state) do
-      :ok -> :ok
-      {:error, %Failure{} = failure} -> {:quarantine, failure}
+    with :ok <- usable(state) do
+      case validate_pointers(state) do
+        :ok -> :ok
+        {:error, %Failure{} = failure} -> {:quarantine, failure}
+      end
     end
   end
 
