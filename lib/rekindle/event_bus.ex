@@ -5,6 +5,15 @@ defmodule Rekindle.EventBus do
   alias Rekindle.{Event, Failure}
 
   @subscriber_watermark 1_024
+  @ordered_types [
+    :build_started,
+    :stage_started,
+    :stage_progress,
+    :stage_finished,
+    :build_succeeded,
+    :build_failed,
+    :build_cancelled
+  ]
 
   defstruct [
     :otp_app,
@@ -13,8 +22,7 @@ defmodule Rekindle.EventBus do
     sequence: 0,
     subscribers: %{},
     monitors: %{},
-    terminals: MapSet.new(),
-    progress: %{}
+    ordering: %{}
   ]
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -102,28 +110,25 @@ defmodule Rekindle.EventBus do
   end
 
   defp validate_order(state, %Event{target: target, source_revision: revision} = event)
-       when not is_nil(target) and not is_nil(revision) do
-    key = {target, revision}
+       when not is_nil(target) and not is_nil(revision) and event.type in @ordered_types do
+    case Map.get(state.ordering, target) do
+      nil ->
+        :ok
 
-    cond do
-      MapSet.member?(state.terminals, key) and
-          event.type in [
-            :build_started,
-            :stage_started,
-            :stage_progress,
-            :stage_finished,
-            :build_succeeded,
-            :build_failed,
-            :build_cancelled
-          ] ->
+      %{revision: current} when revision < current ->
         :error
 
-      event.type == :stage_progress ->
-        progress_key = {target, revision, event.payload.stage}
-        prior = Map.get(state.progress, progress_key, -1)
+      %{revision: current} when revision > current ->
+        :ok
+
+      %{terminal?: true} ->
+        :error
+
+      %{progress: progress} when event.type == :stage_progress ->
+        prior = Map.get(progress, event.payload.stage, -1)
         if event.payload.completed >= prior, do: :ok, else: :error
 
-      true ->
+      _current ->
         :ok
     end
   end
@@ -131,24 +136,36 @@ defmodule Rekindle.EventBus do
   defp validate_order(_state, _event), do: :ok
 
   defp record_event(state, event) do
-    terminals =
-      if Event.terminal?(event),
-        do: MapSet.put(state.terminals, {event.target, event.source_revision}),
-        else: state.terminals
+    ordering = record_order(state.ordering, event)
+    %{state | sequence: state.sequence + 1, ordering: ordering}
+  end
 
-    progress =
-      if event.type == :stage_progress do
-        Map.put(
-          state.progress,
-          {event.target, event.source_revision, event.payload.stage},
-          event.payload.completed
-        )
-      else
-        state.progress
+  defp record_order(ordering, %Event{type: type} = event) when type in @ordered_types do
+    current =
+      case Map.get(ordering, event.target) do
+        %{revision: revision} = current when revision == event.source_revision -> current
+        _other -> %{revision: event.source_revision, terminal?: false, progress: %{}}
       end
 
-    %{state | sequence: state.sequence + 1, terminals: terminals, progress: progress}
+    current =
+      cond do
+        Event.terminal?(event) ->
+          %{current | terminal?: true, progress: %{}}
+
+        event.type == :stage_progress ->
+          %{
+            current
+            | progress: Map.put(current.progress, event.payload.stage, event.payload.completed)
+          }
+
+        true ->
+          current
+      end
+
+    Map.put(ordering, event.target, current)
   end
+
+  defp record_order(ordering, _event), do: ordering
 
   defp publish(state, event) do
     Enum.reduce(Map.keys(state.subscribers), state, fn reference, acc ->

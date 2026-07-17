@@ -150,6 +150,107 @@ defmodule Rekindle.EventTest do
     assert :ok = Rekindle.unsubscribe(:event_test, subscription)
   end
 
+  test "event ordering state is bounded across revisions and independent targets" do
+    bus =
+      start_supervised!({EventBus, otp_app: :bounded_event_test, project_session: @session})
+
+    assert {:ok, subscription} = EventBus.subscribe(bus)
+
+    for revision <- 1..128, target <- [:web, :desktop] do
+      stage = if target == :web, do: :cargo_web, else: :cargo_desktop
+
+      assert {:ok, _event} =
+               EventBus.emit(
+                 bus,
+                 event_attributes(:stage_progress, target, revision, stage, 1)
+               )
+
+      assert {:ok, _event} =
+               EventBus.emit(bus, event_attributes(:build_failed, target, revision))
+    end
+
+    assert_receive {:rekindle_event, ^subscription,
+                    %Event{target: :web, source_revision: 128, type: :build_failed}}
+
+    assert_receive {:rekindle_event, ^subscription,
+                    %Event{target: :desktop, source_revision: 128, type: :build_failed}}
+
+    state = :sys.get_state(bus)
+
+    assert state.ordering == %{
+             web: %{revision: 128, terminal?: true, progress: %{}},
+             desktop: %{revision: 128, terminal?: true, progress: %{}}
+           }
+
+    assert {:error, %{code: :unexpected_state}} =
+             EventBus.emit(bus, event_attributes(:build_started, :web, 127))
+
+    assert {:error, %{code: :unexpected_state}} =
+             EventBus.emit(
+               bus,
+               event_attributes(:stage_progress, :web, 127, :cargo_web, 2)
+             )
+
+    assert {:error, %{code: :unexpected_state}} =
+             EventBus.emit(bus, event_attributes(:build_failed, :web, 128))
+
+    assert {:error, %{code: :unexpected_state}} =
+             EventBus.emit(bus, event_attributes(:build_cancelled, :web, 128))
+
+    assert {:ok, _event} =
+             EventBus.emit(bus, event_attributes(:build_started, :web, 129))
+
+    assert {:ok, _event} =
+             EventBus.emit(
+               bus,
+               event_attributes(:stage_progress, :web, 129, :cargo_web, 5)
+             )
+
+    assert {:ok, _event} =
+             EventBus.emit(
+               bus,
+               event_attributes(:stage_progress, :web, 129, :bindgen_web, 7)
+             )
+
+    assert {:error, %{code: :unexpected_state}} =
+             EventBus.emit(
+               bus,
+               event_attributes(:stage_progress, :web, 129, :cargo_web, 4)
+             )
+
+    assert {:error, %{code: :unexpected_state}} =
+             EventBus.emit(
+               bus,
+               event_attributes(:stage_progress, :web, 129, :bindgen_web, 6)
+             )
+
+    state = :sys.get_state(bus)
+    assert map_size(state.ordering) == 2
+    assert state.ordering.web.progress == %{cargo_web: 5, bindgen_web: 7}
+    assert state.ordering.desktop == %{revision: 128, terminal?: true, progress: %{}}
+
+    assert {:ok, _event} =
+             EventBus.emit(bus, event_attributes(:build_cancelled, :web, 129))
+
+    assert :sys.get_state(bus).ordering.web == %{
+             revision: 129,
+             terminal?: true,
+             progress: %{}
+           }
+
+    assert {:ok, published} =
+             EventBus.emit(bus, %{
+               target: :web,
+               source_revision: 1,
+               generation_id: @generation,
+               type: :generation_published,
+               payload: %{artifact_id: @digest, manifest_digest: @digest}
+             })
+
+    assert_receive {:rekindle_event, ^subscription, ^published}
+    assert map_size(:sys.get_state(bus).ordering) == 2
+  end
+
   test "slow subscribers are evicted at the configured watermark" do
     bus = start_supervised!({EventBus, otp_app: :slow_event_test, project_session: @session})
 
@@ -290,38 +391,50 @@ defmodule Rekindle.EventTest do
   end
 
   defp event_attributes(:build_started, revision),
+    do: event_attributes(:build_started, :web, revision)
+
+  defp event_attributes(:build_failed, revision),
+    do: event_attributes(:build_failed, :web, revision)
+
+  defp event_attributes(:build_cancelled, revision),
+    do: event_attributes(:build_cancelled, :web, revision)
+
+  defp event_attributes(:stage_progress, revision, completed),
+    do: event_attributes(:stage_progress, :web, revision, :cargo_web, completed)
+
+  defp event_attributes(:build_started, target, revision),
     do: %{
-      target: :web,
+      target: target,
       source_revision: revision,
       generation_id: nil,
       type: :build_started,
       payload: %{profile: :dev, stages: [:cargo_web]}
     }
 
-  defp event_attributes(:build_failed, revision),
+  defp event_attributes(:build_failed, target, revision),
     do: %{
-      target: :web,
+      target: target,
       source_revision: revision,
       generation_id: nil,
       type: :build_failed,
       payload: %{failure_code: :cargo_failed, diagnostic_count: 1}
     }
 
-  defp event_attributes(:build_cancelled, revision),
+  defp event_attributes(:build_cancelled, target, revision),
     do: %{
-      target: :web,
+      target: target,
       source_revision: revision,
       generation_id: nil,
       type: :build_cancelled,
       payload: %{reason: :obsolete}
     }
 
-  defp event_attributes(:stage_progress, revision, completed),
+  defp event_attributes(:stage_progress, target, revision, stage, completed),
     do: %{
-      target: :web,
+      target: target,
       source_revision: revision,
       generation_id: nil,
       type: :stage_progress,
-      payload: %{stage: :cargo_web, completed: completed, total: 10, unit: :messages}
+      payload: %{stage: stage, completed: completed, total: 10, unit: :messages}
     }
 end
