@@ -17,8 +17,7 @@ defmodule Rekindle.Shutdown do
     status: :accepting,
     process_runners: [],
     resource_indexes: %{cancel: [], notify: [], release: [], cleanup: []},
-    resource_counts: %{cancel: 0, notify: 0, release: 0, cleanup: 0},
-    resource_overflow: []
+    resource_counts: %{cancel: 0, notify: 0, release: 0, cleanup: 0}
   ]
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -66,7 +65,7 @@ defmodule Rekindle.Shutdown do
     timeout = Keyword.get(options, :timeout_ms, 35_000)
 
     if Keyword.keys(options) -- [:process_runners, :event_bus, :timeout_ms] == [] and
-         is_list(runners) and Enum.all?(runners, &valid_server?/1) and
+         admitted_runners?(runners) and
          (is_nil(event_bus) or valid_server?(event_bus)) and is_integer(timeout) and
          timeout in 100..120_000 do
       table = :ets.new(:rekindle_shutdown_resources, [:set, :private])
@@ -92,18 +91,22 @@ defmodule Rekindle.Shutdown do
   def handle_call({:track, kind, callbacks}, {owner, _tag}, %{status: :accepting} = state) do
     case Resource.new(kind, callbacks) do
       {:ok, resource} ->
-        reference = make_ref()
-        entry = %{owner: owner, resource: resource}
-        true = :ets.insert(state.resource_table, {reference, entry})
-        {indexes, counts, overflow} = index_resource(state, reference, resource)
+        cond do
+          not resource_callbacks_supported?(resource) ->
+            {:reply, {:error, contract("Shutdown resource is invalid")}, state}
 
-        {:reply, {:ok, reference},
-         %{
-           state
-           | resource_indexes: indexes,
-             resource_counts: counts,
-             resource_overflow: overflow
-         }}
+          resource_capacity_available?(state, resource) ->
+            reference = make_ref()
+            entry = %{owner: owner, resource: resource}
+            true = :ets.insert(state.resource_table, {reference, entry})
+            {indexes, counts} = index_resource(state, reference, resource)
+
+            {:reply, {:ok, reference},
+             %{state | resource_indexes: indexes, resource_counts: counts}}
+
+          true ->
+            {:reply, {:error, contract("Shutdown resource capacity is exhausted")}, state}
+        end
 
       :error ->
         {:reply, {:error, contract("Shutdown resource is invalid")}, state}
@@ -247,31 +250,20 @@ defmodule Rekindle.Shutdown do
   defp begin_runner_shutdown(runners, runner_deadline) do
     parent = self()
     work_deadline = work_deadline(runner_deadline)
-    {selected, overflow?} = bounded_select(runners, work_deadline, fn _runner -> true end)
-    {pending, launch_overflow?} = spawn_runner_workers(selected, parent, work_deadline)
-
-    failures =
-      if overflow? or launch_overflow?,
-        do: [cleanup_failure("Process runner shutdown initiation exceeded its bounded capacity")],
-        else: []
-
-    await_runner_starts(pending, work_deadline, runner_deadline, %{}, failures)
+    pending = spawn_runner_workers(runners, parent)
+    await_runner_starts(pending, work_deadline, runner_deadline, %{}, [])
   end
 
-  defp spawn_runner_workers(runners, parent, work_deadline) do
-    Enum.reduce_while(runners, {%{}, false}, fn runner, {pending, _overflow?} ->
-      if before_deadline?(work_deadline) do
-        token = make_ref()
+  defp spawn_runner_workers(runners, parent) do
+    Enum.reduce(runners, %{}, fn runner, pending ->
+      token = make_ref()
 
-        {pid, monitor} =
-          spawn_monitor(fn ->
-            begin_runner(parent, token, runner)
-          end)
+      {pid, monitor} =
+        spawn_monitor(fn ->
+          begin_runner(parent, token, runner)
+        end)
 
-        {:cont, {Map.put(pending, token, %{pid: pid, monitor: monitor}), false}}
-      else
-        {:halt, {pending, true}}
-      end
+      Map.put(pending, token, %{pid: pid, monitor: monitor})
     end)
   end
 
@@ -421,35 +413,22 @@ defmodule Rekindle.Shutdown do
     work_deadline = work_deadline(callback_deadline)
 
     selected = indexed_resources(state, callback, kinds)
-    overflow? = callback in state.resource_overflow
-
-    {pending, launch_overflow?} =
-      spawn_callback_workers(selected, parent, callback, work_deadline)
-
-    failures =
-      if overflow? or launch_overflow?,
-        do: [cleanup_failure("Shutdown #{callback} callbacks exceeded bounded capacity")],
-        else: []
-
-    await_callbacks(pending, callback, work_deadline, callback_deadline, failures)
+    pending = spawn_callback_workers(selected, parent, callback)
+    await_callbacks(pending, callback, work_deadline, callback_deadline, [])
   end
 
-  defp spawn_callback_workers(resources, parent, callback, work_deadline) do
-    Enum.reduce_while(resources, {%{}, false}, fn resource, {pending, _overflow?} ->
-      if before_deadline?(work_deadline) do
-        reference = make_ref()
+  defp spawn_callback_workers(resources, parent, callback) do
+    Enum.reduce(resources, %{}, fn resource, pending ->
+      reference = make_ref()
 
-        {pid, monitor} =
-          spawn_monitor(fn ->
-            result = invoke_callback(resource, callback)
-            send(parent, {:shutdown_callback, reference, result})
-          end)
+      {pid, monitor} =
+        spawn_monitor(fn ->
+          result = invoke_callback(resource, callback)
+          send(parent, {:shutdown_callback, reference, result})
+        end)
 
-        entry = %{pid: pid, monitor: monitor, kind: resource.kind}
-        {:cont, {Map.put(pending, reference, entry), false}}
-      else
-        {:halt, {pending, true}}
-      end
+      entry = %{pid: pid, monitor: monitor, kind: resource.kind}
+      Map.put(pending, reference, entry)
     end)
   end
 
@@ -608,77 +587,48 @@ defmodule Rekindle.Shutdown do
   defp index_resource(state, reference, resource) do
     Enum.reduce(
       [:cancel, :notify, :release, :cleanup],
-      {state.resource_indexes, state.resource_counts, state.resource_overflow},
-      fn callback, {indexes, counts, overflow} ->
+      {state.resource_indexes, state.resource_counts},
+      fn callback, {indexes, counts} ->
         if eligible_callback?(resource, callback) do
           references = Map.fetch!(indexes, callback)
           counts = Map.update!(counts, callback, &(&1 + 1))
-
-          if length(references) < @max_shutdown_workers do
-            {Map.put(indexes, callback, [reference | references]), counts, overflow}
-          else
-            {indexes, counts, Enum.uniq([callback | overflow])}
-          end
+          {Map.put(indexes, callback, [reference | references]), counts}
         else
-          {indexes, counts, overflow}
+          {indexes, counts}
         end
       end
     )
+  end
+
+  defp resource_capacity_available?(state, resource) do
+    Enum.all?([:cancel, :notify, :release, :cleanup], fn callback ->
+      not eligible_callback?(resource, callback) or
+        Map.fetch!(state.resource_counts, callback) < @max_shutdown_workers
+    end)
+  end
+
+  defp resource_callbacks_supported?(resource) do
+    Enum.all?([:cancel, :notify, :release, :cleanup], fn callback ->
+      is_nil(Map.fetch!(resource, callback)) or eligible_callback?(resource, callback)
+    end)
   end
 
   defp remove_resource_index(state, reference, resource) do
     Enum.reduce([:cancel, :notify, :release, :cleanup], state, fn callback, state ->
       if eligible_callback?(resource, callback) do
         references = Map.fetch!(state.resource_indexes, callback)
-        indexed? = reference in references
         references = List.delete(references, reference)
         count = max(Map.fetch!(state.resource_counts, callback) - 1, 0)
-
-        references =
-          if indexed? and count >= @max_shutdown_workers do
-            case promote_resource(state.resource_table, callback, references) do
-              nil -> references
-              promoted -> [promoted | references]
-            end
-          else
-            references
-          end
-
-        overflow =
-          if count > @max_shutdown_workers,
-            do: Enum.uniq([callback | state.resource_overflow]),
-            else: List.delete(state.resource_overflow, callback)
 
         %{
           state
           | resource_indexes: Map.put(state.resource_indexes, callback, references),
-            resource_counts: Map.put(state.resource_counts, callback, count),
-            resource_overflow: overflow
+            resource_counts: Map.put(state.resource_counts, callback, count)
         }
       else
         state
       end
     end)
-  end
-
-  defp promote_resource(table, callback, indexed),
-    do: promote_resource(table, :ets.first(table), callback, indexed)
-
-  defp promote_resource(_table, :"$end_of_table", _callback, _indexed), do: nil
-
-  defp promote_resource(table, reference, callback, indexed) do
-    candidate? =
-      case :ets.lookup(table, reference) do
-        [{^reference, %{resource: resource}}] ->
-          reference not in indexed and eligible_callback?(resource, callback)
-
-        _ ->
-          false
-      end
-
-    if candidate?,
-      do: reference,
-      else: promote_resource(table, :ets.next(table, reference), callback, indexed)
   end
 
   defp eligible_callback?(resource, :cancel),
@@ -725,8 +675,7 @@ defmodule Rekindle.Shutdown do
           state
           | resource_table: nil,
             resource_indexes: %{cancel: [], notify: [], release: [], cleanup: []},
-            resource_counts: %{cancel: 0, notify: 0, release: 0, cleanup: 0},
-            resource_overflow: []
+            resource_counts: %{cancel: 0, notify: 0, release: 0, cleanup: 0}
         }
 
       false ->
@@ -735,28 +684,15 @@ defmodule Rekindle.Shutdown do
     end
   end
 
-  defp bounded_select(enumerable, work_deadline, predicate) do
-    enumerable
-    |> Enum.reduce_while({[], 0, false}, fn item, {selected, count, _overflow?} ->
-      cond do
-        not before_deadline?(work_deadline) ->
-          {:halt, {selected, count, true}}
+  defp admitted_runners?(runners) when is_list(runners), do: admitted_runners?(runners, 0)
+  defp admitted_runners?(_runners), do: false
 
-        not predicate.(item) ->
-          {:cont, {selected, count, false}}
+  defp admitted_runners?([], _count), do: true
 
-        count < @max_shutdown_workers ->
-          {:cont, {[item | selected], count + 1, false}}
+  defp admitted_runners?([runner | runners], count) when count < @max_shutdown_workers,
+    do: valid_server?(runner) and admitted_runners?(runners, count + 1)
 
-        true ->
-          {:halt, {selected, count, true}}
-      end
-    end)
-    |> then(fn {selected, _count, overflow?} -> {Enum.reverse(selected), overflow?} end)
-  end
-
-  defp before_deadline?(deadline),
-    do: System.monotonic_time(:millisecond) < deadline
+  defp admitted_runners?([_runner | _runners], @max_shutdown_workers), do: false
 
   defp valid_server?(value), do: is_pid(value) or is_atom(value) or is_tuple(value)
 

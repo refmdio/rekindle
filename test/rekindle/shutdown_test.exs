@@ -17,6 +17,11 @@ defmodule Rekindle.ShutdownTest do
 
     def handle_call({:begin_shutdown, _caller}, _from, :silent), do: {:noreply, :silent}
 
+    def handle_call({:begin_shutdown, _caller}, _from, {:observed, parent}) do
+      send(parent, :runner_shutdown_started)
+      {:reply, {:ok, :stopped}, {:observed, parent}}
+    end
+
     def handle_call({:begin_shutdown, caller}, _from, :reported_failure) do
       reference = make_ref()
       send(self(), {:finish, caller, reference})
@@ -231,21 +236,82 @@ defmodule Rekindle.ShutdownTest do
     assert Enum.any?(failures, &(&1.message == "Shutdown event emission timed out"))
   end
 
-  test "shutdown worker admission remains bounded at high cardinality" do
-    silent_runner =
+  test "runner and callback admission is bounded before ownership is accepted" do
+    observed_runner =
       start_supervised!(
-        Supervisor.child_spec({RunnerStub, :silent}, id: {:runner_stub, :high_cardinality})
+        Supervisor.child_spec({RunnerStub, {:observed, self()}}, id: {:runner_stub, :observed})
       )
+
+    oversized = List.duplicate(observed_runner, 1_000_000)
+    started_at = System.monotonic_time(:millisecond)
+
+    start =
+      Task.async(fn ->
+        Process.flag(:trap_exit, true)
+        Shutdown.start_link(process_runners: oversized, timeout_ms: 100)
+      end)
+
+    assert {:error, :invalid_shutdown_coordinator} =
+             Task.await(start, 1_000)
+
+    assert System.monotonic_time(:millisecond) - started_at < 1_000
 
     coordinator =
       start_supervised!(
-        {Shutdown, process_runners: List.duplicate(silent_runner, 5_000), timeout_ms: 100}
+        {Shutdown, process_runners: List.duplicate(observed_runner, 32), timeout_ms: 1_000}
       )
 
-    for _index <- 1..5_000 do
+    parent = self()
+
+    for index <- 1..32 do
       assert {:ok, _reference} =
                Shutdown.track(coordinator, :staging,
                  cleanup: fn ->
+                   send(parent, {:cleanup_started, index})
+                   :ok
+                 end
+               )
+    end
+
+    assert {:error, %{code: :contract_violation}} =
+             Shutdown.track(coordinator, :staging,
+               cleanup: fn ->
+                 send(parent, :unaccepted_cleanup)
+                 :ok
+               end
+             )
+
+    state = :sys.get_state(coordinator)
+    assert :ets.info(state.resource_table, :size) == 32
+    assert state.resource_counts.cleanup == 32
+    assert length(state.resource_indexes.cleanup) == 32
+
+    assert %Result{status: :clean} = Shutdown.shutdown(coordinator)
+
+    for _index <- 1..32 do
+      assert_receive :runner_shutdown_started
+    end
+
+    completed =
+      Enum.map(1..32, fn _index ->
+        assert_receive {:cleanup_started, index}
+        index
+      end)
+
+    assert Enum.sort(completed) == Enum.to_list(1..32)
+    refute_receive :unaccepted_cleanup
+  end
+
+  test "all callbacks admitted before a shared deadline are attempted" do
+    parent = self()
+    coordinator = start_supervised!({Shutdown, timeout_ms: 100})
+
+    for index <- 1..32 do
+      assert {:ok, _reference} =
+               Shutdown.track(coordinator, :staging,
+                 cleanup: fn ->
+                   send(parent, {:deadline_callback_started, index})
+
                    receive do
                      :never -> :ok
                    end
@@ -253,17 +319,18 @@ defmodule Rekindle.ShutdownTest do
                )
     end
 
-    state = :sys.get_state(coordinator)
-    assert :ets.info(state.resource_table, :size) == 5_000
-    assert length(state.resource_indexes.cleanup) == 32
-    assert :cleanup in state.resource_overflow
-
     started_at = System.monotonic_time(:millisecond)
     assert %Result{status: :uncertain, failures: failures} = Shutdown.shutdown(coordinator)
     assert System.monotonic_time(:millisecond) - started_at < 500
 
-    assert Enum.any?(failures, &(&1.message =~ "runner" and &1.message =~ "bounded capacity"))
-    assert Enum.any?(failures, &(&1.message =~ "cleanup callbacks exceeded bounded capacity"))
+    attempted =
+      Enum.map(1..32, fn _index ->
+        assert_receive {:deadline_callback_started, index}
+        index
+      end)
+
+    assert Enum.sort(attempted) == Enum.to_list(1..32)
+    assert Enum.any?(failures, &(&1.message =~ "cleanup" and &1.message =~ "timed out"))
     assert :sys.get_state(coordinator).resource_table == nil
   end
 
@@ -273,10 +340,7 @@ defmodule Rekindle.ShutdownTest do
 
     for _index <- 1..32 do
       assert {:ok, _reference} =
-               Shutdown.track(coordinator, :staging,
-                 notify: callback(parent, :ineligible_notify),
-                 cleanup: fn -> :ok end
-               )
+               Shutdown.track(coordinator, :lease, release: fn -> :ok end)
     end
 
     assert {:ok, _reference} =
@@ -285,17 +349,16 @@ defmodule Rekindle.ShutdownTest do
                cleanup: fn -> :ok end
              )
 
-    assert %Result{status: :uncertain} = Shutdown.shutdown(coordinator)
+    assert %Result{status: :clean} = Shutdown.shutdown(coordinator)
     assert_receive :browser_notified
-    refute_receive :ineligible_notify
   end
 
-  test "untracking an indexed resource promotes overflow and clears exact-capacity overflow" do
+  test "untracking frees exact callback capacity for a replacement" do
     parent = self()
     coordinator = start_supervised!({Shutdown, []})
 
     resources =
-      Enum.map(1..33, fn index ->
+      Enum.map(1..32, fn index ->
         assert {:ok, reference} =
                  Shutdown.track(coordinator, :staging,
                    cleanup: callback(parent, {:promoted_cleanup, index})
@@ -304,13 +367,22 @@ defmodule Rekindle.ShutdownTest do
         {index, reference}
       end)
 
+    assert {:error, %{code: :contract_violation}} =
+             Shutdown.track(coordinator, :staging,
+               cleanup: callback(parent, {:promoted_cleanup, 33})
+             )
+
     {removed_index, removed_reference} = hd(resources)
     assert :ok = Shutdown.untrack(coordinator, removed_reference)
+
+    assert {:ok, _replacement} =
+             Shutdown.track(coordinator, :staging,
+               cleanup: callback(parent, {:promoted_cleanup, 33})
+             )
 
     state = :sys.get_state(coordinator)
     assert state.resource_counts.cleanup == 32
     assert length(state.resource_indexes.cleanup) == 32
-    refute :cleanup in state.resource_overflow
 
     assert %Result{status: :clean} = Shutdown.shutdown(coordinator)
 
@@ -349,6 +421,14 @@ defmodule Rekindle.ShutdownTest do
 
     assert {:error, %{code: :contract_violation}} =
              GenServer.call(coordinator, {:track, :staging, :not_a_keyword})
+
+    assert {:error, %{code: :contract_violation}} =
+             Shutdown.track(coordinator, :staging,
+               notify: fn -> :ok end,
+               cleanup: fn -> :ok end
+             )
+
+    assert :ets.info(:sys.get_state(coordinator).resource_table, :size) == 0
 
     assert :ok = Shutdown.admit(coordinator)
   end
