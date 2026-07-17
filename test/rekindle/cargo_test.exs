@@ -163,20 +163,24 @@ defmodule Rekindle.CargoTest do
 
     assert {:ok, first_reference} = Cargo.metadata(context.cargo, first_options)
     assert_receive {:cargo_spawn, first_worker, _spawn, _state}
-    assert {:ok, second_reference} = Cargo.metadata(context.cargo, second_options)
-    assert_receive {:cargo_spawn, second_worker, _spawn, _state}
+    assert {:busy, :capacity} = Cargo.metadata(context.cargo, second_options)
+    refute_receive {:cargo_spawn, _worker, _spawn, _state}
 
     send(
       first_worker,
       {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""}
     )
 
+    assert_receive {:rekindle_cargo_ready, ^first_reference}
+
+    assert {:ok, second_reference} = Cargo.metadata(context.cargo, second_options)
+    assert_receive {:cargo_spawn, second_worker, _spawn, _state}
+
     send(
       second_worker,
       {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""}
     )
 
-    assert_receive {:rekindle_cargo_ready, ^first_reference}
     assert_receive {:rekindle_cargo_ready, ^second_reference}
     assert {:busy, :capacity} = Cargo.metadata(context.cargo, third_options)
 
@@ -194,6 +198,7 @@ defmodule Rekindle.CargoTest do
     state = :sys.get_state(context.cargo)
     assert map_size(state.completed) == 2
     assert map_size(state.pool.cargo) == 2
+    assert state.pool.helpers == MapSet.new()
 
     assert {:ok, _metadata} =
              Cargo.result(context.cargo, first_reference, context.web_authority)
@@ -210,6 +215,7 @@ defmodule Rekindle.CargoTest do
     state = :sys.get_state(context.cargo)
     assert map_size(state.completed) == 2
     assert map_size(state.pool.cargo) == 2
+    assert state.pool.helpers == MapSet.new()
   end
 
   test "consumed jobs and successive revisions keep lifecycle state bounded", context do
@@ -495,7 +501,12 @@ defmodule Rekindle.CargoTest do
       {:finish_cancel, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""}
     )
 
-    state = await_state(cargo, &(&1.jobs == %{} and &1.pool.cargo == %{}))
+    state =
+      await_state(
+        cargo,
+        &(&1.jobs == %{} and &1.pool.cargo == %{} and &1.pool.helpers == MapSet.new())
+      )
+
     refute state.owner_alive?
     assert state.completed == %{}
     assert state.authorities == %{}
@@ -514,11 +525,13 @@ defmodule Rekindle.CargoTest do
 
     state = await_state(cargo, &(map_size(&1.completed) == 1))
     assert map_size(state.pool.cargo) == 1
+    assert state.pool.helpers == MapSet.new()
 
     Process.exit(owner, :kill)
     state = await_state(cargo, &(!&1.owner_alive?))
     assert state.completed == %{}
     assert state.pool.cargo == %{}
+    assert state.pool.helpers == MapSet.new()
     assert state.latest_revisions == %{}
     assert state.authorities == %{}
     assert state.identities == %{}

@@ -97,6 +97,7 @@ defmodule Rekindle.Cargo do
   def handle_call({:start, operation, options}, {caller, _tag}, state) do
     with {:ok, job} <- admit(operation, caller, options, state),
          {:ok, pool} <- ResourcePool.acquire_cargo(state.pool, job.reference, job.cache_key),
+         {:ok, pool} <- ResourcePool.acquire_helper(pool, job.reference),
          {:ok, runner_reference} <- ProcessRunner.run(state.runner, runner_request(job)) do
       job = %{job | runner_reference: runner_reference}
 
@@ -195,6 +196,7 @@ defmodule Rekindle.Cargo do
 
       {reference, runner_jobs} ->
         {job, jobs} = Map.pop(state.jobs, reference)
+        {:ok, pool} = ResourcePool.release_helper(state.pool, reference)
 
         if state.owner_alive? do
           send(state.authority_owner, {:rekindle_cargo_ready, reference})
@@ -202,12 +204,13 @@ defmodule Rekindle.Cargo do
           {:noreply,
            %{
              state
-             | jobs: jobs,
+             | pool: pool,
+               jobs: jobs,
                runner_jobs: runner_jobs,
                completed: Map.put(state.completed, reference, {job, result})
            }}
         else
-          {:ok, pool} = ResourcePool.release_cargo(state.pool, reference)
+          {:ok, pool} = ResourcePool.release_cargo(pool, reference)
 
           {:noreply, %{state | pool: pool, jobs: jobs, runner_jobs: runner_jobs}}
         end
