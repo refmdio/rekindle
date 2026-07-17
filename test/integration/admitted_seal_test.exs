@@ -227,18 +227,27 @@ defmodule Rekindle.AdmittedSealTest do
 
     assert {:ok, expanded} = rebuild_bound_web_contract(sealed, manifest)
 
-    for role <- ~w[bootstrap javascript wasm css source_map asset], field <- ~w[mime cache] do
-      value =
-        case field do
-          "mime" -> "Invalid/#{role}; parameter=1"
-          "cache" when role == "bootstrap" -> "immutable"
-          "cache" -> "no_cache"
-        end
+    for role <- ~w[bootstrap javascript wasm css source_map asset],
+        {_variant, value} <- invalid_mime_variants(expected_mime(role)) do
+      changed =
+        update_in(expanded.manifest, ["members"], fn members ->
+          Enum.map(members, fn
+            %{"role" => ^role} = member -> Map.put(member, "mime", value)
+            member -> member
+          end)
+        end)
+
+      assert {:error, %{code: :manifest_invalid}} =
+               rebuild_bound_web_contract(expanded, changed)
+    end
+
+    for role <- ~w[bootstrap javascript wasm css source_map asset] do
+      wrong_cache = if role == "bootstrap", do: "immutable", else: "no_cache"
 
       changed =
         update_in(expanded.manifest, ["members"], fn members ->
           Enum.map(members, fn
-            %{"role" => ^role} = member -> Map.put(member, field, value)
+            %{"role" => ^role} = member -> Map.put(member, "cache", wrong_cache)
             member -> member
           end)
         end)
@@ -403,6 +412,35 @@ defmodule Rekindle.AdmittedSealTest do
     |> Map.put("members", members)
     |> Map.put("edges", edges)
     |> Map.put("hot_styles", ["styles/app.css"])
+  end
+
+  defp expected_mime(role) when role in ~w[bootstrap javascript],
+    do: "text/javascript; charset=utf-8"
+
+  defp expected_mime("wasm"), do: "application/wasm"
+  defp expected_mime("css"), do: "text/css; charset=utf-8"
+  defp expected_mime("source_map"), do: "application/json; charset=utf-8"
+  defp expected_mime("asset"), do: "application/octet-stream"
+
+  defp invalid_mime_variants(mime) do
+    <<first::binary-size(1), rest::binary>> = mime
+    casing = String.upcase(first) <> rest
+
+    parameter =
+      if String.contains?(mime, "; "),
+        do: mime |> String.split("; ", parts: 2) |> hd(),
+        else: mime <> "; charset=utf-8"
+
+    [type | parameters] = String.split(mime, ";", parts: 2)
+
+    other_type =
+      if type == "application/octet-stream",
+        do: "application/binary",
+        else: "application/octet-stream"
+
+    value = Enum.join([other_type | parameters], ";")
+
+    [casing_only: casing, parameter_only: parameter, value_only: value]
   end
 
   defp remove_web_role(manifest, role) do
