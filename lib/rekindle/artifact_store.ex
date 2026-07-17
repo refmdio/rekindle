@@ -881,11 +881,27 @@ defmodule Rekindle.ArtifactStore do
   defp run_activation_transaction(state, target, journal, desired_fallback, options) do
     path = activation_path(state.root, target)
 
-    with :ok <- Filesystem.atomic_write(path, journal),
+    with :ok <-
+           activation_atomic_write(path, journal, options, :activation_journal_renamed),
          :ok <- checkpoint(options, :activation_journaled),
-         :ok <- publish_pointer(state, :fallback, target, desired_fallback),
+         :ok <-
+           publish_activation_pointer(
+             state,
+             :fallback,
+             target,
+             desired_fallback,
+             options,
+             :activation_fallback_renamed
+           ),
          :ok <- checkpoint(options, :activation_fallback_published) do
-      case publish_pointer(state, :current, target, journal["new_current"]) do
+      case publish_activation_pointer(
+             state,
+             :current,
+             target,
+             journal["new_current"],
+             options,
+             :activation_current_renamed
+           ) do
         :ok ->
           commit_activation(state, target, journal, desired_fallback, options)
 
@@ -906,6 +922,9 @@ defmodule Rekindle.ArtifactStore do
         _ = checkpoint(options, :activation_journal_removed)
         :ok
 
+      {:cleanup_pending, %Failure{}} ->
+        :ok
+
       {:error, %Failure{}} ->
         # The current pointer is the commit point. The durable journal completes cleanup on restart.
         :ok
@@ -917,7 +936,11 @@ defmodule Rekindle.ArtifactStore do
 
     case read_pointer(state, :current, target) do
       {:ok, ^new_current} ->
-        commit_activation(state, target, journal, desired_fallback, [])
+        case finish_committed_activation(state, target, journal, desired_fallback) do
+          :ok -> :ok
+          {:cleanup_pending, %Failure{}} -> :ok
+          {:error, %Failure{}} -> abort_activation(state, target, journal, failure)
+        end
 
       {:ok, _current} ->
         abort_activation(state, target, journal, failure)
@@ -945,21 +968,77 @@ defmodule Rekindle.ArtifactStore do
 
   defp finish_committed_activation(state, target, journal, desired_fallback) do
     with :ok <- ensure_pointer(state, :fallback, target, desired_fallback),
-         :ok <- ensure_pointer(state, :current, target, journal["new_current"]),
-         :ok <- remove_activation_journal(state.root, target) do
-      :ok
+         :ok <- ensure_pointer(state, :current, target, journal["new_current"]) do
+      case remove_activation_journal(state.root, target) do
+        :ok -> :ok
+        {:error, %Failure{} = failure} -> {:cleanup_pending, failure}
+      end
     end
   end
 
   defp ensure_pointer(state, kind, target, desired) do
-    case read_pointer(state, kind, target) do
-      :none when is_nil(desired) -> :ok
-      {:ok, current} when current == desired -> :ok
-      :none -> publish_pointer(state, kind, target, desired)
-      {:ok, _current} -> publish_pointer(state, kind, target, desired)
-      {:error, %Failure{} = failure} -> {:error, failure}
+    result =
+      case read_pointer(state, kind, target) do
+        :none when is_nil(desired) -> :ok
+        {:ok, current} when current == desired -> :ok
+        :none -> publish_pointer(state, kind, target, desired)
+        {:ok, _current} -> publish_pointer(state, kind, target, desired)
+        {:error, %Failure{} = failure} -> {:error, failure}
+      end
+
+    with :ok <- result,
+         :ok <- Filesystem.sync_directory(Path.dirname(pointer_path(state, kind, target))) do
+      :ok
     end
   end
+
+  defp publish_activation_pointer(state, kind, target, nil, _options, _checkpoint),
+    do: publish_pointer(state, kind, target, nil)
+
+  defp publish_activation_pointer(state, kind, target, record, options, checkpoint) do
+    activation_atomic_write(pointer_path(state, kind, target), record, options, checkpoint)
+  end
+
+  defp activation_atomic_write(path, value, options, renamed_checkpoint) do
+    bytes = CanonicalValue.encode!(value)
+    parent = Path.dirname(path)
+    temporary = Path.join(parent, ".#{Path.basename(path)}.#{Filesystem.random_id()}.tmp")
+
+    result =
+      try do
+        with {:ok, io} <- File.open(temporary, [:write, :binary, :exclusive]),
+             :ok <- write_activation_temporary(io, temporary, bytes),
+             :ok <- File.rename(temporary, path),
+             :ok <- checkpoint(options, renamed_checkpoint),
+             :ok <- Filesystem.sync_directory(parent) do
+          :ok
+        else
+          {:error, %Failure{} = failure} -> {:error, failure}
+          {:error, _reason} -> activation_write_failure()
+          _other -> activation_write_failure()
+        end
+      rescue
+        _exception -> activation_write_failure()
+      end
+
+    if result != :ok, do: File.rm(temporary)
+    result
+  end
+
+  defp write_activation_temporary(io, temporary, bytes) do
+    try do
+      with :ok <- File.chmod(temporary, 0o600),
+           :ok <- IO.binwrite(io, bytes),
+           :ok <- :file.sync(io) do
+        :ok
+      end
+    after
+      File.close(io)
+    end
+  end
+
+  defp activation_write_failure,
+    do: {:error, invalid(:execution, :io_failed, "Activation record could not be published")}
 
   defp publish_pointer(state, kind, target, nil) do
     path = pointer_path(state, kind, target)
@@ -1318,7 +1397,11 @@ defmodule Rekindle.ArtifactStore do
 
           case read_pointer(state, :current, target) do
             {:ok, ^new_current} ->
-              finish_committed_activation(state, target, journal, desired_fallback)
+              case finish_committed_activation(state, target, journal, desired_fallback) do
+                :ok -> :ok
+                {:cleanup_pending, %Failure{} = failure} -> {:error, failure}
+                {:error, %Failure{} = failure} -> {:error, failure}
+              end
 
             {:ok, _current} ->
               rollback_recovered_activation(state, target, journal)

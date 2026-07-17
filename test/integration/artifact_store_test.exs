@@ -89,8 +89,11 @@ defmodule Rekindle.ArtifactStoreTest do
 
   test "activation checkpoint errors obey the pointer commit boundary" do
     for checkpoint <- [
+          :activation_journal_renamed,
           :activation_journaled,
+          :activation_fallback_renamed,
           :activation_fallback_published,
+          :activation_current_renamed,
           :activation_current_published,
           :activation_journal_removed
         ] do
@@ -107,7 +110,12 @@ defmodule Rekindle.ArtifactStoreTest do
           end
         )
 
-      if checkpoint in [:activation_journaled, :activation_fallback_published] do
+      if checkpoint in [
+           :activation_journal_renamed,
+           :activation_journaled,
+           :activation_fallback_renamed,
+           :activation_fallback_published
+         ] do
         assert {:error, %{code: :io_failed}} = result
         assert {:ok, ^first} = ArtifactStore.current(store, :web)
         assert :none = ArtifactStore.fallback(store, :web)
@@ -129,8 +137,11 @@ defmodule Rekindle.ArtifactStoreTest do
     on_exit(fn -> Process.flag(:trap_exit, previous) end)
 
     for checkpoint <- [
+          :activation_journal_renamed,
           :activation_journaled,
+          :activation_fallback_renamed,
           :activation_fallback_published,
+          :activation_current_renamed,
           :activation_current_published,
           :activation_journal_removed
         ] do
@@ -154,7 +165,12 @@ defmodule Rekindle.ArtifactStoreTest do
 
       {:ok, recovered} = start_store(root)
 
-      if checkpoint in [:activation_journaled, :activation_fallback_published] do
+      if checkpoint in [
+           :activation_journal_renamed,
+           :activation_journaled,
+           :activation_fallback_renamed,
+           :activation_fallback_published
+         ] do
         assert {:ok, ^first} = ArtifactStore.current(recovered, :web)
         assert :none = ArtifactStore.fallback(recovered, :web)
       else
