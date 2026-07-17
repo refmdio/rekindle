@@ -58,6 +58,21 @@ defmodule Rekindle do
 
   def unsubscribe(_otp_app, _reference), do: :ok
 
+  @spec build(otp_app(), target(), mode: build_mode()) ::
+          {:ok, Rekindle.BuildResult.t()} | {:error, Rekindle.Failure.t()}
+  def build(otp_app, target, options) do
+    case options do
+      [mode: mode] when mode in [:dev, :release] ->
+        Rekindle.BuildFacade.build(otp_app, target, mode)
+
+      _ ->
+        invalid_build_request()
+    end
+  end
+
+  @spec current(otp_app(), target()) :: {:ok, Rekindle.GenerationRef.t()} | :none
+  def current(otp_app, target), do: Rekindle.BuildFacade.current(otp_app, target)
+
   defp event_bus_unavailable do
     {:error,
      Rekindle.Failure.new!(
@@ -65,6 +80,16 @@ defmodule Rekindle do
        stage: :internal,
        code: :unexpected_state,
        message: "Rekindle project event stream is unavailable"
+     )}
+  end
+
+  defp invalid_build_request do
+    {:error,
+     Rekindle.Failure.new!(
+       target: nil,
+       stage: :configuration,
+       code: :config_invalid,
+       message: "Build options must contain exactly one dev or release mode"
      )}
   end
 end

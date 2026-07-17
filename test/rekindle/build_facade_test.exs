@@ -1,0 +1,232 @@
+defmodule Rekindle.BuildFacadeTest do
+  use ExUnit.Case, async: false
+
+  alias Rekindle.Config.{BuildConfig, DevConfig, Project}
+  alias Rekindle.{BuildFacade, BuildResult, Failure, GenerationRef}
+
+  @otp_app :rekindle_build_facade_test
+  @digest String.duplicate("a", 64)
+  @generation String.duplicate("b", 32)
+
+  defmodule Handler do
+    @behaviour Rekindle.TargetHandler
+
+    @impl true
+    def build(project, mode) do
+      send(Application.fetch_env!(project.otp_app, :test_owner), {:build_called, mode})
+      Application.fetch_env!(project.otp_app, :build_result)
+    end
+
+    @impl true
+    def current(project) do
+      send(Application.fetch_env!(project.otp_app, :test_owner), :current_called)
+      Application.fetch_env!(project.otp_app, :current_result)
+    end
+  end
+
+  defmodule RaisingHandler do
+    @behaviour Rekindle.TargetHandler
+
+    @impl true
+    def build(_project, _mode), do: raise("handler detail")
+
+    @impl true
+    def current(_project), do: throw(:handler_detail)
+  end
+
+  setup do
+    Application.put_env(@otp_app, :test_owner, self())
+
+    on_exit(fn ->
+      Application.delete_env(@otp_app, :test_owner)
+      Application.delete_env(@otp_app, :build_result)
+      Application.delete_env(@otp_app, :current_result)
+    end)
+
+    :ok
+  end
+
+  test "dispatches both targets and modes through one typed handler boundary" do
+    for target <- [:web, :desktop], mode <- [:dev, :release] do
+      result = build_result(target, mode)
+      Application.put_env(@otp_app, :build_result, {:ok, result})
+
+      assert {:ok, ^result} =
+               BuildFacade.build(@otp_app, target, mode,
+                 handlers: %{target => Handler},
+                 load_project: loader([target])
+               )
+
+      assert_receive {:build_called, ^mode}
+      refute_received :projected
+      refute_received :activated
+      refute_received :desktop_started
+    end
+  end
+
+  test "returns only validated current generation snapshots" do
+    generation = generation(:web)
+    Application.put_env(@otp_app, :current_result, {:ok, generation})
+
+    assert {:ok, ^generation} =
+             BuildFacade.current(@otp_app, :web,
+               handlers: %{web: Handler},
+               load_project: loader([:web])
+             )
+
+    assert_receive :current_called
+    Application.put_env(@otp_app, :current_result, :none)
+
+    assert :none =
+             BuildFacade.current(@otp_app, :web,
+               handlers: %{web: Handler},
+               load_project: loader([:web])
+             )
+  end
+
+  test "rejects undeclared, unavailable, mismatched, malformed, and raised handlers" do
+    assert {:error, %{code: :target_undeclared, stage: :configuration}} =
+             BuildFacade.build(@otp_app, :web, :dev,
+               handlers: %{web: Handler},
+               load_project: loader([:desktop])
+             )
+
+    assert {:error, %{code: :contract_violation, stage: :internal}} =
+             BuildFacade.build(@otp_app, :web, :dev,
+               handlers: %{},
+               load_project: loader([:web])
+             )
+
+    Application.put_env(@otp_app, :build_result, {:ok, build_result(:desktop, :dev)})
+
+    assert {:error, %{code: :contract_violation, stage: :internal}} =
+             BuildFacade.build(@otp_app, :web, :dev,
+               handlers: %{web: Handler},
+               load_project: loader([:web])
+             )
+
+    Application.put_env(@otp_app, :build_result, :invalid)
+
+    assert {:error, %{code: :contract_violation, stage: :internal}} =
+             BuildFacade.build(@otp_app, :web, :dev,
+               handlers: %{web: Handler},
+               load_project: loader([:web])
+             )
+
+    for operation <- [:build, :current] do
+      result =
+        case operation do
+          :build ->
+            BuildFacade.build(@otp_app, :web, :dev,
+              handlers: %{web: RaisingHandler},
+              load_project: loader([:web])
+            )
+
+          :current ->
+            BuildFacade.current(@otp_app, :web,
+              handlers: %{web: RaisingHandler},
+              load_project: loader([:web])
+            )
+        end
+
+      if operation == :build do
+        assert {:error, %{code: :contract_violation, stage: :internal}} = result
+      else
+        assert result == :none
+      end
+    end
+  end
+
+  test "preserves sanitized expected failures" do
+    failure =
+      Failure.new!(
+        target: :web,
+        stage: :execution,
+        code: :cargo_failed,
+        message: "Cargo failed"
+      )
+
+    Application.put_env(@otp_app, :build_result, {:error, failure})
+
+    assert {:error, ^failure} =
+             BuildFacade.build(@otp_app, :web, :dev,
+               handlers: %{web: Handler},
+               load_project: loader([:web])
+             )
+  end
+
+  test "public APIs validate their closed arguments before dispatch" do
+    assert {:error, %{code: :config_invalid, stage: :configuration}} =
+             Rekindle.build(@otp_app, :web, mode: :other)
+
+    assert {:error, %{code: :config_invalid, stage: :configuration}} =
+             Rekindle.build(@otp_app, :web, mode: :dev, extra: true)
+
+    assert {:error, %{code: :config_invalid, stage: :configuration}} =
+             Rekindle.build(nil, :web, mode: :dev)
+
+    assert :none = Rekindle.current(@otp_app, :other)
+  end
+
+  defp loader(targets) do
+    project = project(targets)
+    fn @otp_app -> {:ok, project} end
+  end
+
+  defp project(targets) do
+    %Project{
+      otp_app: @otp_app,
+      application_id: "rekindle-build-facade-test",
+      project_root: File.cwd!(),
+      build: %BuildConfig{
+        schema: 1,
+        client: "client",
+        targets: Map.new(targets, &{&1, %{}}),
+        cache: %{},
+        process: %{}
+      },
+      dev: %DevConfig{
+        schema: 1,
+        enabled: true,
+        targets: targets,
+        endpoint: nil,
+        accepted_origins: nil,
+        debounce_ms: 75,
+        diagnostic_limit: 512,
+        browser_message_bytes: 1_048_576,
+        browser_startup_timeout_ms: 15_000,
+        handoff_bytes: 1_048_576,
+        snapshot_timeout_ms: 1_000,
+        restore_timeout_ms: 1_000
+      }
+    }
+  end
+
+  defp build_result(target, mode) do
+    {:ok, result} =
+      BuildResult.new(
+        target: target,
+        mode: mode,
+        source_revision: 1,
+        build_key: @digest,
+        generation: generation(target),
+        duration_ms: 10,
+        diagnostics: []
+      )
+
+    result
+  end
+
+  defp generation(target) do
+    {:ok, generation} =
+      GenerationRef.new(
+        target: target,
+        generation_id: @generation,
+        artifact_id: @digest,
+        profile: "dev",
+        manifest_digest: @digest
+      )
+
+    generation
+  end
+end
