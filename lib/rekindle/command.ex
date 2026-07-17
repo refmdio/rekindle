@@ -468,6 +468,13 @@ defmodule Rekindle.Command do
     }
   end
 
+  defp canonical_result(%Rekindle.BuildResult{} = value), do: Rekindle.BuildResult.to_map(value)
+
+  defp canonical_result(%Rekindle.GenerationRef{} = value),
+    do: Rekindle.GenerationRef.to_map(value)
+
+  defp canonical_result(%Rekindle.Event{} = value), do: Rekindle.Event.to_map(value)
+  defp canonical_result(%Rekindle.Diagnostic{} = value), do: Rekindle.Diagnostic.to_map(value)
   defp canonical_result(value) when is_map(value) or is_list(value), do: stringify(value)
   defp canonical_result(value), do: value
 

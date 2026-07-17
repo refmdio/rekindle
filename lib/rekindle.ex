@@ -37,4 +37,34 @@ defmodule Rekindle do
       type: :supervisor
     }
   end
+
+  @spec subscribe(otp_app()) :: {:ok, reference()} | {:error, Rekindle.Failure.t()}
+  def subscribe(otp_app) when is_atom(otp_app) do
+    case Registry.lookup(Rekindle.RuntimeRegistry, {:events, otp_app}) do
+      [{pid, _value}] -> Rekindle.EventBus.subscribe(pid)
+      [] -> event_bus_unavailable()
+    end
+  end
+
+  def subscribe(_otp_app), do: event_bus_unavailable()
+
+  @spec unsubscribe(otp_app(), reference()) :: :ok
+  def unsubscribe(otp_app, reference) when is_atom(otp_app) and is_reference(reference) do
+    case Registry.lookup(Rekindle.RuntimeRegistry, {:events, otp_app}) do
+      [{pid, _value}] -> Rekindle.EventBus.unsubscribe(pid, self(), reference)
+      [] -> :ok
+    end
+  end
+
+  def unsubscribe(_otp_app, _reference), do: :ok
+
+  defp event_bus_unavailable do
+    {:error,
+     Rekindle.Failure.new!(
+       target: nil,
+       stage: :internal,
+       code: :unexpected_state,
+       message: "Rekindle project event stream is unavailable"
+     )}
+  end
 end

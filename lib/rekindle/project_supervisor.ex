@@ -19,6 +19,11 @@ defmodule Rekindle.ProjectSupervisor do
 
   @impl true
   def init(project) do
-    Supervisor.init([{Rekindle.RuntimeState, project: project}], strategy: :one_for_one)
+    children = [
+      {Rekindle.EventBus, otp_app: project.otp_app},
+      {Rekindle.RuntimeState, project: project}
+    ]
+
+    Supervisor.init(children, strategy: :one_for_one)
   end
 end
