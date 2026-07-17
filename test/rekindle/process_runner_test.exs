@@ -90,6 +90,34 @@ defmodule Rekindle.ProcessRunnerTest do
     assert_receive {:rekindle_process, ^reference, {:error, %{code: :cancelled}}}
   end
 
+  test "obsolete cancellation forcibly settles an unresponsive adapter", %{runner: runner} do
+    assert {:ok, reference} = ProcessRunner.run(runner, short_cleanup_request())
+    assert_receive {:fake_spawn, worker, _spawn, _state, _options}
+    worker_monitor = Process.monitor(worker)
+
+    assert :ok = ProcessRunner.cancel(runner, reference, :obsolete)
+    assert_receive {:fake_cancel, %{"reason" => "obsolete"}}
+    assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}, 500
+
+    assert_receive {:rekindle_process, ^reference, {:error, %{code: :cleanup_unconfirmed}}}
+
+    send(runner, {:runner_cleanup_timeout, reference})
+    send(runner, {:runner_result, reference, {:ok, terminal(), "", ""}})
+    refute_receive {:rekindle_process, ^reference, _result}, 50
+  end
+
+  test "caller cancellation forcibly settles an unresponsive adapter", %{runner: runner} do
+    assert {:ok, reference} = ProcessRunner.run(runner, short_cleanup_request())
+    assert_receive {:fake_spawn, worker, _spawn, _state, _options}
+    worker_monitor = Process.monitor(worker)
+
+    assert :ok = ProcessRunner.cancel(runner, reference, :caller)
+    assert_receive {:fake_cancel, %{"reason" => "caller"}}
+    assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}, 500
+
+    assert_receive {:rekindle_process, ^reference, {:error, %{code: :cleanup_unconfirmed}}}
+  end
+
   test "uncertain cleanup takes precedence over cancellation", %{runner: runner} do
     assert {:ok, reference} = ProcessRunner.run(runner, request())
     assert_receive {:fake_spawn, worker, _spawn, _state, _options}
@@ -112,6 +140,40 @@ defmodule Rekindle.ProcessRunnerTest do
     assert_receive {:fake_cancel, %{"reason" => "timeout"}}, 1_500
     send(worker, :finish_cancel)
     assert_receive {:rekindle_process, ^reference, {:error, %{code: :build_timeout}}}
+  end
+
+  test "build timeout forcibly settles an unresponsive adapter", %{runner: runner} do
+    timed =
+      short_cleanup_request()
+      |> Keyword.put(:build_timeout_ms, 1_000)
+
+    assert {:ok, reference} = ProcessRunner.run(runner, timed)
+    assert_receive {:fake_spawn, worker, _spawn, _state, _options}
+    worker_monitor = Process.monitor(worker)
+    assert_receive {:fake_cancel, %{"reason" => "timeout"}}, 1_500
+    assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}, 500
+
+    assert_receive {:rekindle_process, ^reference, {:error, %{code: :cleanup_unconfirmed}}}
+  end
+
+  test "owner death forcibly settles an unresponsive adapter", %{runner: runner} do
+    test = self()
+
+    owner =
+      spawn(fn ->
+        {:ok, reference} = ProcessRunner.run(runner, short_cleanup_request())
+        send(test, {:owner_job, self(), reference})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:owner_job, ^owner, _reference}
+    assert_receive {:fake_spawn, worker, _spawn, _state, _options}
+    worker_monitor = Process.monitor(worker)
+    Process.exit(owner, :kill)
+
+    assert_receive {:fake_cancel, %{"reason" => "caller"}}
+    assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}, 500
+    assert eventually_jobs_empty?(runner)
   end
 
   test "helper errors use compatibility and execution failure taxonomy", %{runner: runner} do
@@ -190,6 +252,34 @@ defmodule Rekindle.ProcessRunnerTest do
                     {:error, [%{code: :cleanup_unconfirmed}]}}
   end
 
+  test "shutdown deadline settles hung jobs and wakes its waiter", %{runner: runner} do
+    assert {:ok, job} = ProcessRunner.run(runner, short_cleanup_request())
+    assert_receive {:fake_spawn, worker, _spawn, _state, _options}
+    worker_monitor = Process.monitor(worker)
+    assert {:ok, shutdown} = ProcessRunner.begin_shutdown(runner)
+    assert_receive {:fake_cancel, %{"reason" => "shutdown"}}
+    assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}, 500
+
+    assert_receive {:rekindle_process, ^job, {:error, %{code: :cleanup_unconfirmed}}}
+
+    assert_receive {:rekindle_process_runner_shutdown, ^shutdown,
+                    {:error, [%{code: :cleanup_unconfirmed}]}}
+
+    assert {:ok, :stopped} = ProcessRunner.begin_shutdown(runner)
+  end
+
+  test "completion cancels the cleanup deadline and remains the only result", %{runner: runner} do
+    assert {:ok, reference} = ProcessRunner.run(runner, short_cleanup_request())
+    assert_receive {:fake_spawn, worker, _spawn, _state, _options}
+    assert :ok = ProcessRunner.cancel(runner, reference, :obsolete)
+    assert_receive {:fake_cancel, %{"reason" => "obsolete"}}
+    send(worker, :finish_cancel)
+
+    assert_receive {:rekindle_process, ^reference, {:error, %{code: :cancelled}}}
+    refute_receive {:rekindle_process, ^reference, _result}, 200
+    assert Process.alive?(runner)
+  end
+
   defp request do
     [
       target: :web,
@@ -208,6 +298,22 @@ defmodule Rekindle.ProcessRunnerTest do
       cleanup_timeout_ms: 500
     ]
   end
+
+  defp short_cleanup_request,
+    do: Keyword.put(request(), :cleanup_timeout_ms, 100)
+
+  defp eventually_jobs_empty?(runner, attempts \\ 20)
+
+  defp eventually_jobs_empty?(runner, attempts) when attempts > 0 do
+    if map_size(:sys.get_state(runner).jobs) == 0 do
+      true
+    else
+      Process.sleep(20)
+      eventually_jobs_empty?(runner, attempts - 1)
+    end
+  end
+
+  defp eventually_jobs_empty?(_runner, 0), do: false
 
   defp terminal do
     %{

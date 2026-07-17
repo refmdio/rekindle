@@ -58,6 +58,8 @@ defmodule Rekindle.ProcessRunner do
         build_key: admitted.build_key,
         started_at: System.monotonic_time(:millisecond),
         timer: timer,
+        cleanup_timer: nil,
+        cleanup_timeout_ms: admitted.cleanup_timeout_ms,
         port: nil,
         exec_state: exec_state,
         cancel_reason: nil
@@ -149,6 +151,35 @@ defmodule Rekindle.ProcessRunner do
 
       :error ->
         {:noreply, state}
+    end
+  end
+
+  def handle_info({:runner_cleanup_timeout, reference}, state) do
+    case Map.pop(state.jobs, reference) do
+      {nil, _jobs} ->
+        {:noreply, state}
+
+      {job, jobs} ->
+        cleanup_job(job)
+        Process.exit(job.worker, :kill)
+
+        result =
+          failure(
+            :cleanup_unconfirmed,
+            job.target,
+            "Cancelled process cleanup exceeded its deadline"
+          )
+
+        send(job.caller, {:rekindle_process, reference, result})
+
+        state = %{
+          state
+          | jobs: jobs,
+            monitors: drop_monitors(state.monitors, job),
+            shutdown_failures: record_shutdown_failure(state, result)
+        }
+
+        {:noreply, maybe_finish_shutdown(state)}
     end
   end
 
@@ -246,7 +277,16 @@ defmodule Rekindle.ProcessRunner do
   defp admit(_request), do: failure(:spawn_failed, nil, "Process request is invalid")
 
   defp request_cancel(state, reference, %{cancel_reason: nil} = job, reason) do
-    job = %{job | cancel_reason: reason}
+    Process.cancel_timer(job.timer)
+
+    cleanup_timer =
+      Process.send_after(
+        self(),
+        {:runner_cleanup_timeout, reference},
+        job.cleanup_timeout_ms
+      )
+
+    job = %{job | cancel_reason: reason, cleanup_timer: cleanup_timer}
     job = maybe_send_cancel(state.adapter, job)
     {:ok, %{state | jobs: Map.put(state.jobs, reference, job)}}
   end
@@ -393,6 +433,7 @@ defmodule Rekindle.ProcessRunner do
 
   defp cleanup_job(job) do
     Process.cancel_timer(job.timer)
+    if job.cleanup_timer, do: Process.cancel_timer(job.cleanup_timer)
     Process.demonitor(job.caller_monitor, [:flush])
     Process.demonitor(job.worker_monitor, [:flush])
   end
