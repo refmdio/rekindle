@@ -1,7 +1,15 @@
 defmodule Rekindle.BuildFacade do
   @moduledoc false
 
-  alias Rekindle.{BuildResult, Config, ConfigError, Failure, GenerationRef, RuntimeState}
+  alias Rekindle.{
+    BuildResult,
+    Config,
+    ConfigError,
+    Failure,
+    GenerationRef,
+    ProjectSession,
+    RuntimeState
+  }
 
   @handlers %{
     web: Rekindle.Web.TargetHandler,
@@ -15,9 +23,8 @@ defmodule Rekindle.BuildFacade do
          {:ok, project} <- load_project(otp_app, options),
          :ok <- declared(project, target),
          {:ok, handler} <- resolve_handler(target, options),
-         result <- invoke(handler, :build, [project, mode]),
-         {:ok, result} <- validate_build_result(result, target, mode) do
-      {:ok, result}
+         result <- schedule_build(project, target, mode, handler, options) do
+      result
     end
   end
 
@@ -36,7 +43,7 @@ defmodule Rekindle.BuildFacade do
   end
 
   defp validate_request(otp_app, target, mode, options) do
-    allowed = [:current_reader, :handlers, :load_project]
+    allowed = [:build_runner, :current_reader, :handlers, :load_project]
 
     if is_atom(otp_app) and otp_app not in [nil, true, false] and target in [:web, :desktop] and
          mode in [nil, :dev, :release] and Keyword.keyword?(options) and
@@ -88,11 +95,25 @@ defmodule Rekindle.BuildFacade do
          {:ok, handler} <- Map.fetch(handlers, target),
          true <- is_atom(handler),
          {:module, ^handler} <- Code.ensure_loaded(handler),
-         true <- function_exported?(handler, :build, 2) do
+         true <- function_exported?(handler, :build, 3) do
       {:ok, handler}
     else
       _ -> {:error, contract_failure("Target handler is unavailable")}
     end
+  end
+
+  defp schedule_build(project, target, mode, handler, options) do
+    runner = Keyword.get(options, :build_runner, &ProjectSession.build/3)
+
+    runner.(project.project_root, target, fn revision ->
+      handler
+      |> invoke(:build, [project, mode, revision])
+      |> validate_build_result(target, mode, revision)
+    end)
+  rescue
+    _exception -> {:error, contract_failure("Project build session failed")}
+  catch
+    _kind, _reason -> {:error, contract_failure("Project build session failed")}
   end
 
   defp read_current(project, target, options) do
@@ -113,12 +134,13 @@ defmodule Rekindle.BuildFacade do
     _kind, _reason -> {:error, contract_failure("Target handler failed")}
   end
 
-  defp validate_build_result({:ok, %BuildResult{} = result}, target, mode) do
+  defp validate_build_result({:ok, %BuildResult{} = result}, target, mode, revision) do
     case BuildResult.new(Map.from_struct(result)) do
       {:ok,
        %BuildResult{
          target: ^target,
          mode: ^mode,
+         source_revision: ^revision,
          support_level: support_level,
          generation: %GenerationRef{support_level: support_level}
        } = result} ->
@@ -129,7 +151,7 @@ defmodule Rekindle.BuildFacade do
     end
   end
 
-  defp validate_build_result({:error, %Failure{} = failure}, target, _mode) do
+  defp validate_build_result({:error, %Failure{} = failure}, target, _mode, _revision) do
     case sanitize_failure(failure) do
       {:error, %Failure{target: failure_target} = failure}
       when failure_target in [nil, target] ->
@@ -140,7 +162,7 @@ defmodule Rekindle.BuildFacade do
     end
   end
 
-  defp validate_build_result(_result, _target, _mode),
+  defp validate_build_result(_result, _target, _mode, _revision),
     do: {:error, contract_failure("Target handler returned an invalid build result")}
 
   defp validate_current_result(:none, _target), do: {:ok, :none}

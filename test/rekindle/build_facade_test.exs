@@ -12,8 +12,8 @@ defmodule Rekindle.BuildFacadeTest do
     @behaviour Rekindle.TargetHandler
 
     @impl true
-    def build(project, mode) do
-      send(Application.fetch_env!(project.otp_app, :test_owner), {:build_called, mode})
+    def build(project, mode, revision) do
+      send(Application.fetch_env!(project.otp_app, :test_owner), {:build_called, mode, revision})
       Application.fetch_env!(project.otp_app, :build_result)
     end
   end
@@ -22,7 +22,7 @@ defmodule Rekindle.BuildFacadeTest do
     @behaviour Rekindle.TargetHandler
 
     @impl true
-    def build(_project, _mode), do: raise("handler detail")
+    def build(_project, _mode, _revision), do: raise("handler detail")
   end
 
   setup do
@@ -43,11 +43,12 @@ defmodule Rekindle.BuildFacadeTest do
 
       assert {:ok, ^result} =
                BuildFacade.build(@otp_app, target, mode,
+                 build_runner: build_runner(1),
                  handlers: %{target => Handler},
                  load_project: loader([target])
                )
 
-      assert_receive {:build_called, ^mode}
+      assert_receive {:build_called, ^mode, 1}
       refute_received :projected
       refute_received :activated
       refute_received :desktop_started
@@ -81,12 +82,14 @@ defmodule Rekindle.BuildFacadeTest do
   test "rejects undeclared, unavailable, mismatched, malformed, and raised handlers" do
     assert {:error, %{code: :target_undeclared, stage: :configuration}} =
              BuildFacade.build(@otp_app, :web, :dev,
+               build_runner: build_runner(1),
                handlers: %{web: Handler},
                load_project: loader([:desktop])
              )
 
     assert {:error, %{code: :contract_violation, stage: :internal}} =
              BuildFacade.build(@otp_app, :web, :dev,
+               build_runner: build_runner(1),
                handlers: %{},
                load_project: loader([:web])
              )
@@ -95,6 +98,7 @@ defmodule Rekindle.BuildFacadeTest do
 
     assert {:error, %{code: :contract_violation, stage: :internal}} =
              BuildFacade.build(@otp_app, :web, :dev,
+               build_runner: build_runner(1),
                handlers: %{web: Handler},
                load_project: loader([:web])
              )
@@ -103,6 +107,7 @@ defmodule Rekindle.BuildFacadeTest do
 
     assert {:error, %{code: :contract_violation, stage: :internal}} =
              BuildFacade.build(@otp_app, :web, :dev,
+               build_runner: build_runner(1),
                handlers: %{web: Handler},
                load_project: loader([:web])
              )
@@ -112,12 +117,14 @@ defmodule Rekindle.BuildFacadeTest do
 
     assert {:error, %{code: :contract_violation, stage: :internal}} =
              BuildFacade.build(@otp_app, :web, :dev,
+               build_runner: build_runner(1),
                handlers: %{web: Handler},
                load_project: loader([:web])
              )
 
     assert {:error, %{code: :contract_violation, stage: :internal}} =
              BuildFacade.build(@otp_app, :web, :dev,
+               build_runner: build_runner(1),
                handlers: %{web: RaisingHandler},
                load_project: loader([:web])
              )
@@ -142,6 +149,7 @@ defmodule Rekindle.BuildFacadeTest do
 
     assert {:error, ^failure} =
              BuildFacade.build(@otp_app, :web, :dev,
+               build_runner: build_runner(1),
                handlers: %{web: Handler},
                load_project: loader([:web])
              )
@@ -163,6 +171,10 @@ defmodule Rekindle.BuildFacadeTest do
   defp loader(targets) do
     project = project(targets)
     fn @otp_app -> {:ok, project} end
+  end
+
+  defp build_runner(revision) do
+    fn _root, _target, executor -> executor.(revision) end
   end
 
   defp project(targets) do
