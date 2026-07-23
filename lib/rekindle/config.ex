@@ -43,11 +43,19 @@ defmodule Rekindle.Config do
   end
 
   @doc false
-  @spec validate(keyword()) :: :ok | {:error, Error.t()}
-  def validate(config) do
+  @spec validate(keyword(), keyword()) :: :ok | {:error, Error.t()}
+  def validate(config, options \\ []) do
+    root = options |> Keyword.get(:project_root, File.cwd!()) |> Path.expand()
+
     case parse(config) do
-      {:ok, _parsed} -> :ok
-      {:error, %Error{} = error} -> {:error, error}
+      {:ok, parsed} ->
+        case project_path(root, parsed.public_dir) do
+          {:ok, _public_dir} -> :ok
+          {:error, %Error{} = error} -> {:error, error}
+        end
+
+      {:error, %Error{} = error} ->
+        {:error, error}
     end
   end
 
@@ -65,17 +73,7 @@ defmodule Rekindle.Config do
   defp public_dir(config) do
     case Keyword.get(config, :public_dir, "priv/static") do
       value when is_binary(value) ->
-        root = "/rekindle-project"
-        expanded = Path.expand(value, root)
-
-        if Path.type(value) == :relative and
-             (expanded == root or String.starts_with?(expanded, root <> "/")),
-           do: {:ok, value},
-           else:
-             error(
-               :invalid_path,
-               "path must be a project-contained relative path: #{inspect(value)}"
-             )
+        {:ok, value}
 
       value ->
         error(
@@ -224,13 +222,6 @@ defmodule Rekindle.Config do
       error(:invalid_path, "path must be project-relative: #{inspect(relative)}")
     end
   end
-
-  defp project_path(_root, value),
-    do:
-      error(
-        :invalid_path,
-        "expected :public_dir to be a project-relative path, got: #{inspect(value)}"
-      )
 
   defp resolve_path(path), do: resolve_path(Path.split(Path.expand(path)), nil, 40)
 

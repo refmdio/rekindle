@@ -14,8 +14,18 @@ if Code.ensure_loaded?(Igniter) do
         with {:ok, platforms} <- platforms(targets) do
           targets
           |> Enum.reduce_while({:ok, %{}}, fn target, {:ok, resolved} ->
-            with {:ok, metadata} <- metadata(root, Map.fetch!(platforms, target)),
-                 {:ok, options} <- resolve(metadata, root, integration, target) do
+            platform = Map.fetch!(platforms, target)
+
+            with {:ok, structure} <- metadata(root, platform, [], true),
+                 {:ok, package, binary, features} <- target(structure, root, target),
+                 {:ok, metadata} <- metadata(root, platform, features, false),
+                 :ok <- dependency(metadata, package["id"], integration, target) do
+              options = [
+                package: package["name"],
+                binary: binary["name"],
+                features: features
+              ]
+
               {:cont, {:ok, Map.put(resolved, target, options)}}
             else
               {:error, message} -> {:halt, {:error, message}}
@@ -27,52 +37,64 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp with_client_root(igniter, callback) do
-      root = temporary_root()
+      project_root = temporary_root()
+      client_root = Path.join(project_root, "client")
 
       try do
-        :ok = copy_client(root)
-        :ok = materialize(igniter, root)
-        callback.(root)
+        :ok = copy_project(project_root)
+        :ok = materialize(igniter, project_root)
+        callback.(client_root)
       after
-        File.rm_rf(root)
+        File.rm_rf(project_root)
       end
     end
 
-    defp copy_client(destination) do
-      source = Path.expand("client")
+    defp copy_project(destination) do
+      source = File.cwd!()
 
-      if File.dir?(source), do: copy_directory(source, destination), else: :ok
+      if File.regular?(Path.join(source, "client/Cargo.toml")),
+        do: copy_directory(source, destination, ""),
+        else: :ok
     end
 
-    defp copy_directory(source, destination) do
+    defp copy_directory(source, destination, relative) do
       File.mkdir_p!(destination)
 
       source
       |> File.ls!()
-      |> Enum.reject(&(&1 in ["target", ".git", ".rekindle"]))
+      |> Enum.reject(&excluded?(Path.join(relative, &1)))
       |> Enum.each(fn name ->
         source_path = Path.join(source, name)
         destination_path = Path.join(destination, name)
+        child_relative = Path.join(relative, name)
 
-        cond do
-          File.dir?(source_path) ->
-            copy_directory(source_path, destination_path)
+        case File.lstat!(source_path).type do
+          :directory ->
+            copy_directory(source_path, destination_path, child_relative)
 
-          File.regular?(source_path) ->
-            File.mkdir_p!(Path.dirname(destination_path))
+          :regular ->
             File.cp!(source_path, destination_path)
 
-          true ->
-            raise "client contains an unsupported filesystem entry: #{source_path}"
+          :symlink ->
+            File.ln_s!(File.read_link!(source_path), destination_path)
+
+          type ->
+            raise "project contains an unsupported #{type} entry: #{source_path}"
         end
       end)
     end
 
-    defp materialize(igniter, root) do
+    defp excluded?(relative) do
+      basename = Path.basename(relative)
+
+      basename in [".git", "_build", "deps", "target", ".rekindle"] or
+        relative in ["priv/static/rekindle", "dist/rekindle"]
+    end
+
+    defp materialize(igniter, project_root) do
       igniter.rewrite.sources
-      |> Enum.filter(fn {path, _source} -> String.starts_with?(path, "client/") end)
-      |> Enum.each(fn {"client/" <> relative, source} ->
-        path = Path.join(root, relative)
+      |> Enum.each(fn {relative, source} ->
+        path = Path.join(project_root, relative)
         File.mkdir_p!(Path.dirname(path))
         File.write!(path, Rewrite.Source.get(source, :content))
       end)
@@ -122,16 +144,19 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp metadata(root, platform) do
-      arguments = [
-        "metadata",
-        "--format-version",
-        "1",
-        "--filter-platform",
-        platform,
-        "--manifest-path",
-        Path.join(root, "Cargo.toml")
-      ]
+    defp metadata(root, platform, features, no_dependencies?) do
+      arguments =
+        [
+          "metadata",
+          "--format-version",
+          "1",
+          "--filter-platform",
+          platform,
+          "--manifest-path",
+          Path.join(root, "Cargo.toml")
+        ] ++
+          if(no_dependencies?, do: ["--no-deps"], else: []) ++
+          if(features == [], do: [], else: ["--features", Enum.join(features, ",")])
 
       case Process.run(Rekindle.Toolchain.cargo_path(), arguments,
              cd: root,
@@ -166,7 +191,7 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp resolve(metadata, root, selected, target) do
+    defp target(metadata, root, target) do
       workspace_members = MapSet.new(metadata["workspace_members"] || [])
       expected_entry = Path.expand("src/bin/#{target}.rs", root)
 
@@ -186,14 +211,8 @@ if Code.ensure_loaded?(Igniter) do
 
       case candidates do
         [{package, binary}] ->
-          with :ok <- dependency(metadata, package, selected, target),
-               {:ok, features} <- required_features(binary) do
-            {:ok,
-             [
-               package: package["name"],
-               binary: binary["name"],
-               features: features
-             ]}
+          with {:ok, features} <- required_features(binary) do
+            {:ok, package, binary, features}
           end
 
         [] ->
@@ -204,14 +223,17 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp dependency(metadata, package, selected, target) do
+    defp dependency(metadata, package_id, selected, target) do
       package_names = Map.new(metadata["packages"], &{&1["id"], &1["name"]})
 
       integrations =
         metadata
         |> get_in(["resolve", "nodes"])
-        |> Enum.find(&(&1["id"] == package["id"]))
+        |> Enum.find(&(&1["id"] == package_id))
         |> Map.get("deps", [])
+        |> Enum.filter(fn dependency ->
+          Enum.any?(dependency["dep_kinds"] || [], &is_nil(&1["kind"]))
+        end)
         |> Enum.flat_map(fn dependency ->
           case package_names[dependency["pkg"]] do
             "gpui" -> [:gpui]

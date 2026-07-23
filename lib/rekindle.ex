@@ -11,8 +11,9 @@ defmodule Rekindle do
   @spec start_link(keyword()) :: Supervisor.on_start() | :ignore
   def start_link(options) do
     otp_app = Keyword.fetch!(options, :otp_app)
+    endpoint = Keyword.fetch!(options, :endpoint)
 
-    if code_reloading?(otp_app) do
+    if Application.get_env(otp_app, endpoint, [])[:code_reloader] == true do
       Supervisor.start_link(__MODULE__, otp_app)
     else
       :ignore
@@ -21,18 +22,6 @@ defmodule Rekindle do
 
   @impl Supervisor
   def init(_otp_app), do: Supervisor.init([], strategy: :one_for_one)
-
-  defp code_reloading?(otp_app) do
-    otp_app
-    |> Application.get_all_env()
-    |> Enum.any?(fn
-      {module, options} when is_atom(module) and is_list(options) ->
-        Keyword.get(options, :code_reloader, false) == true
-
-      _entry ->
-        false
-    end)
-  end
 
   @doc """
   Builds artifacts for an enabled target.

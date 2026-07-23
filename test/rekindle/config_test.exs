@@ -101,6 +101,16 @@ defmodule Rekindle.ConfigTest do
     assert {:error, %Config.Error{kind: :invalid_path}} =
              Config.load(:rekindle_config_test, project_root: root)
 
+    assert {:error, %Config.Error{kind: :invalid_path}} =
+             Config.validate(
+               [
+                 integration: :gpui,
+                 targets: [web: []],
+                 public_dir: "static-link"
+               ],
+               project_root: root
+             )
+
     File.ln_s!(outside, Path.join(root, "client"))
 
     Application.put_env(:rekindle_config_test, Rekindle,

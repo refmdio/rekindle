@@ -30,6 +30,7 @@ defmodule Rekindle.InstallTest do
 
     application = content(installed, "lib/demo/application.ex")
     assert application =~ "otp_app: :demo"
+    assert application =~ "endpoint: DemoWeb.Endpoint"
     assert length(Regex.scan(~r/\{Rekindle,/, application)) == 1
 
     mix = content(installed, "mix.exs")
@@ -319,6 +320,64 @@ defmodule Rekindle.InstallTest do
     assert config =~ ~s(features: ["web", "canvas"])
   end
 
+  test "enables binary-required features before checking optional dependencies" do
+    original =
+      existing_client(:egui, [:web])
+      |> update_content("client/Cargo.toml", fn manifest ->
+        manifest
+        |> String.replace("web = []", ~s(web = ["dep:eframe"]))
+        |> String.replace(
+          ~s(eframe = { version = "0.35"),
+          ~s(eframe = { version = "0.35", optional = true)
+        )
+      end)
+
+    adopted = install(original, integration: "egui", targets: ["web"])
+
+    assert adopted.issues == []
+    assert content(adopted, "config/config.exs") =~ ~s(features: ["web"])
+  end
+
+  test "does not accept a build-only framework dependency" do
+    original =
+      existing_client(:gpui, [:web])
+      |> update_content("client/Cargo.toml", fn manifest ->
+        String.replace(manifest, "[dependencies]", "[build-dependencies]")
+      end)
+
+    rejected = install(original, integration: "gpui", targets: ["web"])
+
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "dependency for web"))
+    assert changed_contents(rejected) == changed_contents(original)
+  end
+
+  test "resolves project-relative path dependencies without changing the client" do
+    original =
+      existing_client(:gpui, [:web], %{
+        "shared/Cargo.toml" => """
+        [package]
+        name = "gpui"
+        version = "0.1.0"
+        edition = "2024"
+        """,
+        "shared/src/lib.rs" => "pub struct App;\n"
+      })
+      |> update_content("client/Cargo.toml", fn manifest ->
+        manifest
+        |> String.replace(
+          ~r/gpui = \{ git = [^\n]+\}/,
+          ~s(gpui = { path = "../shared" })
+        )
+        |> String.replace(~r/gpui_platform = [^\n]+\n/, "")
+      end)
+
+    before = client_contents(original)
+    adopted = install(original, integration: "gpui", targets: ["web"])
+
+    assert adopted.issues == []
+    assert client_contents(adopted) == before
+  end
+
   test "adopts the resolved root package from a multi-package workspace" do
     original =
       existing_client(:gpui, [:web], %{
@@ -472,6 +531,11 @@ defmodule Rekindle.InstallTest do
 
                 Supervisor.start_link(children, strategy: :one_for_one, name: Demo.Supervisor)
               end
+            end
+            """,
+            "lib/demo_web/endpoint.ex" => """
+            defmodule DemoWeb.Endpoint do
+              use Phoenix.Endpoint, otp_app: :demo
             end
             """,
             "mix.exs" => """

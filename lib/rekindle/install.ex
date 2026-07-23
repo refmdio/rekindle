@@ -13,17 +13,22 @@ if Code.ensure_loaded?(Igniter) do
     @spec run(Igniter.t(), keyword()) :: Igniter.t()
     def run(igniter, options) do
       app = Application.app_name(igniter)
+      {igniter, endpoint} = Igniter.Libs.Phoenix.select_endpoint(igniter)
 
-      with {:ok, requested} <- requested_selection(options),
+      with :ok <- endpoint_required(endpoint),
+           {:ok, requested} <- requested_selection(options),
            {:ok, existing} <- existing_selection(igniter, app),
            {:ok, selection, mode} <-
              select(requested, existing, Igniter.exists?(igniter, "client/Cargo.toml")),
            {:ok, selection} <- validate_client(igniter, selection, mode) do
-        install(igniter, app, selection, mode)
+        install(igniter, app, endpoint, selection, mode)
       else
         {:error, message} -> Igniter.add_issue(igniter, message)
       end
     end
+
+    defp endpoint_required(endpoint) when is_atom(endpoint), do: :ok
+    defp endpoint_required(_endpoint), do: {:error, "Rekindle requires a Phoenix endpoint"}
 
     defp requested_selection(options) do
       with {:ok, integration} <- requested_integration(options[:integration]),
@@ -185,12 +190,14 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp install(igniter, app, selection, mode) do
+    defp install(igniter, app, endpoint, selection, mode) do
       igniter
       |> maybe_generate_client(selection, mode)
       |> configure(app, selection)
       |> Application.add_new_child(
-        {Rekindle, {:code, Sourceror.parse_string!("[otp_app: #{inspect(app)}]")}}
+        {Rekindle,
+         {:code,
+          Sourceror.parse_string!("[otp_app: #{inspect(app)}, endpoint: #{inspect(endpoint)}]")}}
       )
       |> TaskAliases.add_alias(:setup, "rekindle.setup", if_exists: :append)
       |> maybe_add_web_alias(selection.targets)
