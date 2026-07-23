@@ -191,11 +191,19 @@ defmodule Rekindle.Cargo.ProcessTest do
   end
 
   defp wait_executable(root) do
+    child = Path.join(root, "ignore-term")
+
+    File.write!(
+      child,
+      "#!/bin/sh\ntrap '' TERM\nexec /usr/bin/sleep 30\n"
+    )
+
+    File.chmod!(child, 0o755)
     executable = Path.join(root, "wait")
 
     File.write!(
       executable,
-      "#!/bin/sh\necho $$ > \"$1\"\n/usr/bin/sleep 30 &\necho $! > \"$2\"\nwait\n"
+      "#!/bin/sh\necho $$ > \"$1\"\n\"#{child}\" &\necho $! > \"$2\"\nwait\n"
     )
 
     File.chmod!(executable, 0o755)

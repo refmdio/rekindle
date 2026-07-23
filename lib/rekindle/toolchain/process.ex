@@ -94,15 +94,11 @@ defmodule Rekindle.Toolchain.Process do
       end
 
     if os_pid do
-      signal(session_group_pid(os_pid), "TERM")
+      group_pid = session_group_pid(os_pid)
+      signal(group_pid, "TERM")
       await_exit(port, @termination_grace)
-    end
-
-    if Port.info(port) do
-      if os_pid do
-        signal(session_group_pid(os_pid), "KILL")
-        await_exit(port, @termination_grace)
-      end
+      signal(group_pid, "KILL")
+      await_group_exit(group_pid, @termination_grace)
     end
 
     if Port.info(port) do
@@ -161,6 +157,32 @@ defmodule Rekindle.Toolchain.Process do
 
     if executable do
       System.cmd(executable, ["-#{name}", Integer.to_string(os_pid)], stderr_to_stdout: true)
+    end
+  end
+
+  defp await_group_exit(group_pid, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_group_exit_until(group_pid, deadline)
+  end
+
+  defp await_group_exit_until(group_pid, deadline) do
+    case System.find_executable("pgrep") do
+      nil ->
+        :unavailable
+
+      executable ->
+        case System.cmd(executable, ["-g", Integer.to_string(group_pid)], stderr_to_stdout: true) do
+          {_output, 1} ->
+            :ok
+
+          _ ->
+            if System.monotonic_time(:millisecond) >= deadline do
+              :timeout
+            else
+              Process.sleep(10)
+              await_group_exit_until(group_pid, deadline)
+            end
+        end
     end
   end
 
