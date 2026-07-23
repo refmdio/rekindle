@@ -388,6 +388,57 @@ defmodule Rekindle.Cargo.ProcessTest do
     refute File.exists?(marker)
   end
 
+  test "falls back to direct group-member cleanup when pkill is a no-op" do
+    root = tmp_dir()
+    bin = Path.join(root, "bin")
+    previous_path = System.fetch_env!("PATH")
+
+    File.mkdir_p!(bin)
+
+    for name <- ["setsid", "kill"] do
+      File.ln_s!(System.find_executable(name), Path.join(bin, name))
+    end
+
+    File.write!(Path.join(bin, "pkill"), "#!/bin/sh\nexit 0\n")
+    File.chmod!(Path.join(bin, "pkill"), 0o755)
+    on_exit(fn -> System.put_env("PATH", previous_path) end)
+    System.put_env("PATH", bin)
+
+    timeout_parent = Path.join(root, "timeout-parent")
+    timeout_child = Path.join(root, "timeout-child")
+
+    assert {:error, :timeout} =
+             Process.run(wait_executable(root), [timeout_parent, timeout_child],
+               cd: root,
+               timeout: 100
+             )
+
+    refute_process(timeout_parent)
+    refute_process(timeout_child)
+
+    cancel_parent = Path.join(root, "cancel-parent")
+    cancel_child = Path.join(root, "cancel-child")
+    cancel_ref = make_ref()
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        send(parent, {:no_op_runner, self()})
+
+        Process.run(wait_executable(root), [cancel_parent, cancel_child],
+          cd: root,
+          cancel_ref: cancel_ref
+        )
+      end)
+
+    assert_receive {:no_op_runner, runner}
+    assert wait_for_file(cancel_child, 50)
+    send(runner, {:rekindle_cancel, cancel_ref})
+    assert Task.await(task) == {:error, :cancelled}
+    refute_process(cancel_parent)
+    refute_process(cancel_child)
+  end
+
   test "times out and reaps the child" do
     root = tmp_dir()
     parent_pid_file = Path.join(root, "parent-pid")

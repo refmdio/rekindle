@@ -96,7 +96,11 @@ defmodule Rekindle.Toolchain.Process do
       signal(group_pid, "TERM", tools)
       await_exit(port, @termination_grace)
       signal(group_pid, "KILL", tools)
-      await_group_exit(group_pid, @termination_grace, tools)
+
+      if await_group_exit(group_pid, @termination_grace) == :timeout do
+        signal_group_members(group_pid, "KILL", tools)
+        await_group_exit(group_pid, @termination_grace)
+      end
     end
 
     if Port.info(port) do
@@ -145,39 +149,45 @@ defmodule Rekindle.Toolchain.Process do
   end
 
   defp signal_group_members(group_pid, name, tools) do
-    case System.cmd(tools.pgrep, ["-g", Integer.to_string(group_pid)], stderr_to_stdout: true) do
-      {output, 0} ->
-        output
-        |> String.split(~r/\s+/, trim: true)
-        |> Enum.each(fn pid -> signal_process(String.to_integer(pid), name, tools) end)
-
-      _ ->
-        :ok
-    end
+    group_pid
+    |> group_members()
+    |> Enum.each(&signal_process(&1, name, tools))
   end
 
   defp signal_process(os_pid, name, tools) do
     System.cmd(tools.kill, ["-#{name}", Integer.to_string(os_pid)], stderr_to_stdout: true)
   end
 
-  defp await_group_exit(group_pid, timeout, tools) do
+  defp await_group_exit(group_pid, timeout) do
     deadline = System.monotonic_time(:millisecond) + timeout
-    await_group_exit_until(group_pid, deadline, tools)
+    await_group_exit_until(group_pid, deadline)
   end
 
-  defp await_group_exit_until(group_pid, deadline, tools) do
-    case System.cmd(tools.pgrep, ["-g", Integer.to_string(group_pid)], stderr_to_stdout: true) do
-      {_output, 1} ->
-        :ok
-
-      _ ->
-        if System.monotonic_time(:millisecond) >= deadline do
-          :timeout
-        else
-          Process.sleep(10)
-          await_group_exit_until(group_pid, deadline, tools)
-        end
+  defp await_group_exit_until(group_pid, deadline) do
+    if group_members(group_pid) == [] do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        :timeout
+      else
+        Process.sleep(10)
+        await_group_exit_until(group_pid, deadline)
+      end
     end
+  end
+
+  defp group_members(group_pid) do
+    "/proc/[0-9]*/stat"
+    |> Path.wildcard()
+    |> Enum.flat_map(fn path ->
+      with {:ok, stat} <- File.read(path),
+           {:ok, ^group_pid} <- process_group_pid(stat),
+           {pid, ""} <- path |> Path.dirname() |> Path.basename() |> Integer.parse() do
+        [pid]
+      else
+        _ -> []
+      end
+    end)
   end
 
   defp await_exit(port, timeout) do
@@ -202,7 +212,7 @@ defmodule Rekindle.Toolchain.Process do
   defp process_tools do
     with {:ok, tools} <-
            Enum.reduce_while(
-             [:setsid, :pkill, :pgrep, :kill],
+             [:setsid, :pkill, :kill],
              {:ok, %{}},
              fn name, {:ok, tools} ->
                case System.find_executable(Atom.to_string(name)) do
@@ -226,8 +236,6 @@ defmodule Rekindle.Toolchain.Process do
            System.cmd(tools.pkill, ["-0", "-g", Integer.to_string(group_pid)],
              stderr_to_stdout: true
            ),
-         {_output, 0} <-
-           System.cmd(tools.pgrep, ["-g", Integer.to_string(group_pid)], stderr_to_stdout: true),
          {"", 0} <-
            System.cmd(tools.kill, ["-0", System.pid()], stderr_to_stdout: true) do
       :ok
@@ -239,8 +247,13 @@ defmodule Rekindle.Toolchain.Process do
   end
 
   defp current_group_pid do
-    with {:ok, stat} <- File.read("/proc/self/stat"),
-         [_process, fields] <- String.split(stat, ") ", parts: 2),
+    with {:ok, stat} <- File.read("/proc/self/stat") do
+      process_group_pid(stat)
+    end
+  end
+
+  defp process_group_pid(stat) do
+    with [_process, fields] <- String.split(stat, ") ", parts: 2),
          [_state, _parent, group | _rest] <- String.split(fields),
          {group_pid, ""} <- Integer.parse(group) do
       {:ok, group_pid}
