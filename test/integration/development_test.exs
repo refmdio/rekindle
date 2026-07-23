@@ -383,7 +383,56 @@ defmodule Rekindle.DevelopmentTest do
              DesktopDevelopment.status(launcher)
 
     assert Process.alive?(first_pid)
+    assert Process.alive?(launcher)
     assert read_marker(root)["generation"] == first.metadata.generation
+  end
+
+  test "logs desktop failures without a notification process", %{root: root} do
+    supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        launcher =
+          start_supervised!(
+            {DesktopDevelopment,
+             project_root: root, supervisor: supervisor, readiness: 75, notify: nil}
+          )
+
+        broken = desktop_result(root, "unobserved", :exit)
+        DesktopDevelopment.replace(launcher, broken)
+
+        assert_until(fn ->
+          DesktopDevelopment.status(launcher) == %{current: nil, candidate: nil}
+        end)
+      end)
+
+    assert log =~ "desktop development failed"
+    assert log =~ "exited before it became ready"
+  end
+
+  @tag capture_log: true
+  test "bounds failed desktop generations while preserving the running build", %{root: root} do
+    supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+    launcher = start_launcher(root, supervisor)
+    stable = desktop_result(root, "retained", :running)
+
+    DesktopDevelopment.replace(launcher, stable)
+    assert_receive {DesktopDevelopment, {:ready, ^stable}}, 1_000
+
+    for name <- ~w(failed-one failed-two failed-three) do
+      broken = desktop_result(root, name, :exit)
+      DesktopDevelopment.replace(launcher, broken)
+
+      assert_receive {DesktopDevelopment, {:error, %Rekindle.Desktop.Error{kind: :readiness}}},
+                     1_000
+    end
+
+    generation_root = Path.join([root, ".rekindle", "dev", "desktop", "test-target"])
+    generations = File.ls!(generation_root)
+
+    assert length(generations) == 2
+    assert stable.metadata.generation in generations
+    assert Process.alive?(launcher)
   end
 
   test "stops the desktop process with its owning supervisor", %{root: root} do

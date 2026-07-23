@@ -3,7 +3,10 @@ defmodule Rekindle.Desktop.Development do
 
   use GenServer
 
+  require Logger
+
   alias Rekindle.Build.Result
+  alias Rekindle.Development.Cleanup
   alias Rekindle.Desktop.{Error, Manifest}
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -57,32 +60,32 @@ defmodule Rekindle.Desktop.Development do
     {:noreply, launch(state, result)}
   end
 
-  def handle_info({Rekindle.Development.Builder, :desktop, {:error, _error}}, state) do
+  def handle_info({Rekindle.Development.Builder, :desktop, {:error, error}}, state) do
+    notify(state.notify, {:error, error})
     {:noreply, state}
   end
 
   def handle_info({:ready, reference}, %{candidate: %{reference: reference}} = state) do
     candidate = state.candidate
 
-    if Process.alive?(candidate.pid) and MuonTrap.Daemon.os_pid(candidate.pid) != :error do
+    if running?(candidate.pid) do
       case write_marker(state.root, candidate.result) do
         :ok ->
           stop(state.supervisor, state.current)
-          Rekindle.Development.Cleanup.desktop(state.root, candidate.result)
+          Cleanup.desktop(state.root, candidate.result)
           notify(state.notify, {:ready, candidate.result})
           {:noreply, %{state | current: candidate, candidate: nil}}
 
         {:error, error} ->
-          stop(state.supervisor, candidate)
-          notify(state.notify, {:error, error})
-          {:noreply, %{state | candidate: nil}}
+          {:noreply, reject_candidate(state, error)}
       end
     else
       error = Error.new(:readiness, "desktop process exited before it became ready")
-      notify(state.notify, {:error, error})
-      {:noreply, %{state | candidate: nil}}
+      {:noreply, reject_candidate(state, error)}
     end
   end
+
+  def handle_info({:ready, _reference}, state), do: {:noreply, state}
 
   def handle_info({:DOWN, reference, :process, _pid, reason}, state) do
     cond do
@@ -95,10 +98,12 @@ defmodule Rekindle.Desktop.Development do
             "desktop process exited before it became ready: #{inspect(reason)}"
           )
 
+        cleanup_rejected(state, state.candidate.result)
         notify(state.notify, {:error, error})
         {:noreply, %{state | candidate: nil}}
 
       state.current && state.current.reference == reference ->
+        notify(state.notify, {:exited, state.current.result, reason})
         {:noreply, %{state | current: nil}}
 
       true ->
@@ -115,12 +120,12 @@ defmodule Rekindle.Desktop.Development do
   defp launch(%{current: %{result: %{metadata: %{generation: generation}}}} = state, %{
          metadata: %{generation: generation}
        }) do
-    stop(state.supervisor, state.candidate)
+    discard_candidate(state)
     %{state | candidate: nil}
   end
 
   defp launch(state, result) do
-    stop(state.supervisor, state.candidate)
+    discard_candidate(state)
 
     with :ok <- validate(result),
          {:ok, pid} <- start_process(state, result) do
@@ -130,14 +135,50 @@ defmodule Rekindle.Desktop.Development do
       %{state | candidate: candidate}
     else
       {:error, %Error{} = error} ->
+        cleanup_rejected(state, result)
         notify(state.notify, {:error, error})
         %{state | candidate: nil}
 
       {:error, reason} ->
         error = Error.new(:start_failed, "desktop process could not start: #{inspect(reason)}")
+        cleanup_rejected(state, result)
         notify(state.notify, {:error, error})
         %{state | candidate: nil}
     end
+  end
+
+  defp reject_candidate(state, error) do
+    stop(state.supervisor, state.candidate)
+    cleanup_rejected(state, state.candidate.result)
+    notify(state.notify, {:error, error})
+    %{state | candidate: nil}
+  end
+
+  defp discard_candidate(%{candidate: nil}), do: :ok
+
+  defp discard_candidate(state) do
+    stop(state.supervisor, state.candidate)
+    cleanup_rejected(state, state.candidate.result)
+  end
+
+  defp cleanup_rejected(state, result) do
+    selected =
+      case state.current do
+        %{result: %{metadata: %{generation: generation}}} -> generation
+        nil -> result.metadata.generation
+      end
+
+    Cleanup.desktop(state.root, result, selected)
+  end
+
+  defp running?(pid) do
+    Process.alive?(pid) and daemon_running?(pid)
+  end
+
+  defp daemon_running?(pid) do
+    MuonTrap.Daemon.os_pid(pid) != :error
+  catch
+    :exit, _reason -> false
   end
 
   defp start_process(state, result) do
@@ -227,6 +268,25 @@ defmodule Rekindle.Desktop.Development do
     %{pid: process.pid, result: process.result}
   end
 
-  defp notify(nil, _message), do: :ok
-  defp notify(pid, message), do: send(pid, {__MODULE__, message})
+  defp notify(notify, {:error, error} = message) do
+    Logger.error("desktop development failed: #{error_message(error)}")
+    send_notification(notify, message)
+  end
+
+  defp notify(notify, {:exited, result, reason} = message) do
+    Logger.error(
+      "desktop development process exited for generation #{result.metadata.generation}: " <>
+        inspect(reason)
+    )
+
+    send_notification(notify, message)
+  end
+
+  defp notify(notify, message), do: send_notification(notify, message)
+
+  defp error_message(%{__exception__: true} = error), do: Exception.message(error)
+  defp error_message(error), do: inspect(error)
+
+  defp send_notification(nil, _message), do: :ok
+  defp send_notification(pid, message), do: send(pid, {__MODULE__, message})
 end

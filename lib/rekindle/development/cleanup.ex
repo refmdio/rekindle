@@ -13,6 +13,11 @@ defmodule Rekindle.Development.Cleanup do
 
   @spec desktop(Path.t(), Rekindle.Build.Result.t()) :: :ok
   def desktop(root, result) do
+    desktop(root, result, result.metadata.generation)
+  end
+
+  @spec desktop(Path.t(), Rekindle.Build.Result.t(), String.t()) :: :ok
+  def desktop(root, result, selected_generation) do
     directory =
       Path.join([
         root,
@@ -22,7 +27,7 @@ defmodule Rekindle.Development.Cleanup do
         result.metadata.rust_target
       ])
 
-    prune(directory, result.metadata.generation)
+    prune(directory, selected_generation)
   end
 
   defp prune(directory, selected) do
