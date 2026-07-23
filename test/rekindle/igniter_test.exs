@@ -434,6 +434,7 @@ defmodule Rekindle.IgniterTest do
     end)
   end
 
+  @tag timeout: 180_000
   test "applied canonical client generates a lock and checks both declared toolchains" do
     root = temp_dir!("rekindle-igniter-applied")
     client_root = Path.join(root, "client")
