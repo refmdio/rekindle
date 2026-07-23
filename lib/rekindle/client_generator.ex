@@ -12,15 +12,10 @@ defmodule Rekindle.ClientGenerator do
     def message(%__MODULE__{failure: failure}), do: Rekindle.Failure.render(failure)
   end
 
-  @template_version "2"
+  @template_version "1"
   @client_version "0.1.0"
   @gpui_revision "18f35ffac2da72ccdfb0e1bf756218fa1995162b"
   @web_toolchain "nightly-2026-04-01"
-  @marker_keys ~w[schema template_version application_id package web_binary desktop_binary gpui_revision rekindle_client_version owned_files]
-  @identity_keys ~w[schema application_id package web_binary desktop_binary gpui_revision rekindle_client_version]
-  @prior_template_profiles %{
-    {"1", @gpui_revision, @client_version} => :v1
-  }
   @owned_paths [
     "Cargo.toml",
     "rust-toolchain.toml",
@@ -33,47 +28,6 @@ defmodule Rekindle.ClientGenerator do
 
   @spec render(keyword()) :: %{required(String.t()) => binary()}
   def render(options) do
-    render_template(options, @template_version)
-  end
-
-  @doc false
-  @spec render_prior(String.t(), keyword()) :: {:ok, map()} | :error
-  def render_prior(version, options) when is_binary(version) do
-    with {:ok, identity} <- identity(options),
-         profile when not is_nil(profile) <-
-           Map.get(
-             @prior_template_profiles,
-             {version, @gpui_revision, @client_version}
-           ) do
-      {:ok, render_profile(profile, identity, options)}
-    else
-      _ -> :error
-    end
-  end
-
-  @doc false
-  @spec recognize_prior(binary(), keyword()) ::
-          {:ok, %{marker: map(), files: map(), recorded_digests: map()}} | :error
-  def recognize_prior(contents, options) when is_binary(contents) do
-    with {:ok, marker} <- Jason.decode(contents),
-         true <- exact_marker?(marker),
-         true <- CanonicalValue.encode!(marker) <> "\n" == contents,
-         {:ok, known_files} <- render_prior(marker["template_version"], options),
-         {:ok, identity} <- identity(options),
-         true <- marker_identity(marker) == identity,
-         {:ok, recorded_digests} <- recorded_digests(marker, known_files),
-         true <- valid_marker_seed_digest?(marker) do
-      {:ok, %{marker: marker, files: known_files, recorded_digests: recorded_digests}}
-    else
-      _ -> :error
-    end
-  rescue
-    _ -> :error
-  end
-
-  def recognize_prior(_contents, _options), do: :error
-
-  defp render_template(options, template_version) do
     application_id = Keyword.fetch!(options, :application_id)
     package = Keyword.get(options, :package, application_id <> "_ui")
     web_binary = Keyword.get(options, :web_binary, application_id <> "-web")
@@ -91,8 +45,8 @@ defmodule Rekindle.ClientGenerator do
       ".cargo/config.toml" => cargo_config(),
       "src/app.rs" => app_rs(),
       "src/lib.rs" => lib_rs(application_id),
-      "src/bin/web.rs" => web_rs(crate),
-      "src/bin/desktop.rs" => desktop_rs(crate),
+      "src/bin/web.rs" => web_rs(crate, application_id),
+      "src/bin/desktop.rs" => desktop_rs(crate, application_id),
       "public/.gitkeep" => ""
     }
 
@@ -106,41 +60,13 @@ defmodule Rekindle.ClientGenerator do
       "rekindle_client_version" => @client_version
     }
 
-    put_marker(files, identity, template_version)
+    put_marker(files, identity)
   end
 
-  # Version 1 owns its own renderer. Do not share owned template functions with
-  # the current renderer: their bytes are the compatibility registry.
-  defp render_profile(:v1, identity, options) do
-    package = identity["package"]
-    crate = String.replace(package, "-", "_")
-    dependency = Keyword.get(options, :rekindle_client, {:version, @client_version})
-
-    files = %{
-      "Cargo.toml" =>
-        prior_v1_cargo_toml(
-          package,
-          identity["web_binary"],
-          identity["desktop_binary"],
-          dependency
-        ),
-      "Cargo.lock" => "",
-      "rust-toolchain.toml" => prior_v1_rust_toolchain(),
-      ".cargo/config.toml" => prior_v1_cargo_config(),
-      "src/app.rs" => app_rs(),
-      "src/lib.rs" => prior_v1_lib_rs(identity["application_id"]),
-      "src/bin/web.rs" => prior_v1_web_rs(crate),
-      "src/bin/desktop.rs" => prior_v1_desktop_rs(crate),
-      "public/.gitkeep" => ""
-    }
-
-    put_marker(files, identity, "1")
-  end
-
-  defp put_marker(files, identity, template_version) do
+  defp put_marker(files, identity) do
     marker_base =
       identity
-      |> Map.put("template_version", template_version)
+      |> Map.put("template_version", @template_version)
       |> Map.put(
         "owned_files",
         Enum.map(@owned_paths, fn path ->
@@ -163,83 +89,6 @@ defmodule Rekindle.ClientGenerator do
 
     Map.put(files, ".rekindle-client.json", CanonicalValue.encode!(marker) <> "\n")
   end
-
-  defp identity(options) do
-    application_id = Keyword.fetch!(options, :application_id)
-    package = Keyword.get(options, :package, application_id <> "_ui")
-    web_binary = Keyword.get(options, :web_binary, application_id <> "-web")
-    desktop_binary = Keyword.get(options, :desktop_binary, application_id)
-    targets = Keyword.get(options, :targets, [:web, :desktop])
-
-    validate!(application_id, package, web_binary, desktop_binary, targets)
-
-    {:ok,
-     %{
-       "schema" => 1,
-       "application_id" => application_id,
-       "package" => package,
-       "web_binary" => web_binary,
-       "desktop_binary" => desktop_binary,
-       "gpui_revision" => @gpui_revision,
-       "rekindle_client_version" => @client_version
-     }}
-  rescue
-    _ -> :error
-  end
-
-  defp marker_identity(marker), do: Map.take(marker, @identity_keys)
-
-  defp exact_marker?(marker),
-    do: is_map(marker) and Enum.sort(Map.keys(marker)) == Enum.sort(@marker_keys)
-
-  defp recorded_digests(marker, known_files) do
-    expected_paths =
-      known_files[".rekindle-client.json"]
-      |> Jason.decode!()
-      |> Map.fetch!("owned_files")
-      |> Enum.map(& &1["path"])
-
-    entries = marker["owned_files"]
-
-    if is_list(entries) and Enum.map(entries, & &1["path"]) == expected_paths do
-      Enum.reduce_while(entries, {:ok, %{}}, fn
-        %{"path" => path, "template_sha256" => digest}, {:ok, acc}
-        when is_binary(path) and is_binary(digest) ->
-          if path in expected_paths and valid_sha256?(digest) and not Map.has_key?(acc, path) do
-            {:cont, {:ok, Map.put(acc, path, digest)}}
-          else
-            {:halt, :error}
-          end
-
-        _, _acc ->
-          {:halt, :error}
-      end)
-      |> case do
-        {:ok, digests} when map_size(digests) == length(expected_paths) -> {:ok, digests}
-        _ -> :error
-      end
-    else
-      :error
-    end
-  end
-
-  defp valid_marker_seed_digest?(marker) do
-    case Enum.find(marker["owned_files"], &(&1["path"] == ".rekindle-client.json")) do
-      %{"template_sha256" => digest} ->
-        marker_base =
-          Map.update!(marker, "owned_files", fn entries ->
-            Enum.reject(entries, &(&1["path"] == ".rekindle-client.json"))
-          end)
-
-        digest == sha256(CanonicalValue.encode!(marker_base) <> "\n")
-
-      _ ->
-        false
-    end
-  end
-
-  defp valid_sha256?(value),
-    do: is_binary(value) and byte_size(value) == 64 and value =~ ~r/\A[0-9a-f]{64}\z/
 
   @spec write!(Path.t(), keyword()) :: [Path.t()]
   def write!(client_root, options) do
@@ -466,23 +315,14 @@ defmodule Rekindle.ClientGenerator do
   defp reconcile_files!(existing, current, _options) when map_size(existing) == 0,
     do: current
 
-  defp reconcile_files!(existing, current, options) do
+  defp reconcile_files!(existing, current, _options) do
     marker = Map.get(existing, ".rekindle-client.json")
 
-    cond do
-      marker == current[".rekindle-client.json"] ->
-        validate_current_owned_files!(existing, current)
-        overlay_generated_files(existing, current)
-
-      true ->
-        case recognize_prior(marker, options) do
-          {:ok, prior} ->
-            validate_prior_owned_files!(existing, prior)
-            overlay_generated_files(existing, current)
-
-          :error ->
-            raise ArgumentError, "client root is not an admitted Rekindle client"
-        end
+    if marker == current[".rekindle-client.json"] do
+      validate_current_owned_files!(existing, current)
+      overlay_generated_files(existing, current)
+    else
+      raise ArgumentError, "client root is not an admitted Rekindle client"
     end
   end
 
@@ -492,23 +332,6 @@ defmodule Rekindle.ClientGenerator do
         raise ArgumentError, "Rekindle-owned client file conflicts: #{relative}"
       end
     end)
-  end
-
-  defp validate_prior_owned_files!(existing, prior) do
-    Enum.each(prior.recorded_digests, fn
-      {".rekindle-client.json", _recorded} ->
-        :ok
-
-      {relative, recorded} ->
-        current_digest = existing |> Map.fetch!(relative) |> sha256()
-        known_digest = prior.files |> Map.fetch!(relative) |> sha256()
-
-        if current_digest not in [recorded, known_digest] do
-          raise ArgumentError, "Rekindle-owned client file conflicts: #{relative}"
-        end
-    end)
-  rescue
-    KeyError -> raise ArgumentError, "Rekindle-owned client file is missing"
   end
 
   defp overlay_generated_files(existing, current) do
@@ -805,12 +628,15 @@ defmodule Rekindle.ClientGenerator do
 
     [dependencies]
     gpui = { git = "https://github.com/zed-industries/zed", rev = "#{@gpui_revision}", default-features = false }
+    gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "#{@gpui_revision}", default-features = false }
 
     [target.'cfg(target_arch = "wasm32")'.dependencies]
     rekindle-client = { #{dependency_toml(dependency)}, features = ["web"] }
+    wasm-bindgen-futures = "0.4"
 
     [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
     rekindle-client = { #{dependency_toml(dependency)}, features = ["desktop"] }
+    futures-executor = "0.3"
     """
   end
 
@@ -879,109 +705,95 @@ defmodule Rekindle.ClientGenerator do
     """
   end
 
-  defp web_rs(crate) do
+  defp web_rs(crate, application_id) do
+    digest = identity_digest(application_id, :web)
+
     """
+    use std::cell::RefCell;
+    use std::num::NonZeroU32;
+
+    use rekindle_client::ClientError;
+    use rekindle_client::adapter_v1::{AdapterIdentity, AdapterTarget, IntegrationId, WebSession};
+
+    thread_local! {
+        static APPLICATION: RefCell<Option<gpui::ApplicationHandle>> = const { RefCell::new(None) };
+        static WINDOW: RefCell<Option<gpui::AnyWindowHandle>> = const { RefCell::new(None) };
+    }
+
     fn main() {
-        let _build: fn(&mut gpui::App) = #{crate}::app::build;
-        let _options: rekindle_client::ClientOptions = #{crate}::client_options();
+        gpui_platform::web_init();
+
+        wasm_bindgen_futures::spawn_local(async {
+            let identity = AdapterIdentity {
+                integration: IntegrationId::Gpui,
+                target: AdapterTarget::Web,
+                identity_digest: #{digest},
+            };
+            let mut session = WebSession::new(identity, #{crate}::client_options())
+                .expect("failed to create Rekindle Web session");
+            session.prepare().await.expect("failed to prepare Rekindle Web session");
+
+            let application = gpui_platform::single_threaded_web().run_embedded(move |cx| {
+                #{crate}::app::build(cx);
+
+                if let Some(window) = cx.active_window() {
+                    session.ready(NonZeroU32::MIN)
+                        .expect("failed to mark Rekindle Web session ready");
+                    WINDOW.with(|slot| slot.replace(Some(window)));
+                } else {
+                    session.fail(&ClientError::WindowOpen)
+                        .expect("failed to report Rekindle Web startup failure");
+                    panic!("GPUI application did not open a window");
+                }
+            });
+
+            APPLICATION.with(|slot| slot.replace(Some(application)));
+        });
     }
     """
   end
 
-  defp desktop_rs(crate) do
+  defp desktop_rs(crate, application_id) do
+    digest = identity_digest(application_id, :desktop)
+
     """
+    use std::num::NonZeroU32;
+
+    use rekindle_client::ClientError;
+    use rekindle_client::adapter_v1::{AdapterIdentity, AdapterTarget, DesktopSession, IntegrationId};
+
     fn main() {
-        let _build: fn(&mut gpui::App) = #{crate}::app::build;
-        let _options: rekindle_client::ClientOptions = #{crate}::client_options();
+        let identity = AdapterIdentity {
+            integration: IntegrationId::Gpui,
+            target: AdapterTarget::Desktop,
+            identity_digest: #{digest},
+        };
+        let mut session = DesktopSession::new(identity, #{crate}::client_options())
+            .expect("failed to create Rekindle desktop session");
+        futures_executor::block_on(session.prepare())
+            .expect("failed to prepare Rekindle desktop session");
+        session.register_shutdown(Box::new(|_request| Ok(())))
+            .expect("failed to register Rekindle desktop shutdown");
+
+        gpui_platform::application().run(move |cx| {
+            #{crate}::app::build(cx);
+
+            if cx.active_window().is_some() {
+                session.ready(NonZeroU32::MIN)
+                    .expect("failed to mark Rekindle desktop session ready");
+            } else {
+                session.fail(&ClientError::WindowOpen)
+                    .expect("failed to report Rekindle desktop startup failure");
+                panic!("GPUI application did not open a window");
+            }
+        });
     }
     """
   end
 
-  defp prior_v1_cargo_toml(package, web_binary, desktop_binary, dependency) do
-    """
-    [package]
-    name = #{inspect(package)}
-    version = "0.1.0"
-    edition = "2024"
-    publish = false
-    resolver = "2"
-
-    [[bin]]
-    name = #{inspect(desktop_binary)}
-    path = "src/bin/desktop.rs"
-    required-features = ["desktop"]
-
-    [[bin]]
-    name = #{inspect(web_binary)}
-    path = "src/bin/web.rs"
-    required-features = ["web"]
-
-    [features]
-    default = []
-    web = ["rekindle-client/web"]
-    desktop = ["rekindle-client/desktop"]
-    state-handoff = ["rekindle-client/state-handoff"]
-
-    [dependencies]
-    gpui = { git = "https://github.com/zed-industries/zed", rev = "18f35ffac2da72ccdfb0e1bf756218fa1995162b", default-features = false }
-
-    [target.'cfg(target_arch = "wasm32")'.dependencies]
-    rekindle-client = { #{prior_v1_dependency_toml(dependency)}, features = ["web"] }
-
-    [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-    rekindle-client = { #{prior_v1_dependency_toml(dependency)}, features = ["desktop"] }
-    """
-  end
-
-  defp prior_v1_dependency_toml({:version, version}), do: "version = \"=#{version}\""
-  defp prior_v1_dependency_toml({:path, path}), do: "path = #{inspect(Path.expand(path))}"
-
-  defp prior_v1_rust_toolchain do
-    """
-    [toolchain]
-    channel = "nightly-2026-04-01"
-    components = ["rust-src"]
-    targets = ["wasm32-unknown-unknown"]
-    profile = "minimal"
-    """
-  end
-
-  defp prior_v1_cargo_config do
-    """
-    [build]
-    target-dir = ".rekindle/target"
-    """
-  end
-
-  defp prior_v1_lib_rs(application_id) do
-    """
-    pub mod app;
-
-    pub fn client_options() -> rekindle_client::ClientOptions {
-        rekindle_client::ClientOptions {
-            application_id: #{inspect(application_id)},
-            handoff: None,
-        }
-    }
-    """
-  end
-
-  defp prior_v1_web_rs(crate) do
-    """
-    fn main() {
-        rekindle_client::web::run(#{crate}::app::build, #{crate}::client_options())
-            .expect("failed to start GPUI Web application");
-    }
-    """
-  end
-
-  defp prior_v1_desktop_rs(crate) do
-    """
-    fn main() {
-        rekindle_client::desktop::run(#{crate}::app::build, #{crate}::client_options())
-            .expect("failed to start GPUI desktop application");
-    }
-    """
+  defp identity_digest(application_id, target) do
+    bytes = :crypto.hash(:sha256, application_id <> ":gpui:" <> Atom.to_string(target))
+    "[" <> Enum.map_join(:binary.bin_to_list(bytes), ", ", &Integer.to_string/1) <> "]"
   end
 
   defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)

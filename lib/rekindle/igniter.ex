@@ -184,16 +184,10 @@ if Code.ensure_loaded?(Igniter) do
       options = client_template_options(application_id, targets)
       files = ClientGenerator.render(options)
 
-      case classify_client(igniter, client_path, files, options) do
+      case classify_client(igniter, client_path, files) do
         {:ok, :install} ->
           igniter
           |> install_client_files(client_path, files)
-          |> defer_client_writes(client_path, files)
-          |> queue_client_reconciliation(client_path, options)
-
-        {:ok, {:upgrade, prior}} ->
-          igniter
-          |> upgrade_client_files(client_path, files, prior)
           |> defer_client_writes(client_path, files)
           |> queue_client_reconciliation(client_path, options)
 
@@ -233,54 +227,18 @@ if Code.ensure_loaded?(Igniter) do
       ]
     end
 
-    defp classify_client(igniter, client_path, current_files, options) do
+    defp classify_client(igniter, client_path, current_files) do
       marker_path = Path.join(client_path, ".rekindle-client.json")
 
       if Igniter.exists?(igniter, marker_path) do
         marker = read_file(igniter, marker_path)
 
-        cond do
-          marker == current_files[".rekindle-client.json"] ->
-            {:ok, :install}
-
-          true ->
-            with {:ok, prior} <- ClientGenerator.recognize_prior(marker, options),
-                 :ok <- prior_owned_files_replaceable(igniter, client_path, prior) do
-              {:ok, {:upgrade, prior}}
-            else
-              {:error, path} ->
-                {:error, "Rekindle-owned client file conflicts: #{Path.join(client_path, path)}"}
-
-              _ ->
-                {:error, "Rekindle client marker is unsupported or conflicts: #{marker_path}"}
-            end
-        end
+        if marker == current_files[".rekindle-client.json"],
+          do: {:ok, :install},
+          else: {:error, "Rekindle client marker conflicts: #{marker_path}"}
       else
         {:ok, :install}
       end
-    end
-
-    defp prior_owned_files_replaceable(igniter, client_path, prior) do
-      prior.recorded_digests
-      |> Enum.sort_by(&elem(&1, 0))
-      |> Enum.reduce_while(:ok, fn
-        {".rekindle-client.json", _recorded}, :ok ->
-          {:cont, :ok}
-
-        {relative, recorded}, :ok ->
-          path = Path.join(client_path, relative)
-
-          if Igniter.exists?(igniter, path) do
-            current_digest = sha256(read_file(igniter, path))
-            known_digest = sha256(Map.fetch!(prior.files, relative))
-
-            if current_digest in [recorded, known_digest],
-              do: {:cont, :ok},
-              else: {:halt, {:error, relative}}
-          else
-            {:halt, {:error, relative}}
-          end
-      end)
     end
 
     defp install_client_files(igniter, client_path, files) do
@@ -295,31 +253,8 @@ if Code.ensure_loaded?(Igniter) do
       end)
     end
 
-    defp upgrade_client_files(igniter, client_path, files, _prior) do
-      Enum.reduce(files, igniter, fn {relative, contents}, acc ->
-        path = Path.join(client_path, relative)
-
-        cond do
-          application_owned?(relative) and Igniter.exists?(acc, path) ->
-            acc
-
-          Igniter.exists?(acc, path) ->
-            replace_owned_file(acc, path, contents)
-
-          true ->
-            Igniter.create_new_file(acc, path, contents)
-        end
-      end)
-    end
-
     defp application_owned?(relative),
       do: relative in ["Cargo.lock", "src/app.rs", "public/.gitkeep"]
-
-    defp replace_owned_file(igniter, path, contents) do
-      Igniter.update_file(igniter, path, fn source ->
-        Rewrite.Source.update(source, :content, fn _ -> contents end)
-      end)
-    end
 
     defp create_owned_file(igniter, path, contents) do
       if Igniter.exists?(igniter, path) do

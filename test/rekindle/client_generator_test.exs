@@ -14,8 +14,12 @@ defmodule Rekindle.ClientGeneratorTest do
     assert Map.has_key?(first, "src/bin/web.rs")
     assert Map.has_key?(first, "src/bin/desktop.rs")
     assert first["src/lib.rs"] =~ "rekindle_client::ClientOptions"
-    assert first["src/bin/web.rs"] =~ "rekindle_client::ClientOptions"
-    assert first["src/bin/desktop.rs"] =~ "rekindle_client::ClientOptions"
+    assert first["src/bin/web.rs"] =~ "WebSession::new"
+    assert first["src/bin/web.rs"] =~ "single_threaded_web().run_embedded"
+    assert first["src/bin/web.rs"] =~ "sample_app_ui::app::build(cx)"
+    assert first["src/bin/desktop.rs"] =~ "DesktopSession::new"
+    assert first["src/bin/desktop.rs"] =~ "gpui_platform::application().run"
+    assert first["src/bin/desktop.rs"] =~ "sample_app_ui::app::build(cx)"
     refute first["src/bin/web.rs"] =~ "rekindle_client::web"
     refute first["src/bin/desktop.rs"] =~ "rekindle_client::desktop"
     assert first["Cargo.toml"] =~ ~s(web = ["rekindle-client/web"])
@@ -40,64 +44,11 @@ defmodule Rekindle.ClientGeneratorTest do
              ]
 
     assert marker["schema"] == 1
-    assert marker["template_version"] == "2"
+    assert marker["template_version"] == "1"
     assert marker["application_id"] == "sample_app"
     assert marker["package"] == "sample_app_ui"
     refute Enum.any?(marker["owned_files"], &(&1["path"] == "src/app.rs"))
     assert Enum.any?(marker["owned_files"], &(&1["path"] == ".rekindle-client.json"))
-  end
-
-  test "recognizes only the exact supported prior marker identity" do
-    options = options(generate_lock: false)
-    assert {:ok, prior} = ClientGenerator.render_prior("1", options)
-
-    assert {:ok, recognized} =
-             ClientGenerator.recognize_prior(prior[".rekindle-client.json"], options)
-
-    assert recognized.files == prior
-
-    assert Map.keys(recognized.recorded_digests) |> Enum.sort() ==
-             ~w[.cargo/config.toml .rekindle-client.json Cargo.toml rust-toolchain.toml src/bin/desktop.rs src/bin/web.rs src/lib.rs]
-
-    assert :error = ClientGenerator.render_prior("0", options)
-
-    marker = Jason.decode!(prior[".rekindle-client.json"])
-
-    for invalid <- [
-          Map.delete(marker, "package"),
-          Map.put(marker, "extra", true),
-          Map.put(marker, "application_id", "foreign"),
-          Map.put(marker, "template_version", "0"),
-          update_in(marker["owned_files"], &tl/1),
-          update_in(marker["owned_files"], fn entries ->
-            entries ++ [%{"path" => "foreign", "template_sha256" => String.duplicate("a", 64)}]
-          end)
-        ] do
-      contents = Rekindle.CanonicalValue.encode!(invalid) <> "\n"
-      assert :error = ClientGenerator.recognize_prior(contents, options)
-    end
-  end
-
-  test "keeps the supported version 1 ownership bytes immutable" do
-    {:ok, prior} =
-      ClientGenerator.render_prior("1",
-        application_id: "sample_app",
-        package: "sample_app_ui",
-        web_binary: "sample_app-web",
-        desktop_binary: "sample_app",
-        targets: [:web, :desktop]
-      )
-
-    marker = Jason.decode!(prior[".rekindle-client.json"])
-
-    assert sha256(prior["Cargo.toml"]) ==
-             "7b0974fbe36e1a0b7ccddd90c7747ef0c03ee83c7e7c38e22a1077afe7309fc0"
-
-    assert Enum.find(marker["owned_files"], &(&1["path"] == "Cargo.toml")) == %{
-             "path" => "Cargo.toml",
-             "template_sha256" =>
-               "7b0974fbe36e1a0b7ccddd90c7747ef0c03ee83c7e7c38e22a1077afe7309fc0"
-           }
   end
 
   test "writes a resolvable Cargo project and both intended bins type-check" do
@@ -240,17 +191,7 @@ defmodule Rekindle.ClientGeneratorTest do
     assert wasm_desktop_output =~ "feature `desktop` is supported only for non-Wasm targets"
     assert wasm_desktop_output =~ "features `web` and `desktop` are mutually exclusive"
 
-    File.write!(
-      Path.join(root, "src/bin/desktop.rs"),
-      """
-      fn build() {}
-
-      fn main() {
-          let _build: fn(&mut gpui::App) = build;
-          let _options: rekindle_client::ClientOptions = sample_app_ui::client_options();
-      }
-      """
-    )
+    File.write!(Path.join(root, "src/app.rs"), "pub fn build() {}\n")
 
     {callback_output, callback_status} =
       System.cmd(
@@ -276,9 +217,83 @@ defmodule Rekindle.ClientGeneratorTest do
       )
 
     assert callback_status != 0
-    assert callback_output =~ "mismatched types"
-    assert callback_output =~ "expected fn pointer"
-    assert callback_output =~ "found fn item"
+    assert callback_output =~ "this function takes 0 arguments but 1 argument was supplied"
+  end
+
+  test "desktop entry crosses the platform and application startup boundary" do
+    root =
+      Path.join(System.tmp_dir!(), "rekindle-client-run-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    fixture_client = Path.join(root, "fixture/rekindle-client")
+    copy_client_fixture!(fixture_client)
+    client = Path.join(root, "client")
+
+    ClientGenerator.write!(
+      client,
+      options(rekindle_client: {:path, fixture_client}, generate_lock: false)
+    )
+
+    fake_gpui = Path.join(root, "fixture/gpui")
+    fake_platform = Path.join(root, "fixture/gpui_platform")
+    write_startup_fixture!(fake_gpui, fake_platform)
+
+    File.write!(
+      Path.join(client, "src/app.rs"),
+      """
+      pub fn build(cx: &mut gpui::App) {
+          let marker = std::env::var("REKINDLE_STARTUP_MARKER").expect("startup marker");
+          let mut marker = std::fs::OpenOptions::new()
+              .append(true)
+              .open(marker)
+              .expect("open startup marker");
+          std::io::Write::write_all(&mut marker, b"application\n")
+              .expect("write application marker");
+          cx.open_test_window();
+      }
+      """
+    )
+
+    File.write!(
+      Path.join(client, "Cargo.toml"),
+      File.read!(Path.join(client, "Cargo.toml")) <>
+        """
+
+        [patch."https://github.com/zed-industries/zed"]
+        gpui = { path = #{inspect(fake_gpui)} }
+        gpui_platform = { path = #{inspect(fake_platform)} }
+        """
+    )
+
+    marker = Path.join(root, "startup.marker")
+
+    assert {output, 0} =
+             System.cmd(
+               "rustup",
+               [
+                 "run",
+                 "1.95.0",
+                 "cargo",
+                 "run",
+                 "--quiet",
+                 "--no-default-features",
+                 "--features",
+                 "desktop",
+                 "--bin",
+                 "sample_app"
+               ],
+               cd: client,
+               env: [
+                 {"RUSTC", rustc!("1.95.0")},
+                 {"CARGO_TARGET_DIR", Path.join(root, "target")},
+                 {"REKINDLE_STARTUP_MARKER", marker}
+               ],
+               stderr_to_stdout: true
+             )
+
+    assert output == ""
+    assert File.read!(marker) == "platform\napplication\n"
   end
 
   test "supports an overridden client root without touching Phoenix assets" do
@@ -431,8 +446,6 @@ defmodule Rekindle.ClientGeneratorTest do
     String.trim(path)
   end
 
-  defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
-
   defp directory_snapshot(root) do
     root
     |> Path.join("**/*")
@@ -448,6 +461,84 @@ defmodule Rekindle.ClientGeneratorTest do
     File.cp!(Path.join(source, "Cargo.toml"), Path.join(destination, "Cargo.toml"))
     File.cp!(Path.join(source, "Cargo.lock"), Path.join(destination, "Cargo.lock"))
     File.cp_r!(Path.join(source, "src"), Path.join(destination, "src"))
+  end
+
+  defp write_startup_fixture!(gpui, platform) do
+    File.mkdir_p!(Path.join(gpui, "src"))
+    File.mkdir_p!(Path.join(platform, "src"))
+
+    File.write!(
+      Path.join(gpui, "Cargo.toml"),
+      """
+      [package]
+      name = "gpui"
+      version = "0.1.0"
+      edition = "2024"
+
+      [lib]
+      path = "src/lib.rs"
+      """
+    )
+
+    File.write!(
+      Path.join(gpui, "src/lib.rs"),
+      """
+      #[derive(Clone, Copy)]
+      pub struct AnyWindowHandle;
+
+      pub struct ApplicationHandle;
+
+      pub struct App {
+          window: bool,
+      }
+
+      impl App {
+          pub fn active_window(&self) -> Option<AnyWindowHandle> {
+              self.window.then_some(AnyWindowHandle)
+          }
+
+          pub fn open_test_window(&mut self) {
+              self.window = true;
+          }
+      }
+
+      pub struct Application;
+
+      impl Application {
+          pub fn run(self, launch: impl FnOnce(&mut App) + 'static) {
+              let mut app = App { window: false };
+              launch(&mut app);
+          }
+      }
+      """
+    )
+
+    File.write!(
+      Path.join(platform, "Cargo.toml"),
+      """
+      [package]
+      name = "gpui_platform"
+      version = "0.1.0"
+      edition = "2024"
+
+      [dependencies]
+      gpui = { path = #{inspect(gpui)} }
+
+      [lib]
+      path = "src/lib.rs"
+      """
+    )
+
+    File.write!(
+      Path.join(platform, "src/lib.rs"),
+      """
+      pub fn application() -> gpui::Application {
+          let marker = std::env::var("REKINDLE_STARTUP_MARKER").expect("startup marker");
+          std::fs::write(marker, "platform\n").expect("write platform marker");
+          gpui::Application
+      }
+      """
+    )
   end
 
   defp with_env(name, value, function) do
