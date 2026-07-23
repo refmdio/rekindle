@@ -1,0 +1,23 @@
+[workspace]
+members = ["shared"]
+resolver = "2"
+
+[package]
+name = "rekindle-cargo-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+fixture-feature = []
+
+[dependencies]
+rekindle-cargo-shared = { path = "shared" }
+
+[[bin]]
+name = "web"
+path = "src/bin/web.rs"
+
+[[bin]]
+name = "desktop"
+path = "src/bin/desktop.rs"

@@ -106,7 +106,8 @@ defmodule Rekindle.CargoTest do
 
     assert metadata_spawn["env_set"] == [
              ["CARGO_TARGET_DIR", context.target_directory],
-             ["MODE", "test"]
+             ["MODE", "test"],
+             ["RUSTC", "/usr/bin/true"]
            ]
 
     send(metadata_worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""})

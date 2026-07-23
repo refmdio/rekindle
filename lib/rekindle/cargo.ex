@@ -262,9 +262,11 @@ defmodule Rekindle.Cargo do
            apply(Arguments, operation, [client_root, target, config, mode, rust_target]),
          {:ok, authority} <-
            active_authority(state, authority_token, target, request.selection.profile),
-         {:ok, executable, argv} <- command(config, request.argv, target),
+         {:ok, executable, argv, tool_environment} <-
+           command(config, request.argv, target),
          :ok <- Executable.revalidate(executable),
-         {:ok, environment} <- environment(config.environment, target_directory),
+         {:ok, environment} <-
+           environment(config.environment, target_directory, tool_environment),
          :ok <- operation_inputs(operation, options, target_directory) do
       {:ok,
        %{
@@ -524,14 +526,14 @@ defmodule Rekindle.Cargo do
 
   defp command(%{toolchain: %{kind: :rustup, name: name}}, argv, _target) do
     with {:ok, rustup} <- Rustup.resolve() do
-      {:ok, rustup, ["run", name, "cargo" | argv]}
+      {:ok, rustup, ["run", name, "cargo" | argv], {:rustup, Path.dirname(rustup.path)}}
     end
   end
 
   defp command(%{toolchain: %{kind: :path, cargo: cargo, rustc: rustc}}, argv, target) do
     with {:ok, cargo} <- qualify(cargo, target, "cargo"),
-         {:ok, _rustc} <- qualify(rustc, target, "rustc") do
-      {:ok, cargo, argv}
+         {:ok, rustc} <- qualify(rustc, target, "rustc") do
+      {:ok, cargo, argv, {:path, rustc.path}}
     end
   end
 
@@ -545,14 +547,46 @@ defmodule Rekindle.Cargo do
     end
   end
 
-  defp environment(policy, target_directory) do
-    entries =
-      [{"CARGO_TARGET_DIR", target_directory} | policy.resolved] |> Enum.sort_by(&elem(&1, 0))
+  defp environment(policy, target_directory, tool_environment) do
+    with {:ok, resolved} <- tool_environment(policy.resolved, tool_environment) do
+      entries =
+        [{"CARGO_TARGET_DIR", target_directory} | resolved] |> Enum.sort_by(&elem(&1, 0))
 
-    if length(entries) == length(Enum.uniq_by(entries, &elem(&1, 0))),
-      do: {:ok, entries},
-      else: failure(:contract_violation, nil, "Cargo environment contains duplicate names")
+      if length(entries) == length(Enum.uniq_by(entries, &elem(&1, 0))),
+        do: {:ok, entries},
+        else: failure(:contract_violation, nil, "Cargo environment contains duplicate names")
+    end
   end
+
+  defp tool_environment(resolved, {:rustup, proxy_directory}) do
+    path =
+      resolved
+      |> Enum.find_value(fn
+        {"PATH", value} -> value
+        _entry -> nil
+      end)
+
+    effective_path =
+      [proxy_directory | split_path(path)]
+      |> Enum.uniq()
+      |> Enum.join(path_separator())
+
+    {:ok,
+     resolved
+     |> Enum.reject(&(elem(&1, 0) == "PATH"))
+     |> List.insert_at(0, {"PATH", effective_path})}
+  end
+
+  defp tool_environment(resolved, {:path, rustc}) do
+    if Enum.any?(resolved, &(elem(&1, 0) == "RUSTC")),
+      do: failure(:contract_violation, nil, "Cargo environment overrides the selected rustc"),
+      else: {:ok, [{"RUSTC", rustc} | resolved]}
+  end
+
+  defp split_path(nil), do: []
+  defp split_path(path), do: String.split(path, path_separator(), trim: true)
+
+  defp path_separator, do: if(match?({:win32, _}, :os.type()), do: ";", else: ":")
 
   defp operation_inputs(:metadata, options, _target_directory) do
     if normalized_absolute?(Keyword.get(options, :project_root)), do: :ok, else: :error
