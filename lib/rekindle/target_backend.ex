@@ -178,7 +178,7 @@ defmodule Rekindle.TargetBackend do
   @doc false
   @spec configuration_failure(Rekindle.target(), term()) :: Rekindle.Failure.t()
   def configuration_failure(target, errors) when target in [:web, :desktop] do
-    if valid_error_list?(errors) do
+    if valid_error_list?(errors) and not invalid_configuration_error_list?(errors) do
       diagnostics =
         Enum.map(errors, fn error ->
           {:ok, diagnostic} =
@@ -312,6 +312,17 @@ defmodule Rekindle.TargetBackend do
   defp invalid_configuration_errors do
     error([:backend, :options], "extension configuration error contract violation")
   end
+
+  defp invalid_configuration_error_list?([
+         %ConfigError{
+           path: ["backend", "options"],
+           code: :invalid_value,
+           message: "extension configuration error contract violation"
+         }
+       ]),
+       do: true
+
+  defp invalid_configuration_error_list?(_errors), do: false
 
   defp error_key(%ConfigError{} = error) do
     {CanonicalValue.encode!(error.path), Atom.to_string(error.code), error.message}

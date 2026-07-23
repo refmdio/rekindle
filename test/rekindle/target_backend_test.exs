@@ -277,14 +277,21 @@ defmodule Rekindle.TargetBackendTest do
              TargetBackend.admit(ConfigErrorsBackend, :web, %{"case" => "valid"})
 
     for kind <- ~w[empty unsorted duplicate oversized] do
-      assert {:error,
-              [
-                %ConfigError{
-                  path: ["backend", "options"],
-                  code: :invalid_value,
-                  message: "extension configuration error contract violation"
-                }
-              ]} = TargetBackend.admit(ConfigErrorsBackend, :web, %{"case" => kind})
+      assert {:error, errors} = TargetBackend.admit(ConfigErrorsBackend, :web, %{"case" => kind})
+
+      assert [
+               %ConfigError{
+                 path: ["backend", "options"],
+                 code: :invalid_value,
+                 message: "extension configuration error contract violation"
+               }
+             ] = errors
+
+      failure = TargetBackend.configuration_failure(:web, errors)
+      assert failure.code == :contract_violation
+      assert failure.stage == :internal
+      assert failure.message == "extension configuration error contract violation"
+      assert failure.diagnostics == []
     end
   end
 
