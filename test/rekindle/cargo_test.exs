@@ -283,8 +283,8 @@ defmodule Rekindle.CargoTest do
   end
 
   test "execution rejects a scheduler snapshot with newer source work", context do
-    assert {:ok, changed, [{:cancel, 1}]} =
-             Scheduler.change(context.web_scheduler, [:cargo_web], 1)
+    assert {:ok, changed, [{:cancel, 1, :obsolete}, {:cancelled, 1, :obsolete}]} =
+             Scheduler.change(context.web_scheduler, [:cargo_web], 2, 1)
 
     assert {:error, %{code: :cargo_protocol}} =
              Cargo.authorize(context.cargo, context.web_identity, changed)
@@ -299,6 +299,28 @@ defmodule Rekindle.CargoTest do
              Cargo.authorize(context.cargo, changed_identity, context.web_scheduler)
 
     refute_receive {:cargo_spawn, _worker, _spawn, _state}
+  end
+
+  test "the admission revision may be zero when no current generation exists", context do
+    cargo =
+      start_supervised!(
+        {Cargo,
+         runner: context.runner,
+         helper: "/tmp/rekindle_toolchain",
+         authority_owner: self(),
+         max_cargo_builds: 2},
+        id: :zero_revision_cargo
+      )
+
+    scheduler = scheduler(:web, 0)
+    assert {:ok, authority} = Cargo.authorize(cargo, identity(:web), scheduler)
+    options = Keyword.put(base_options(context), :authority, authority)
+
+    assert {:ok, reference} = Cargo.metadata(cargo, options)
+    assert_receive {:cargo_spawn, worker, _spawn, _state}
+    send(worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""})
+    assert_receive {:rekindle_cargo_ready, ^reference}
+    assert {:ok, _metadata} = Cargo.result(cargo, reference, authority)
   end
 
   test "only the configured coordinator can issue execution authority", context do
@@ -367,8 +389,8 @@ defmodule Rekindle.CargoTest do
     send(worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), ""})
     assert_receive {:rekindle_cargo_ready, ^reference}
 
-    assert {:ok, changed, [{:cancel, 1}]} =
-             Scheduler.change(context.web_scheduler, [:cargo_web], 1)
+    assert {:ok, changed, [{:cancel, 1, :obsolete}, {:cancelled, 1, :obsolete}]} =
+             Scheduler.change(context.web_scheduler, [:cargo_web], 2, 1)
 
     assert :ok = Cargo.supersede(context.cargo, context.web_authority, changed)
 
@@ -386,8 +408,8 @@ defmodule Rekindle.CargoTest do
     assert {:ok, _metadata} =
              Cargo.result(context.cargo, reference, context.web_authority)
 
-    assert {:ok, changed, [{:cancel, 1}]} =
-             Scheduler.change(context.web_scheduler, [:cargo_web], 1)
+    assert {:ok, changed, [{:cancel, 1, :obsolete}, {:cancelled, 1, :obsolete}]} =
+             Scheduler.change(context.web_scheduler, [:cargo_web], 2, 1)
 
     assert :ok = Cargo.supersede(context.cargo, context.web_authority, changed)
   end
@@ -397,8 +419,8 @@ defmodule Rekindle.CargoTest do
     assert {:ok, old_reference} = Cargo.metadata(context.cargo, options)
     assert_receive {:cargo_spawn, old_worker, _spawn, _state}
 
-    assert {:ok, changed, [{:cancel, 1}]} =
-             Scheduler.change(context.web_scheduler, [:cargo_web], 1)
+    assert {:ok, changed, [{:cancel, 1, :obsolete}, {:cancelled, 1, :obsolete}]} =
+             Scheduler.change(context.web_scheduler, [:cargo_web], 2, 1)
 
     assert :ok = Cargo.supersede(context.cargo, context.web_authority, changed)
     assert_receive {:cargo_cancel, ^old_worker, %{"reason" => "obsolete"}}
@@ -424,8 +446,9 @@ defmodule Rekindle.CargoTest do
         message: "superseded"
       )
 
-    assert {:ok, queued, _effects} = Scheduler.fail(changed, 1, failure, 1)
-    assert {:ok, current, {:start, 2, [:cargo_web]}} = Scheduler.ready(queued, 1)
+    assert {:ok, queued, _effects} = Scheduler.fail(changed, 1, failure)
+    token = queued.token_request.id
+    assert {:ok, current, [{:start, 2, [:cargo_web]}]} = Scheduler.grant(queued, token, 2)
 
     current_identity = identity(:web, "revision-2")
     assert {:ok, current_authority} = Cargo.authorize(context.cargo, current_identity, current)
@@ -460,17 +483,19 @@ defmodule Rekindle.CargoTest do
         identity = identity(:web, "revision-#{revision}")
         assert {:ok, authority} = Cargo.authorize(context.cargo, identity, scheduler)
 
-        assert {:ok, changed, [{:cancel, ^revision}]} =
-                 Scheduler.change(scheduler, [:cargo_web], revision)
-
-        assert :ok = Cargo.supersede(context.cargo, authority, changed)
-        assert :ok = Cargo.supersede(context.cargo, authority, changed)
-        assert {:ok, queued, _effects} = Scheduler.fail(changed, revision, failure, revision)
-
         next_revision = revision + 1
 
-        assert {:ok, current, {:start, ^next_revision, [:cargo_web]}} =
-                 Scheduler.ready(queued, revision)
+        assert {:ok, changed,
+                [{:cancel, ^revision, :obsolete}, {:cancelled, ^revision, :obsolete}]} =
+                 Scheduler.change(scheduler, [:cargo_web], next_revision, revision)
+
+        assert :ok = Cargo.supersede(context.cargo, authority, changed)
+        assert :ok = Cargo.supersede(context.cargo, authority, changed)
+        assert {:ok, queued, _effects} = Scheduler.fail(changed, revision, failure)
+        token = queued.token_request.id
+
+        assert {:ok, current, [{:start, ^next_revision, [:cargo_web]}]} =
+                 Scheduler.grant(queued, token, next_revision)
 
         {current, first || {authority, changed}, {authority, changed}}
       end)
@@ -696,12 +721,15 @@ defmodule Rekindle.CargoTest do
 
   defp scheduler(target), do: scheduler(target, 1)
 
-  defp scheduler(target, revision) when is_integer(revision) and revision > 0 do
+  defp scheduler(target, revision) when is_integer(revision) and revision >= 0 do
     node = if target == :web, do: :cargo_web, else: :cargo_desktop
-    assert {:ok, scheduler} = Scheduler.new(target, 0)
-    assert {:ok, scheduler, []} = Scheduler.change(scheduler, [node], 0)
-    assert {:ok, scheduler, {:start, 1, [^node]}} = Scheduler.ready(scheduler, 0)
-    %{scheduler | latest_source_revision: revision, running_revision: revision}
+    assert {:ok, scheduler} = Scheduler.new(target, 0, revision)
+    token = scheduler.token_request.id
+
+    assert {:ok, scheduler, [{:start, ^revision, [^node]}]} =
+             Scheduler.grant(%{scheduler | affected_nodes: [node]}, token, revision)
+
+    scheduler
   end
 
   defp owned_cargo(context) do

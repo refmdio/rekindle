@@ -318,7 +318,7 @@ defmodule Rekindle.Cargo do
          true <- identity.input["profile"] == profile,
          true <- scheduler.target == target,
          true <- scheduler.state == :building,
-         revision when is_integer(revision) and revision > 0 <- scheduler.running_revision,
+         revision when is_integer(revision) and revision >= 0 <- scheduler.running_revision,
          true <- scheduler.latest_source_revision == revision,
          true <- scheduler.queued_revision == nil,
          true <- scheduler.cancel_requested? == false,
@@ -340,7 +340,7 @@ defmodule Rekindle.Cargo do
         source_revision: revision,
         identity: %Identity.NodeKey{} = identity
       } = authority
-      when revision > 0 ->
+      when revision >= 0 ->
         if Map.get(state.latest_revisions, target) == revision and
              identity.input["profile"] == profile do
           {:ok, authority}
@@ -354,7 +354,7 @@ defmodule Rekindle.Cargo do
   end
 
   defp register_authority(state, identity, target, source_revision, build_key) do
-    latest = Map.get(state.latest_revisions, target, 0)
+    latest = Map.get(state.latest_revisions, target, -1)
     key = {target, source_revision}
 
     cond do
@@ -410,7 +410,7 @@ defmodule Rekindle.Cargo do
   end
 
   defp supersession(caller, authority_token, authority, %Scheduler{} = scheduler, state) do
-    current = Map.get(state.latest_revisions, scheduler.target, 0)
+    current = Map.get(state.latest_revisions, scheduler.target, -1)
 
     key =
       {authority_token, scheduler.target, scheduler.running_revision,
@@ -426,7 +426,7 @@ defmodule Rekindle.Cargo do
       not scheduler.cancel_requested? ->
         failure(:cargo_protocol, scheduler.target, "Cargo supersession was not requested")
 
-      not is_integer(scheduler.running_revision) or scheduler.running_revision <= 0 ->
+      not is_integer(scheduler.running_revision) or scheduler.running_revision < 0 ->
         failure(:cargo_protocol, scheduler.target, "Cargo running revision is invalid")
 
       scheduler.latest_source_revision <= scheduler.running_revision ->

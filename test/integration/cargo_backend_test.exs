@@ -271,9 +271,12 @@ defmodule Rekindle.CargoBackendIntegrationTest do
                ]
              )
 
-    assert {:ok, scheduler} = Scheduler.new(target, 0)
-    assert {:ok, scheduler, []} = Scheduler.change(scheduler, [node], 0)
-    assert {:ok, scheduler, {:start, 1, [^node]}} = Scheduler.ready(scheduler, 0)
+    assert {:ok, scheduler} = Scheduler.new(target, 0, 1)
+    token = scheduler.token_request.id
+
+    assert {:ok, scheduler, [{:start, 1, [^node]}]} =
+             Scheduler.grant(%{scheduler | affected_nodes: [node]}, token, 1)
+
     {identity, scheduler}
   end
 
