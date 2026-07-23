@@ -6,7 +6,15 @@ defmodule Rekindle.ProjectSession do
   alias Rekindle.{BuildResult, Failure}
   alias Rekindle.Scheduler.Session
 
-  defstruct [:project, :session, :session_id, pending: %{}, jobs: %{}, monitors: %{}]
+  defstruct [
+    :project,
+    :session,
+    :session_id,
+    :worker_supervisor,
+    pending: %{},
+    jobs: %{},
+    monitors: %{}
+  ]
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(options) do
@@ -40,18 +48,29 @@ defmodule Rekindle.ProjectSession do
   def init(project) do
     nodes = target_nodes(project)
 
-    case Session.new(nodes, %{}, project.dev.debounce_ms) do
-      {:ok, session, _admission_revision, _effects} ->
-        {:ok,
-         %__MODULE__{
-           project: project,
-           session: session,
-           session_id: :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
-         }}
-
+    with {:ok, worker_supervisor} <- Task.Supervisor.start_link(),
+         {:ok, session, _admission_revision, _effects} <-
+           Session.new(nodes, %{}, project.dev.debounce_ms) do
+      {:ok,
+       %__MODULE__{
+         project: project,
+         session: session,
+         session_id: :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower),
+         worker_supervisor: worker_supervisor
+       }}
+    else
       {:error, %Failure{} = failure} ->
         {:stop, failure}
     end
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    if is_pid(state.worker_supervisor) and Process.alive?(state.worker_supervisor) do
+      Supervisor.stop(state.worker_supervisor, :shutdown)
+    end
+
+    :ok
   end
 
   @impl true
@@ -183,10 +202,12 @@ defmodule Rekindle.ProjectSession do
       %{executor: executor} ->
         owner = self()
 
-        {pid, monitor} =
-          spawn_monitor(fn ->
+        {:ok, pid} =
+          Task.Supervisor.start_child(state.worker_supervisor, fn ->
             send(owner, {:project_build_result, revision, executor.(revision)})
           end)
+
+        monitor = Process.monitor(pid)
 
         job = %{pid: pid, monitor: monitor, target: target}
 

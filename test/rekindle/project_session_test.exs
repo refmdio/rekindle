@@ -110,6 +110,55 @@ defmodule Rekindle.ProjectSessionTest do
              )
   end
 
+  test "stopping a session terminates its active build worker", context do
+    assert_session_stop_cleans_worker(context, &GenServer.stop(&1, :shutdown))
+  end
+
+  test "crashing a session terminates its active build worker", context do
+    assert_session_stop_cleans_worker(context, &Process.exit(&1, :kill))
+  end
+
+  defp assert_session_stop_cleans_worker(context, stop) do
+    Application.put_env(context.otp_app, :execute, fn _revision -> :wait end)
+    owner = self()
+
+    caller =
+      spawn(fn ->
+        result =
+          try do
+            {:returned,
+             BuildFacade.build(context.otp_app, :web, :dev,
+               handlers: %{web: Handler},
+               load_project: fn _app -> {:ok, context.project} end
+             )}
+          catch
+            :exit, reason -> {:exited, reason}
+          end
+
+        send(owner, {:caller_result, result})
+      end)
+
+    assert_receive {:build_started, 1, worker}, 1_000
+    worker_monitor = Process.monitor(worker)
+    caller_monitor = Process.monitor(caller)
+
+    [{session, _value}] =
+      Registry.lookup(
+        Rekindle.RuntimeRegistry,
+        {:session, context.project.project_root}
+      )
+
+    stop.(session)
+
+    assert_receive {:DOWN, ^worker_monitor, :process, ^worker, _reason}, 1_000
+    refute Process.alive?(worker)
+    assert_receive {:caller_result, result}, 1_000
+
+    assert match?({kind, _outcome} when kind in [:returned, :exited], result)
+
+    assert_receive {:DOWN, ^caller_monitor, :process, ^caller, :normal}, 1_000
+  end
+
   defp project(otp_app) do
     root =
       Path.join(
