@@ -209,9 +209,42 @@ if Code.ensure_loaded?(Igniter) do
          {:code,
           Sourceror.parse_string!("[otp_app: #{inspect(app)}, endpoint: #{inspect(endpoint)}]")}}
       )
+      |> maybe_install_web_endpoint(app, endpoint, selection.targets)
       |> TaskAliases.add_alias(:setup, "rekindle.setup", if_exists: :append)
       |> maybe_add_web_alias(selection.targets)
       |> update_ignores(selection, mode)
+    end
+
+    defp maybe_install_web_endpoint(igniter, app, endpoint, targets) do
+      if :web in targets do
+        Igniter.Project.Module.find_and_update_module!(igniter, endpoint, fn zipper ->
+          case Common.move_to(zipper, fn zipper ->
+                 Function.function_call?(zipper, :plug, 2) and
+                   Function.argument_equals?(zipper, 0, Rekindle.Web.Development)
+               end) do
+            {:ok, _zipper} ->
+              {:ok, zipper}
+
+            :error ->
+              case Igniter.Code.Module.move_to_use(zipper, Phoenix.Endpoint) do
+                {:ok, use_zipper} ->
+                  code =
+                    """
+                    if code_reloading? do
+                      plug Rekindle.Web.Development, otp_app: #{inspect(app)}
+                    end
+                    """
+
+                  {:ok, Common.add_code(use_zipper, code, placement: :after)}
+
+                :error ->
+                  {:error, "could not add the Rekindle development plug to #{inspect(endpoint)}"}
+              end
+          end
+        end)
+      else
+        igniter
+      end
     end
 
     defp maybe_generate_client(igniter, _selection, mode) when mode != :generate, do: igniter

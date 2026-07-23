@@ -3,6 +3,7 @@ defmodule Rekindle.DevelopmentTest do
 
   alias Rekindle.Build.Result
   alias Rekindle.Development.Builder
+  alias Rekindle.Web.Development
 
   setup do
     root =
@@ -125,6 +126,60 @@ defmodule Rekindle.DevelopmentTest do
              Builder.status(builder)
   end
 
+  test "serves the current generation and checks GPUI capability before import", %{root: root} do
+    generation = publish_web(root, "export default 'ready';")
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+
+    current = request("/__rekindle/current", options)
+    assert current.status == 200
+    assert get_resp_header(current, "cache-control") == ["no-store"]
+
+    assert Jason.decode!(current.resp_body) == %{
+             "generation" => generation,
+             "entry" => "/__rekindle/web/#{generation}/app.js"
+           }
+
+    asset = request("/__rekindle/web/#{generation}/app.js", options)
+    assert asset.status == 200
+    assert asset.resp_body == "export default 'ready';"
+    assert get_resp_header(asset, "cache-control") == ["public, max-age=31536000, immutable"]
+
+    runtime = request("/__rekindle/runtime.js", options)
+    assert runtime.status == 200
+    assert runtime.resp_body =~ "navigator.gpu"
+    assert runtime.resp_body =~ "await graphicsReady();"
+    assert runtime.resp_body =~ "await import(current.entry);"
+    refute runtime.resp_body =~ ~s|getContext("webgl2")|
+  end
+
+  test "uses WebGL2 diagnostics for egui without requiring WebGPU", %{root: root} do
+    Application.put_env(:rekindle_development_test, Rekindle,
+      integration: :egui,
+      targets: [web: []]
+    )
+
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+    page = request("/__rekindle", options)
+    runtime = request("/__rekindle/runtime.js", options)
+
+    assert page.status == 200
+    assert page.resp_body =~ ~s(<canvas id="rekindle-canvas"></canvas>)
+    assert runtime.resp_body =~ ~s|getContext("webgl2")|
+    refute runtime.resp_body =~ "navigator.gpu"
+  end
+
+  test "does not expose unselected or malformed Web paths", %{root: root} do
+    generation = publish_web(root, "export default 'ready';")
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+
+    assert request("/__rekindle/web/#{generation}/missing.js", options).status == 404
+    assert request("/__rekindle/web/not-a-generation/app.js", options).status == 404
+
+    conn = Plug.Test.conn("GET", "/unrelated") |> Development.call(options)
+    refute conn.halted
+    refute conn.state == :sent
+  end
+
   defp start_builder(root, build, options \\ []) do
     start_supervised!(
       {Builder,
@@ -150,4 +205,30 @@ defmodule Rekindle.DevelopmentTest do
       metadata: %{generation: generation}
     }
   end
+
+  defp publish_web(root, source) do
+    temporary = Path.join(root, "web-source")
+    File.mkdir_p!(temporary)
+    File.write!(Path.join(temporary, "app.js"), source)
+    {:ok, manifest} = Rekindle.Web.Manifest.create(temporary, "app.js")
+    generation = manifest["generation"]
+    generation_root = Path.join([root, ".rekindle", "dev", "web", generation])
+    File.mkdir_p!(generation_root)
+    File.cp!(Path.join(temporary, "app.js"), Path.join(generation_root, "app.js"))
+    File.write!(Path.join(generation_root, "manifest.json"), Jason.encode!(manifest))
+
+    File.write!(
+      Path.join(root, ".rekindle/dev/web-current.json"),
+      Jason.encode!(%{"generation" => generation})
+    )
+
+    generation
+  end
+
+  defp request(path, options) do
+    Plug.Test.conn("GET", path)
+    |> Development.call(options)
+  end
+
+  defp get_resp_header(conn, name), do: Plug.Conn.get_resp_header(conn, name)
 end

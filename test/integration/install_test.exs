@@ -33,6 +33,9 @@ defmodule Rekindle.InstallTest do
     assert application =~ "endpoint: DemoWeb.Endpoint"
     assert length(Regex.scan(~r/\{Rekindle,/, application)) == 1
 
+    endpoint = content(installed, "lib/demo_web/endpoint.ex")
+    assert endpoint =~ "plug(Rekindle.Web.Development, otp_app: :demo)"
+
     mix = content(installed, "mix.exs")
     assert mix =~ ~s(setup: ["deps.get", "rekindle.setup"])
     assert mix =~ "\"rekindle.setup\""
@@ -570,6 +573,12 @@ defmodule Rekindle.InstallTest do
     Mix.Tasks.Rekindle.Dev.run(["--open"])
 
     assert_receive {:phx_server, ["--open"]}
+  end
+
+  test "does not install the browser plug for a desktop-only client" do
+    installed = install(project(), integration: "gpui", targets: ["desktop"])
+
+    refute content(installed, "lib/demo_web/endpoint.ex") =~ "Rekindle.Web.Development"
   end
 
   defp project(extra_files \\ %{}) do
