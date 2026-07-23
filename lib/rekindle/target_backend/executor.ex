@@ -37,18 +37,7 @@ defmodule Rekindle.TargetBackend.Executor do
     with {:ok, services} <- services(options),
          :ok <- valid_admission(admission),
          {:ok, %Staging{} = staging} <- ArtifactStore.allocate(services.store, target) do
-      context = context_builder.(QualifiedPath.issue(staging.path, :read_write))
-
-      case execute_staged(admission, context, staging, services) do
-        {:ok, _admitted, _execution, _diagnostics} = success ->
-          success
-
-        {:error, %Failure{} = failure} ->
-          case ArtifactStore.discard(staging) do
-            :ok -> {:error, failure}
-            {:error, %Failure{} = cleanup} -> {:error, cleanup}
-          end
-      end
+      execute_owned(admission, context_builder, staging, services)
     end
   rescue
     _exception -> contract_failure(target, "Extension execution failed")
@@ -58,6 +47,35 @@ defmodule Rekindle.TargetBackend.Executor do
 
   def execute(_admission, target, _context_builder, _options),
     do: contract_failure(target, "Extension execution request is invalid")
+
+  defp execute_owned(admission, context_builder, staging, services) do
+    result =
+      try do
+        context = context_builder.(QualifiedPath.issue(staging.path, :read_write))
+        execute_staged(admission, context, staging, services)
+      rescue
+        _exception -> contract_failure(staging.target, "Extension execution failed")
+      catch
+        _kind, _reason -> contract_failure(staging.target, "Extension execution failed")
+      end
+
+    case result do
+      {:ok, _admitted, _execution, _diagnostics} = success ->
+        success
+
+      {:error, %Failure{} = failure} ->
+        case ArtifactStore.discard(staging) do
+          :ok -> {:error, failure}
+          {:error, %Failure{} = cleanup} -> {:error, cleanup}
+        end
+
+      _unexpected ->
+        case ArtifactStore.discard(staging) do
+          :ok -> contract_failure(staging.target, "Extension execution failed")
+          {:error, %Failure{} = cleanup} -> {:error, cleanup}
+        end
+    end
+  end
 
   defp execute_staged(admission, context, staging, services) do
     with :ok <- valid_context(context, admission, staging),

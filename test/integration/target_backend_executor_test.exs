@@ -356,6 +356,20 @@ defmodule Rekindle.TargetBackendExecutorTest do
     assert :none = ArtifactStore.current(state.store, :desktop)
   end
 
+  test "removes staging when context construction raises", state do
+    builder = fn _staging -> raise "context construction failed" end
+
+    assert {:error, %{code: :contract_violation}} = execute(state, :desktop, builder)
+    assert staging_empty?(state.cache)
+  end
+
+  test "removes staging when context construction throws", state do
+    builder = fn _staging -> throw(:context_construction_failed) end
+
+    assert {:error, %{code: :contract_violation}} = execute(state, :desktop, builder)
+    assert staging_empty?(state.cache)
+  end
+
   test "owns reserved execution identity variables and rejects backend overrides", state do
     Application.put_env(@app, :mode, :reserved_env)
     assert {:error, %{code: :contract_violation}} = execute(state)
@@ -377,8 +391,8 @@ defmodule Rekindle.TargetBackendExecutorTest do
     assert diagnostic.message == "extension warning"
   end
 
-  defp execute(state, target \\ :desktop) do
-    builder = fn staging -> context(state, staging, target) end
+  defp execute(state, target \\ :desktop, builder \\ nil) do
+    builder = builder || fn staging -> context(state, staging, target) end
 
     TargetBackend.execute(state.admissions[target], target, builder,
       runner: state.runner,
