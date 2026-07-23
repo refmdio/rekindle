@@ -2,7 +2,9 @@ defmodule Rekindle.Toolchain.Web do
   @moduledoc false
 
   alias Rekindle.CanonicalValue
+  alias Rekindle.SealedArtifact.Compatibility
   alias Rekindle.SealedArtifact.Identity
+  alias Rekindle.SealedArtifact.Producer
   alias Rekindle.SealedArtifact.WebMemberMetadata
   alias Rekindle.Toolchain.RootAuthority
 
@@ -18,7 +20,6 @@ defmodule Rekindle.Toolchain.Web do
   @max_path_bytes 4_096
   @application_id_pattern ~r/\A[a-z][a-z0-9_-]{0,127}\z/
   @backend_id_pattern ~r/\A[a-z][a-z0-9_.-]{0,127}\z/
-  @gpui_revision_pattern ~r/\A[0-9a-f]{40,64}\z/
   @bootstrap_template """
   const BRIDGE_KEY = "__REKINDLE_RUNTIME_V1__";
   const STARTUP_TIMEOUT_MS = 15000;
@@ -497,7 +498,7 @@ defmodule Rekindle.Toolchain.Web do
       base["target"] == "web" and
       valid_manifest_build?(base["build"]) and
       valid_web_producer?(base["producer"], producer_kinds) and
-      base["host_requirements"] == %{"secure_context" => true, "webgpu" => true} and
+      Compatibility.host_requirements?(base["host_requirements"], :web) and
       relative_strings_sorted_unique?(base["hot_styles"], true)
   end
 
@@ -527,19 +528,7 @@ defmodule Rekindle.Toolchain.Web do
   defp cargo_identifier?(_value), do: false
 
   defp valid_web_producer?(%{"kind" => "canonical_web"} = producer, producer_kinds) do
-    "canonical_web" in producer_kinds and
-      exact?(
-        producer,
-        ~w[kind rustc cargo rust_target wasm_bindgen gpui_revision helper_version helper_protocol compatibility_tuple_id]
-      ) and
-      producer["helper_protocol"] == 1 and
-      Enum.all?(~w[rustc cargo], fn key ->
-        manifest_string?(producer[key])
-      end) and
-      cargo_identifier?(producer["rust_target"]) and
-      valid_gpui_revision?(producer["gpui_revision"]) and
-      digest?(producer["compatibility_tuple_id"]) and
-      valid_semver?(producer["wasm_bindgen"]) and valid_semver?(producer["helper_version"])
+    "canonical_web" in producer_kinds and match?({:ok, _}, Producer.new(producer, :web))
   end
 
   defp valid_web_producer?(%{"kind" => "extension"} = producer, producer_kinds) do
@@ -558,9 +547,6 @@ defmodule Rekindle.Toolchain.Web do
 
   defp valid_semver?(_value), do: false
 
-  defp valid_gpui_revision?(value),
-    do: is_binary(value) and Regex.match?(@gpui_revision_pattern, value)
-
   defp valid_application_id?(value),
     do: is_binary(value) and Regex.match?(@application_id_pattern, value)
 
@@ -577,8 +563,6 @@ defmodule Rekindle.Toolchain.Web do
       String.normalize(value, :nfc) == value and
       not String.match?(value, ~r/[\x00-\x1F\x7F]/u)
   end
-
-  defp manifest_string?(_value), do: false
 
   defp relative_strings_sorted_unique?(values, allow_empty?, validator \\ &relative?/1) do
     is_list(values) and (allow_empty? or values != []) and values == Enum.sort(values) and

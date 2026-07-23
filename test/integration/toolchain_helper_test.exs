@@ -672,6 +672,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       %{hello | "expected" => nil},
       update_in(hello, ["expected"], &Map.delete(&1, "helper_version")),
       put_in(hello, ["expected", "extra"], 1),
+      put_in(hello, ["expected", "v"], 2),
       put_in(hello, ["expected", "toolframe"], "1"),
       %{hello | "host" => nil},
       update_in(hello, ["host"], &Map.delete(&1, "arch")),
@@ -684,7 +685,11 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     mismatch_hellos = [
       {%{hello | "mode" => "exec-v1"}, "protocol_mismatch"},
       {put_in(hello, ["expected", "toolframe"], 2), "protocol_mismatch"},
+      {put_in(hello, ["expected", "exec_protocol"], 2), "protocol_mismatch"},
+      {put_in(hello, ["expected", "web_protocol"], 2), "protocol_mismatch"},
       {put_in(hello, ["expected", "wasm_bindgen_schema"], "0.0.0"), "schema_mismatch"},
+      {put_in(hello, ["expected", "web_manifest"], 1), "schema_mismatch"},
+      {put_in(hello, ["expected", "native_manifest"], 1), "schema_mismatch"},
       {put_in(hello, ["expected", "helper_version"], "9.9.9"), "version_mismatch"},
       {put_in(hello, ["host", "arch"], "other"), "host_mismatch"},
       {put_in(hello, ["host", "target_triple"], "other"), "host_mismatch"}
@@ -1233,16 +1238,21 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       {"producer Unicode target", &put_in(&1, ["producer", "rust_target"], "é")},
       {"producer target bound",
        &put_in(&1, ["producer", "rust_target"], String.duplicate("a", 129))},
-      {"producer wasm-bindgen", &put_in(&1, ["producer", "wasm_bindgen"], "0.02.1")},
-      {"producer GPUI revision", &put_in(&1, ["producer", "gpui_revision"], "")},
-      {"producer short GPUI revision",
-       &put_in(&1, ["producer", "gpui_revision"], String.duplicate("b", 39))},
-      {"producer uppercase GPUI revision",
-       &put_in(&1, ["producer", "gpui_revision"], String.duplicate("B", 40))},
-      {"producer long GPUI revision",
-       &put_in(&1, ["producer", "gpui_revision"], String.duplicate("b", 65))},
-      {"producer helper version", &put_in(&1, ["producer", "helper_version"], "v0.1.0")},
-      {"producer helper protocol", &put_in(&1, ["producer", "helper_protocol"], 2)},
+      {"producer wasm-bindgen version",
+       &put_in(&1, ["producer", "wasm_bindgen", "version"], "0.2.120")},
+      {"producer wasm-bindgen name", &put_in(&1, ["producer", "wasm_bindgen", "name"], "other")},
+      {"producer wasm-bindgen content",
+       &put_in(&1, ["producer", "wasm_bindgen", "content_digest"], String.duplicate("b", 64))},
+      {"producer integration target",
+       &put_in(&1, ["producer", "integration_identity", "target"], "desktop")},
+      {"producer integration digest",
+       &put_in(
+         &1,
+         ["producer", "integration_identity", "identity_digest"],
+         String.duplicate("b", 64)
+       )},
+      {"producer helper protocol",
+       &put_in(&1, ["producer", "helper_protocol", "web_protocol"], 2)},
       {"producer tuple", &put_in(&1, ["producer", "compatibility_tuple_id"], "")},
       {"producer short tuple",
        &put_in(&1, ["producer", "compatibility_tuple_id"], String.duplicate("c", 63))},
@@ -1285,8 +1295,11 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
          "backend_version" => String.duplicate("a", 129),
          "options_digest" => String.duplicate("c", 64)
        })},
-      {"secure-context requirement", &put_in(&1, ["host_requirements", "secure_context"], false)},
-      {"WebGPU requirement", &put_in(&1, ["host_requirements", "webgpu"], false)},
+      {"host target", &put_in(&1, ["host_requirements", "target"], "desktop")},
+      {"host descriptor divergence",
+       &put_in(&1, ["host_requirements", "host_descriptor", "kind"], "mount_element")},
+      {"graphics requirement divergence",
+       &put_in(&1, ["host_requirements", "graphics_requirement", "secure_context"], false)},
       {"host-requirement extra field",
        &update_in(&1["host_requirements"], fn host -> Map.put(host, "extra", true) end)},
       {"entry path", &Map.put(&1, "entry", "../entry.js")},
@@ -2050,18 +2063,8 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
         binary: "sample_app-web",
         features: ["web"]
       },
-      producer: %{
-        kind: "canonical_web",
-        rustc: "1.95.0",
-        cargo: "1.95.0",
-        rust_target: "wasm32-unknown-unknown",
-        gpui_revision: String.duplicate("b", 40),
-        helper_version: "0.1.0",
-        helper_protocol: 1,
-        wasm_bindgen: "0.2.121",
-        compatibility_tuple_id: String.duplicate("c", 64)
-      },
-      host_requirements: %{secure_context: true, webgpu: true},
+      producer: Rekindle.ManifestFixture.producer(:web),
+      host_requirements: Rekindle.ManifestFixture.host_requirements(:web),
       hot_styles: hot_styles
     }
   end
@@ -2173,12 +2176,13 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     assert {:ok, %{"type" => "operation_error"}, []} = Helper.run_web(helper, request, state),
            label
 
-    assert {:error, :manifest_changed} =
-             Web.revalidate_manifest(root, %{
-               "artifact_id" => manifest["artifact_id"],
-               "manifest_digest" => manifest["manifest_digest"]
-             }),
-           label
+    result =
+      Web.revalidate_manifest(root, %{
+        "artifact_id" => manifest["artifact_id"],
+        "manifest_digest" => manifest["manifest_digest"]
+      })
+
+    assert result == {:error, :manifest_changed}, label
   end
 
   defp assert_forged_manifest_success_rejected(root, output, manifest) do

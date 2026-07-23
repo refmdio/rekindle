@@ -25,7 +25,13 @@ defmodule Rekindle.ArtifactStoreTest do
 
     artifact = artifact_path(root, :web, descriptor.artifact_id)
     assert Enum.sort(File.ls!(artifact)) == ["members", "rekindle-web-manifest-v2.json"]
-    assert Enum.sort(File.ls!(Path.join(artifact, "members"))) == ["entry.js"]
+
+    assert Enum.sort(File.ls!(Path.join(artifact, "members"))) == [
+             "app.js",
+             "app_bg.wasm",
+             "entry.js"
+           ]
+
     assert mode(artifact) == 0o500
     assert mode(Path.join(artifact, "members")) == 0o500
     assert mode(Path.join(artifact, "members/entry.js")) == 0o400
@@ -329,6 +335,7 @@ defmodule Rekindle.ArtifactStoreTest do
         put_in(manifest, ["members", Access.at(0), "sha256"], String.duplicate("2", 64))
       end,
       fn manifest -> put_in(manifest, ["members", Access.at(0), "size"], 999) end,
+      fn manifest -> put_in(manifest, ["producer", "helper_protocol"], 1) end,
       fn manifest -> Map.put(manifest, "artifact_id", wrong_artifact_id(:web, manifest)) end
     ]
 
@@ -340,6 +347,8 @@ defmodule Rekindle.ArtifactStoreTest do
       end,
       fn manifest -> put_in(manifest, ["executable", "size"], 999) end,
       fn manifest -> put_in(manifest, ["executable", "mode"], "regular") end,
+      fn manifest -> Map.delete(manifest, "host_requirements") end,
+      fn manifest -> put_in(manifest, ["producer", "helper_protocol"], 1) end,
       fn manifest -> Map.put(manifest, "artifact_id", wrong_artifact_id(:desktop, manifest)) end
     ]
 
@@ -1942,27 +1951,67 @@ defmodule Rekindle.ArtifactStoreTest do
 
   defp stage_web(store, content, source_revision \\ 1) do
     {:ok, staging} = ArtifactStore.allocate(store, :web)
-    member_path = Path.join(staging.path, "members/entry.js")
-    File.mkdir_p!(Path.dirname(member_path))
-    File.write!(member_path, content)
-    {:ok, member_digest} = Filesystem.sha256(member_path)
+
+    files = [
+      {"app.js", "export const ready = true"},
+      {"app_bg.wasm", <<0, 97, 115, 109>>},
+      {"entry.js", content}
+    ]
+
+    members =
+      Enum.map(files, fn {path, bytes} ->
+        member_path = Path.join([staging.path, "members", path])
+        File.mkdir_p!(Path.dirname(member_path))
+        File.write!(member_path, bytes)
+        {:ok, member_digest} = Filesystem.sha256(member_path)
+
+        role =
+          case path do
+            "entry.js" -> "bootstrap"
+            "app.js" -> "javascript"
+            "app_bg.wasm" -> "wasm"
+          end
+
+        {:ok, mime, cache} = Rekindle.SealedArtifact.WebMemberMetadata.resolve(role, path)
+
+        %{
+          "path" => path,
+          "role" => role,
+          "sha256" => member_digest,
+          "size" => byte_size(bytes),
+          "mime" => mime,
+          "cache" => cache,
+          "source_map" => nil
+        }
+      end)
+      |> Enum.sort_by(& &1["path"])
+
     build_key = digest("web-build")
-
-    identity_member = %{
-      "path" => "entry.js",
-      "role" => "javascript",
-      "sha256" => member_digest,
-      "size" => byte_size(content)
-    }
-
-    artifact_id = artifact_id(:web, build_key, [identity_member])
+    identity_members = Enum.map(members, &Map.take(&1, ~w[path role sha256 size]))
+    artifact_id = artifact_id(:web, build_key, identity_members)
 
     manifest_base = %{
       "contract_version" => 2,
+      "rekindle_version" => "0.1.0",
+      "application_id" => "sample_app",
       "target" => "web",
       "artifact_id" => artifact_id,
-      "build" => %{"build_key" => build_key},
-      "members" => [identity_member]
+      "build" => %{
+        "build_key" => build_key,
+        "profile" => "dev",
+        "package" => "sample_app_ui",
+        "binary" => "sample_app-web",
+        "features" => ["web"]
+      },
+      "producer" => Rekindle.ManifestFixture.producer(:web),
+      "host_requirements" => Rekindle.ManifestFixture.host_requirements(:web),
+      "entry" => "entry.js",
+      "hot_styles" => [],
+      "members" => members,
+      "edges" => [
+        %{"from" => "app.js", "to" => "app_bg.wasm", "kind" => "wasm_url"},
+        %{"from" => "entry.js", "to" => "app.js", "kind" => "dynamic_import"}
+      ]
     }
 
     manifest_digest = manifest_digest(:web, manifest_base)
@@ -1979,14 +2028,15 @@ defmodule Rekindle.ArtifactStoreTest do
       manifest_digest: manifest_digest,
       profile: "dev",
       source_revision: source_revision,
-      members: [
-        %Member{
-          path: "members/entry.js",
-          sha256: member_digest,
-          size: byte_size(content),
-          mode: :regular
-        }
-      ]
+      members:
+        Enum.map(members, fn member ->
+          %Member{
+            path: "members/" <> member["path"],
+            sha256: member["sha256"],
+            size: member["size"],
+            mode: :regular
+          }
+        end)
     }
 
     {staging, descriptor}
@@ -2033,10 +2083,26 @@ defmodule Rekindle.ArtifactStoreTest do
 
     manifest_base = %{
       "contract_version" => 2,
+      "rekindle_version" => "0.1.0",
+      "application_id" => "sample_app",
       "target" => "desktop",
       "artifact_id" => artifact_id,
-      "build" => %{"build_key" => build_key},
-      "executable" => identity_executable
+      "build" => %{
+        "build_key" => build_key,
+        "profile" => "release",
+        "package" => "sample_app_ui",
+        "binary" => "sample_app-desktop",
+        "features" => ["desktop"]
+      },
+      "platform" => %{
+        "os" => "linux",
+        "arch" => "x86_64",
+        "target_triple" => "x86_64-unknown-linux-gnu"
+      },
+      "producer" => Rekindle.ManifestFixture.producer(:desktop),
+      "host_requirements" => Rekindle.ManifestFixture.host_requirements(:desktop),
+      "executable" => identity_executable,
+      "runtime" => %{"readiness" => "startup_grace", "handoff" => "disabled"}
     }
 
     manifest_digest = manifest_digest(:desktop, manifest_base)

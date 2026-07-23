@@ -733,6 +733,7 @@ defmodule Rekindle.ArtifactStore do
          true <- Map.keys(value) |> Enum.all?(&is_binary/1),
          true <- value["contract_version"] == 2,
          true <- value["target"] == Atom.to_string(target),
+         :ok <- validate_manifest_schema(target, value),
          {:ok, artifact_id} <- Identity.derive(target, value),
          true <- artifact_id == value["artifact_id"],
          true <- value["artifact_id"] == descriptor.artifact_id,
@@ -747,6 +748,12 @@ defmodule Rekindle.ArtifactStore do
   rescue
     _exception -> {:error, invalid(:artifact, :manifest_invalid, "Artifact manifest is invalid")}
   end
+
+  defp validate_manifest_schema(:web, manifest),
+    do: Rekindle.SealedArtifact.Web.validate_manifest(manifest)
+
+  defp validate_manifest_schema(:desktop, manifest),
+    do: Rekindle.SealedArtifact.Desktop.validate_manifest(manifest)
 
   defp seal_tree(root, descriptor) do
     files = [descriptor.manifest_path | Enum.map(descriptor.members, & &1.path)]

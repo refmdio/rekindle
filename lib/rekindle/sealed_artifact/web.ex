@@ -2,7 +2,7 @@ defmodule Rekindle.SealedArtifact.Web do
   @moduledoc false
 
   alias Rekindle.GenerationRef
-  alias Rekindle.SealedArtifact.Validation
+  alias Rekindle.SealedArtifact.{Compatibility, Producer, Validation}
   alias Rekindle.SealedArtifact.WebMemberMetadata
 
   @fields [:generation, :source_revision, :manifest, :producer, :seal_result]
@@ -11,7 +11,6 @@ defmodule Rekindle.SealedArtifact.Web do
 
   @root_keys ~w[contract_version rekindle_version application_id target artifact_id build producer host_requirements entry hot_styles members edges manifest_digest]
   @build_keys ~w[build_key profile package binary features]
-  @host_keys ~w[secure_context webgpu]
   @member_keys ~w[path role sha256 size mime cache source_map]
   @edge_keys ~w[from to kind]
   @roles ~w[bootstrap javascript wasm css asset source_map]
@@ -59,11 +58,27 @@ defmodule Rekindle.SealedArtifact.Web do
     _ -> invalid()
   end
 
+  @doc false
+  @spec validate_manifest(map()) :: :ok | {:error, Rekindle.Failure.t()}
+  def validate_manifest(manifest) do
+    with true <- valid_manifest?(manifest),
+         {:ok, _producer} <- Producer.new(manifest["producer"], :web) do
+      :ok
+    else
+      {:error, _} = error -> error
+      _ -> invalid()
+    end
+  rescue
+    _ -> invalid()
+  end
+
   defp valid_manifest?(manifest) do
-    Validation.safe_text?(manifest["rekindle_version"], 128) and
+    Validation.exact?(manifest, @root_keys) and manifest["contract_version"] == 2 and
+      manifest["target"] == "web" and Validation.digest?(manifest["artifact_id"]) and
+      Validation.digest?(manifest["manifest_digest"]) and
+      Validation.safe_text?(manifest["rekindle_version"], 128) and
       Validation.safe_text?(manifest["application_id"], 256) and valid_build?(manifest["build"]) and
-      Validation.exact?(manifest["host_requirements"], @host_keys) and
-      manifest["host_requirements"] == %{"secure_context" => true, "webgpu" => true} and
+      Compatibility.host_requirements?(manifest["host_requirements"], :web) and
       Validation.relative?(manifest["entry"]) and valid_paths?(manifest["hot_styles"]) and
       valid_members?(manifest["members"]) and valid_edges?(manifest["edges"]) and
       complete_closure?(manifest)

@@ -1,5 +1,148 @@
 ExUnit.start()
 
+defmodule Rekindle.ManifestFixture do
+  alias Rekindle.{CanonicalValue, Toolchain.Helper}
+
+  @revision "18f35ffac2da72ccdfb0e1bf756218fa1995162b"
+
+  def integration_identity(target) when target in [:web, :desktop] do
+    identity = %{
+      "v" => 2,
+      "id" => "gpui",
+      "contract_version" => 1,
+      "adapter" => %{"crate" => "rekindle-gpui", "version" => "0.1.0"},
+      "generated_profile" => "gpui-v1",
+      "target" => Atom.to_string(target),
+      "capability" => capability(target)
+    }
+
+    Map.put(identity, "identity_digest", identity_digest(identity))
+  end
+
+  def host_requirements(target) do
+    identity = integration_identity(target)
+
+    case target do
+      :web ->
+        %{
+          "v" => 1,
+          "target" => "web",
+          "integration_identity" => identity,
+          "host_descriptor" => identity["capability"]["host_descriptor"],
+          "graphics_requirement" => identity["capability"]["graphics_requirement"]
+        }
+
+      :desktop ->
+        %{
+          "v" => 1,
+          "target" => "desktop",
+          "integration_identity" => identity,
+          "host_descriptor" => nil,
+          "graphics_requirement" => nil
+        }
+    end
+  end
+
+  def producer(:web) do
+    %{
+      "kind" => "canonical_web",
+      "rustc" => "1.95.0",
+      "cargo" => "1.95.0",
+      "rust_target" => "wasm32-unknown-unknown",
+      "wasm_bindgen" => %{
+        "name" => "wasm-bindgen",
+        "version" => "0.2.121",
+        "content_digest" => nil
+      },
+      "integration_identity" => integration_identity(:web),
+      "helper_protocol" => Helper.compatibility(),
+      "compatibility_tuple_id" => String.duplicate("c", 64)
+    }
+  end
+
+  def producer(:desktop) do
+    %{
+      "kind" => "canonical_desktop",
+      "rustc" => "1.95.0",
+      "cargo" => "1.95.0",
+      "rust_target" => "x86_64-unknown-linux-gnu",
+      "integration_identity" => integration_identity(:desktop),
+      "helper_protocol" => Helper.compatibility(),
+      "compatibility_tuple_id" => String.duplicate("c", 64)
+    }
+  end
+
+  defp capability(:web) do
+    %{
+      "support_level" => "experimental",
+      "rust_target" => "wasm32-unknown-unknown",
+      "adapter_features" => ["web"],
+      "dependencies" => [dependency("gpui", []), dependency("gpui_platform", [])],
+      "host_descriptor" => %{"v" => 1, "kind" => "body_owned"},
+      "graphics_requirement" => %{
+        "v" => 2,
+        "secure_context" => true,
+        "any_of" => [
+          %{
+            "api" => "webgpu",
+            "request" => %{
+              "power_preference" => "high-performance",
+              "force_fallback_adapter" => false,
+              "required_features" => %{
+                "mode" => "if_adapter_supports",
+                "names" => ["dual-source-blending"]
+              },
+              "required_limits" => %{
+                "profile" => "downlevel-defaults",
+                "resolution" => "adapter",
+                "alignment" => "adapter"
+              }
+            },
+            "adapter_validation" => %{
+              "owner" => "integration_adapter",
+              "profile" => "gpui-web-18f35ff-v1"
+            }
+          }
+        ]
+      }
+    }
+  end
+
+  defp capability(:desktop) do
+    %{
+      "support_level" => "qualified",
+      "hosts" => [
+        %{"os" => "linux", "arch" => "x86_64"},
+        %{"os" => "macos", "arch" => "aarch64"}
+      ],
+      "adapter_features" => ["desktop"],
+      "dependencies" => [dependency("gpui", []), dependency("gpui_platform", ["wayland", "x11"])]
+    }
+  end
+
+  defp dependency(crate, features) do
+    %{
+      "scope" => "normal",
+      "crate" => crate,
+      "source" => %{
+        "kind" => "git",
+        "url" => "https://github.com/zed-industries/zed",
+        "revision" => @revision
+      },
+      "default_features" => false,
+      "features" => features
+    }
+  end
+
+  defp identity_digest(identity) do
+    :crypto.hash(
+      :sha256,
+      "rekindle-integration-identity-v2\0" <> CanonicalValue.encode!(identity)
+    )
+    |> Base.encode16(case: :lower)
+  end
+end
+
 defmodule Rekindle.CompatibilityFixture do
   alias Rekindle.Toolchain.{CompatibilityManifest, Helper}
 

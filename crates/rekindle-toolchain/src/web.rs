@@ -1381,7 +1381,7 @@ fn validate_manifest_base(value: &Value, allow_extension: bool) -> OpResult<()> 
         && valid_build(&value["build"])
         && (valid_canonical_web_producer(&value["producer"])
             || (allow_extension && valid_extension_producer(&value["producer"])))
-        && value["host_requirements"] == json!({"secure_context": true, "webgpu": true})
+        && valid_host_requirements(&value["host_requirements"])
         && relative_strings_sorted_unique(&value["hot_styles"])
     {
         Ok(())
@@ -1410,27 +1410,239 @@ fn valid_canonical_web_producer(producer: &Value) -> bool {
             "cargo",
             "rust_target",
             "wasm_bindgen",
-            "gpui_revision",
-            "helper_version",
+            "integration_identity",
             "helper_protocol",
             "compatibility_tuple_id",
         ],
     ) && producer["kind"] == "canonical_web"
-        && producer["helper_protocol"] == 1
         && ["rustc", "cargo"]
             .iter()
             .all(|key| producer[*key].as_str().is_some_and(valid_manifest_string))
         && producer["rust_target"]
             .as_str()
             .is_some_and(valid_cargo_identifier)
-        && producer["gpui_revision"]
-            .as_str()
-            .is_some_and(valid_gpui_revision)
         && digest(producer["compatibility_tuple_id"].as_str())
-        && producer["wasm_bindgen"].as_str().is_some_and(valid_semver)
-        && producer["helper_version"]
+        && valid_tool_identity(&producer["wasm_bindgen"])
+        && producer["helper_protocol"] == crate::compatibility_value()
+        && valid_integration_identity(&producer["integration_identity"], "web")
+}
+
+fn valid_tool_identity(tool: &Value) -> bool {
+    frame::exact_keys(tool, &["name", "version", "content_digest"])
+        && tool["name"] == "wasm-bindgen"
+        && tool["version"] == crate::WASM_BINDGEN_SCHEMA
+        && tool["content_digest"].is_null()
+}
+
+fn valid_host_requirements(requirements: &Value) -> bool {
+    frame::exact_keys(
+        requirements,
+        &[
+            "v",
+            "target",
+            "integration_identity",
+            "host_descriptor",
+            "graphics_requirement",
+        ],
+    ) && requirements["v"] == 1
+        && requirements["target"] == "web"
+        && valid_integration_identity(&requirements["integration_identity"], "web")
+        && requirements["host_descriptor"]
+            == requirements["integration_identity"]["capability"]["host_descriptor"]
+        && requirements["graphics_requirement"]
+            == requirements["integration_identity"]["capability"]["graphics_requirement"]
+}
+
+fn valid_integration_identity(identity: &Value, target: &str) -> bool {
+    if !frame::exact_keys(
+        identity,
+        &[
+            "v",
+            "identity_digest",
+            "id",
+            "contract_version",
+            "adapter",
+            "generated_profile",
+            "target",
+            "capability",
+        ],
+    ) || identity["v"] != 2
+        || identity["contract_version"] != 1
+        || identity["target"] != target
+        || !digest(identity["identity_digest"].as_str())
+        || !valid_integration_header(identity)
+        || !valid_web_capability(&identity["capability"])
+    {
+        return false;
+    }
+
+    let mut preimage = identity.clone();
+    preimage
+        .as_object_mut()
+        .expect("exact identity object")
+        .remove("identity_digest");
+    domain_digest("rekindle-integration-identity-v2\0", &preimage)
+        .is_ok_and(|digest| identity["identity_digest"] == digest)
+}
+
+fn valid_integration_header(identity: &Value) -> bool {
+    if !frame::exact_keys(&identity["adapter"], &["crate", "version"])
+        || !identity["adapter"]["version"]
             .as_str()
             .is_some_and(valid_semver)
+    {
+        return false;
+    }
+
+    matches!(
+        (
+            identity["id"].as_str(),
+            identity["adapter"]["crate"].as_str(),
+            identity["generated_profile"].as_str(),
+        ),
+        (Some("gpui"), Some("rekindle-gpui"), Some("gpui-v1"))
+            | (Some("egui"), Some("rekindle-egui"), Some("egui-v1"))
+            | (Some("slint"), Some("rekindle-slint"), Some("slint-v1"))
+    )
+}
+
+fn valid_web_capability(capability: &Value) -> bool {
+    frame::exact_keys(
+        capability,
+        &[
+            "support_level",
+            "rust_target",
+            "adapter_features",
+            "dependencies",
+            "host_descriptor",
+            "graphics_requirement",
+        ],
+    ) && matches!(
+        capability["support_level"].as_str(),
+        Some("qualified" | "experimental")
+    ) && capability["rust_target"] == "wasm32-unknown-unknown"
+        && sorted_strings(&capability["adapter_features"])
+        && valid_dependencies(&capability["dependencies"])
+        && valid_host_descriptor(&capability["host_descriptor"])
+        && valid_graphics_requirement(&capability["graphics_requirement"])
+}
+
+fn valid_dependencies(dependencies: &Value) -> bool {
+    let Some(dependencies) = dependencies.as_array() else {
+        return false;
+    };
+    if dependencies.is_empty() {
+        return false;
+    }
+    let crates = dependencies
+        .iter()
+        .filter_map(|dependency| dependency["crate"].as_str())
+        .collect::<Vec<_>>();
+    crates.len() == dependencies.len()
+        && crates.windows(2).all(|pair| pair[0] < pair[1])
+        && dependencies.iter().all(valid_dependency)
+}
+
+fn valid_dependency(dependency: &Value) -> bool {
+    frame::exact_keys(
+        dependency,
+        &["scope", "crate", "source", "default_features", "features"],
+    ) && matches!(dependency["scope"].as_str(), Some("normal" | "build"))
+        && dependency["crate"]
+            .as_str()
+            .is_some_and(valid_cargo_identifier)
+        && dependency["default_features"].is_boolean()
+        && sorted_strings(&dependency["features"])
+        && valid_dependency_source(&dependency["source"])
+}
+
+fn valid_dependency_source(source: &Value) -> bool {
+    match source["kind"].as_str() {
+        Some("git") => {
+            frame::exact_keys(source, &["kind", "url", "revision"])
+                && source["url"]
+                    .as_str()
+                    .is_some_and(|url| url.starts_with("https://"))
+                && source["revision"].as_str().is_some_and(|revision| {
+                    revision.len() == 40
+                        && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        && !revision.bytes().any(|byte| byte.is_ascii_uppercase())
+                })
+        }
+        Some("crates_io") => {
+            frame::exact_keys(source, &["kind", "version"])
+                && source["version"].as_str().is_some_and(valid_semver)
+        }
+        _ => false,
+    }
+}
+
+fn valid_host_descriptor(descriptor: &Value) -> bool {
+    match descriptor["kind"].as_str() {
+        Some("body_owned") => frame::exact_keys(descriptor, &["v", "kind"]) && descriptor["v"] == 1,
+        Some("mount_element") => {
+            frame::exact_keys(descriptor, &["v", "kind", "element", "id"])
+                && descriptor["v"] == 1
+                && descriptor["element"] == "canvas"
+                && matches!(descriptor["id"].as_str(), Some("rekindle-ui" | "canvas"))
+        }
+        _ => false,
+    }
+}
+
+fn valid_graphics_requirement(requirement: &Value) -> bool {
+    if !frame::exact_keys(requirement, &["v", "secure_context", "any_of"])
+        || requirement["v"] != 2
+        || requirement["secure_context"] != true
+    {
+        return false;
+    }
+    let Some(alternatives) = requirement["any_of"].as_array() else {
+        return false;
+    };
+    let order = |api: &str| match api {
+        "webgpu" => Some(0),
+        "webgl2" => Some(1),
+        "webgl1" => Some(2),
+        _ => None,
+    };
+    let indices = alternatives
+        .iter()
+        .filter_map(|alternative| alternative["api"].as_str().and_then(order))
+        .collect::<Vec<_>>();
+    !alternatives.is_empty()
+        && indices.len() == alternatives.len()
+        && indices.windows(2).all(|pair| pair[0] < pair[1])
+        && alternatives.iter().all(valid_graphics_alternative)
+}
+
+fn valid_graphics_alternative(alternative: &Value) -> bool {
+    match alternative["api"].as_str() {
+        Some("webgpu") => {
+            frame::exact_keys(alternative, &["api", "request", "adapter_validation"])
+                && alternative["request"]
+                    == json!({
+                        "power_preference": "high-performance",
+                        "force_fallback_adapter": false,
+                        "required_features": {
+                            "mode": "if_adapter_supports",
+                            "names": ["dual-source-blending"]
+                        },
+                        "required_limits": {
+                            "profile": "downlevel-defaults",
+                            "resolution": "adapter",
+                            "alignment": "adapter"
+                        }
+                    })
+                && frame::exact_keys(&alternative["adapter_validation"], &["owner", "profile"])
+                && alternative["adapter_validation"]["owner"] == "integration_adapter"
+                && alternative["adapter_validation"]["profile"]
+                    .as_str()
+                    .is_some_and(valid_manifest_string)
+        }
+        Some("webgl2" | "webgl1") => frame::exact_keys(alternative, &["api"]),
+        _ => false,
+    }
 }
 
 fn valid_extension_producer(producer: &Value) -> bool {
@@ -1878,15 +2090,21 @@ fn valid_feature_list(value: &Value) -> bool {
             .is_some_and(|total| total <= 8_192)
 }
 
-fn valid_cargo_identifier(value: &str) -> bool {
-    (1..=128).contains(&value.len()) && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+fn sorted_strings(value: &Value) -> bool {
+    value.as_array().is_some_and(|values| {
+        values.windows(2).all(|pair| {
+            pair[0]
+                .as_str()
+                .zip(pair[1].as_str())
+                .is_some_and(|(left, right)| left < right)
+        }) && values
+            .iter()
+            .all(|value| value.as_str().is_some_and(valid_cargo_identifier))
+    })
 }
 
-fn valid_gpui_revision(value: &str) -> bool {
-    (40..=64).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+fn valid_cargo_identifier(value: &str) -> bool {
+    (1..=128).contains(&value.len()) && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
 }
 
 fn case_fold_path(value: &str) -> String {
@@ -2086,10 +2304,6 @@ mod graph_tests {
         assert!(!valid_feature_list(&Value::Array(oversized)));
         assert!(!valid_cargo_identifier("é"));
         assert!(!valid_cargo_identifier(&"a".repeat(129)));
-        assert!(valid_gpui_revision(&"a".repeat(40)));
-        assert!(valid_gpui_revision(&"f".repeat(64)));
-        assert!(!valid_gpui_revision(&"a".repeat(39)));
-        assert!(!valid_gpui_revision(&"A".repeat(40)));
         assert!(digest(Some(&"a".repeat(64))));
         assert!(!digest(Some(&"A".repeat(64))));
     }

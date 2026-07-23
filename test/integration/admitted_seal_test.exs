@@ -691,7 +691,7 @@ defmodule Rekindle.AdmittedSealTest do
       "artifact_id" => artifact_id,
       "build" => build(profile),
       "producer" => producer,
-      "host_requirements" => %{"secure_context" => true, "webgpu" => true},
+      "host_requirements" => Rekindle.ManifestFixture.host_requirements(:web),
       "entry" => "entry.js",
       "hot_styles" => [],
       "members" => Enum.map(members, & &1.manifest),
@@ -716,6 +716,7 @@ defmodule Rekindle.AdmittedSealTest do
         "target_triple" => "x86_64-unknown-linux-gnu"
       },
       "producer" => producer,
+      "host_requirements" => Rekindle.ManifestFixture.host_requirements(:desktop),
       "executable" => member.manifest,
       "runtime" => %{"readiness" => "ipc_v1", "handoff" => "ipc_v1"}
     }
@@ -731,22 +732,7 @@ defmodule Rekindle.AdmittedSealTest do
     }
   end
 
-  defp producer(target, :canonical) do
-    common = %{
-      "rustc" => "1.95.0",
-      "cargo" => "1.95.0",
-      "rust_target" =>
-        if(target == :web, do: "wasm32-unknown-unknown", else: "x86_64-unknown-linux-gnu"),
-      "gpui_revision" => "18f35ffac2da72ccdfb0e1bf756218fa1995162b",
-      "helper_version" => "0.1.0",
-      "helper_protocol" => 1,
-      "compatibility_tuple_id" => String.duplicate("c", 64)
-    }
-
-    if target == :web,
-      do: Map.merge(common, %{"kind" => "canonical_web", "wasm_bindgen" => "0.2.100"}),
-      else: Map.put(common, "kind", "canonical_desktop")
-  end
+  defp producer(target, :canonical), do: Rekindle.ManifestFixture.producer(target)
 
   defp producer(_target, :extension) do
     %{

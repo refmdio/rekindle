@@ -2,6 +2,7 @@ defmodule Rekindle.SealedArtifact.Producer do
   @moduledoc false
 
   alias Rekindle.Failure
+  alias Rekindle.SealedArtifact.Compatibility
 
   @enforce_keys [:kind, :attributes]
   defstruct @enforce_keys
@@ -9,18 +10,18 @@ defmodule Rekindle.SealedArtifact.Producer do
   @type kind :: :canonical_web | :canonical_desktop | :extension
   @type t :: %__MODULE__{kind: kind(), attributes: map()}
 
-  @web_keys ~w[kind rustc cargo rust_target wasm_bindgen gpui_revision helper_version helper_protocol compatibility_tuple_id]
-  @desktop_keys ~w[kind rustc cargo rust_target gpui_revision helper_version helper_protocol compatibility_tuple_id]
+  @web_keys ~w[kind rustc cargo rust_target wasm_bindgen integration_identity helper_protocol compatibility_tuple_id]
+  @desktop_keys ~w[kind rustc cargo rust_target integration_identity helper_protocol compatibility_tuple_id]
   @extension_keys ~w[kind backend_id backend_version options_digest]
 
   @spec new(map(), Rekindle.target()) :: {:ok, t()} | {:error, Failure.t()}
   def new(attributes, target) when is_map(attributes) do
     case {target, attributes} do
       {:web, %{"kind" => "canonical_web"}} ->
-        canonical(attributes, @web_keys, :canonical_web)
+        canonical(attributes, @web_keys, :canonical_web, :web)
 
       {:desktop, %{"kind" => "canonical_desktop"}} ->
-        canonical(attributes, @desktop_keys, :canonical_desktop)
+        canonical(attributes, @desktop_keys, :canonical_desktop, :desktop)
 
       {target, %{"kind" => "extension"}} when target in [:web, :desktop] ->
         extension(attributes)
@@ -32,17 +33,22 @@ defmodule Rekindle.SealedArtifact.Producer do
 
   def new(_attributes, _target), do: invalid()
 
-  defp canonical(attributes, keys, kind) do
-    text_keys = keys -- ~w[kind helper_protocol compatibility_tuple_id]
-
-    if exact?(attributes, keys) and attributes["helper_protocol"] == 1 and
-         digest?(attributes["compatibility_tuple_id"]) and
-         Enum.all?(text_keys, &safe_text?(attributes[&1])) do
+  defp canonical(attributes, keys, kind, target) do
+    if exact?(attributes, keys) and digest?(attributes["compatibility_tuple_id"]) and
+         Enum.all?(~w[rustc cargo rust_target], &safe_ascii?(attributes[&1])) and
+         Compatibility.helper_protocol?(attributes["helper_protocol"]) and
+         Compatibility.integration_identity?(attributes["integration_identity"], target) and
+         valid_tool?(attributes, target) do
       {:ok, %__MODULE__{kind: kind, attributes: attributes}}
     else
       invalid()
     end
   end
+
+  defp valid_tool?(attributes, :web),
+    do: Compatibility.tool_identity?(attributes["wasm_bindgen"], "wasm-bindgen")
+
+  defp valid_tool?(_attributes, :desktop), do: true
 
   defp extension(attributes) do
     if exact?(attributes, @extension_keys) and safe_identity?(attributes["backend_id"]) and
