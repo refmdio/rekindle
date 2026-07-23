@@ -211,6 +211,29 @@ defmodule Rekindle.SetupTest do
     end
   end
 
+  test "maps malformed extension configuration to a sanitized contract failure" do
+    error =
+      Rekindle.ConfigError.new(
+        ["backend", "options"],
+        :invalid_value,
+        "private callback detail"
+      )
+
+    outcome =
+      Setup.run([],
+        load_project: fn -> {:error, {:invalid_configuration_errors, error}} end,
+        ensure_target: fn _, _ -> flunk("target installation must not start") end,
+        ensure_helper: fn _ -> flunk("helper installation must not start") end
+      )
+
+    assert outcome.exit_status == 3
+    assert {:error, %Failure{code: :contract_violation, diagnostics: []}} = outcome.value
+    assert outcome.stderr =~ "contract_violation"
+    assert outcome.stderr =~ ~r/correlation=[0-9a-f]{32}/
+    refute outcome.stderr =~ "private callback detail"
+    refute outcome.stderr =~ "extension configuration error contract violation"
+  end
+
   defp project(targets) do
     target_configs =
       Enum.map(targets, fn

@@ -35,6 +35,25 @@ defmodule Rekindle.ConfigTest do
     end
   end
 
+  defmodule MalformedBackend do
+    @behaviour Rekindle.TargetBackend
+
+    @impl true
+    def backend_id, do: "test.malformed"
+
+    @impl true
+    def backend_version, do: "1"
+
+    @impl true
+    def validate(_target, _options), do: {:error, :malformed}
+
+    @impl true
+    def plan(_context, _options), do: raise("unused")
+
+    @impl true
+    def finalize(_context, _options, _result), do: raise("unused")
+  end
+
   test "normalizes the closed canonical Web schema and every default" do
     assert {:ok, project} = Config.normalize(:demo_app, web_build(), web_dev())
 
@@ -198,6 +217,17 @@ defmodule Rekindle.ConfigTest do
       ),
       :config_invalid
     )
+  end
+
+  test "preserves malformed extension error identity through configuration admission" do
+    build =
+      put_web_target(web_build(), fn target ->
+        Keyword.put(target, :backend, module: MalformedBackend, options: %{})
+      end)
+
+    assert {:error,
+            {:invalid_configuration_errors, %Rekindle.ConfigError{path: ["backend", "options"]}}} =
+             Config.normalize(:demo_app, build, web_dev())
   end
 
   test "rejects every closed-record unknown or duplicate key" do

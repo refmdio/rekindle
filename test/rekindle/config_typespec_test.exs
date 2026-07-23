@@ -31,10 +31,10 @@ defmodule Rekindle.ConfigTypespecTest do
 
   test "Config public results reference the normalized project type" do
     assert compact_spec(Config, :load, 2) ==
-             "load(atom(),keyword())::{:ok,Rekindle.Config.Project.t()}|{:error,[Rekindle.ConfigError.t()]}"
+             "load(atom(),keyword())::{:ok,Rekindle.Config.Project.t()}|{:error,admission_error()}"
 
     assert compact_spec(Config, :normalize, 4) ==
-             "normalize(atom(),keyword()|nil,keyword(),keyword())::{:ok,Rekindle.Config.Project.t()}|{:error,[Rekindle.ConfigError.t()]}"
+             "normalize(atom(),keyword()|nil,keyword(),keyword())::{:ok,Rekindle.Config.Project.t()}|{:error,admission_error()}"
   end
 
   test "Dialyzer admits Config.load/2 and normalize/4 as Project-producing APIs" do

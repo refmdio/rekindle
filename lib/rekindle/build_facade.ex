@@ -59,6 +59,9 @@ defmodule Rekindle.BuildFacade do
       {:error, [%ConfigError{} = error | _errors]} ->
         {:error, config_failure(error)}
 
+      {:error, {:invalid_configuration_errors, %ConfigError{}}} ->
+        {:error, contract_failure("Extension configuration error contract violation")}
+
       {:error, _errors} ->
         {:error, failure(nil, :configuration, :config_invalid, "Configuration admission failed")}
 

@@ -46,6 +46,15 @@ defmodule Rekindle.ProjectSupervisor do
     end
   end
 
+  defp configuration_failure({:invalid_configuration_errors, %ConfigError{}}) do
+    Failure.new!(
+      target: nil,
+      stage: :internal,
+      code: :contract_violation,
+      message: "extension configuration error contract violation"
+    )
+  end
+
   defp configuration_failure(_errors), do: contract_failure()
 
   defp configuration_diagnostic(%ConfigError{} = error) do

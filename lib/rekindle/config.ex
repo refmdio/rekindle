@@ -69,7 +69,10 @@ defmodule Rekindle.Config do
   @toolchain_environment_names ~w[PATH HOME USER TMPDIR TMP TEMP CARGO_HOME RUSTUP_HOME RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER CC CXX AR LD PKG_CONFIG SDKROOT MACOSX_DEPLOYMENT_TARGET HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY FTP_PROXY http_proxy https_proxy all_proxy no_proxy ftp_proxy]
   @toolchain_environment_prefixes ~w[CC_ CXX_ AR_ LD_ PKG_CONFIG_ SSL_CERT_]
 
-  @spec load(atom(), keyword()) :: {:ok, Project.t()} | {:error, [ConfigError.t()]}
+  @type admission_error ::
+          [ConfigError.t()] | {:invalid_configuration_errors, ConfigError.t()}
+
+  @spec load(atom(), keyword()) :: {:ok, Project.t()} | {:error, admission_error()}
   def load(otp_app, options \\ []) when is_atom(otp_app) do
     build = Application.get_env(otp_app, :rekindle_build)
     dev = Application.get_env(otp_app, :rekindle_dev, [])
@@ -77,7 +80,7 @@ defmodule Rekindle.Config do
   end
 
   @spec normalize(atom(), keyword() | nil, keyword(), keyword()) ::
-          {:ok, Project.t()} | {:error, [ConfigError.t()]}
+          {:ok, Project.t()} | {:error, admission_error()}
   def normalize(otp_app, build, dev \\ [], options \\ [])
 
   def normalize(otp_app, build, dev, options)
@@ -101,6 +104,9 @@ defmodule Rekindle.Config do
          dev: dev
        }}
     else
+      {:error, {:invalid_configuration_errors, %ConfigError{}} = invalid} ->
+        {:error, invalid}
+
       {:error, %ConfigError{} = error} ->
         {:error, [error]}
 
@@ -241,6 +247,9 @@ defmodule Rekindle.Config do
            TargetBackend.admit(module, target, Keyword.get(backend, :options, %{})) do
       {:ok, {:external, admission}}
     else
+      {:error, {:invalid_configuration_errors, %ConfigError{}} = invalid} ->
+        {:error, invalid}
+
       {:error, errors} when is_list(errors) ->
         if bounded_proper_list?(errors) and Enum.all?(errors, &match?(%ConfigError{}, &1)),
           do: {:error, errors},

@@ -12,7 +12,7 @@ defmodule Rekindle.Setup do
   def run(argv, adapters) do
     Command.run("rekindle.setup", argv, @grammar, fn invocation ->
       with {:ok, selected} <- selected_target(invocation.options[:target]),
-           {:ok, project} <- invoke(adapters, :load_project, []),
+           {:ok, project} <- load_project(adapters),
            {:ok, targets} <- declared_targets(project, selected),
            {:ok, target_results, progress} <- install_targets(adapters, project, targets),
            {:ok, helper_result} <-
@@ -75,6 +75,16 @@ defmodule Rekindle.Setup do
     end)
   end
 
+  defp load_project(adapters) do
+    case invoke(adapters, :load_project, []) do
+      {:error, {:invalid_configuration_errors, %Rekindle.ConfigError{}}} ->
+        {:error, extension_contract_failure()}
+
+      result ->
+        result
+    end
+  end
+
   defp invoke(adapters, key, arguments) do
     case Keyword.fetch(adapters, key) do
       {:ok, function} when is_function(function, length(arguments)) -> apply(function, arguments)
@@ -84,5 +94,14 @@ defmodule Rekindle.Setup do
 
   defp internal(message) do
     Failure.new!(target: nil, stage: :internal, code: :contract_violation, message: message)
+  end
+
+  defp extension_contract_failure do
+    Failure.new!(
+      target: nil,
+      stage: :internal,
+      code: :contract_violation,
+      message: "extension configuration error contract violation"
+    )
   end
 end

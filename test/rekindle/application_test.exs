@@ -5,6 +5,25 @@ defmodule Rekindle.ApplicationTest do
 
   @otp_app :rekindle_lifecycle_test
 
+  defmodule MalformedBackend do
+    @behaviour Rekindle.TargetBackend
+
+    @impl true
+    def backend_id, do: "test.malformed"
+
+    @impl true
+    def backend_version, do: "1"
+
+    @impl true
+    def validate(_target, _options), do: {:error, :malformed}
+
+    @impl true
+    def plan(_context, _options), do: raise("unused")
+
+    @impl true
+    def finalize(_context, _options, _result), do: raise("unused")
+  end
+
   setup do
     previous_build = Application.get_env(@otp_app, :rekindle_build)
     previous_dev = Application.get_env(@otp_app, :rekindle_dev)
@@ -137,6 +156,33 @@ defmodule Rekindle.ApplicationTest do
              Rekindle.ProjectSupervisor.start_link(
                otp_app: @otp_app,
                name: unique_name(:missing)
+             )
+
+    assert :none = RuntimeState.snapshot(File.cwd!())
+  end
+
+  test "reports malformed extension configuration as a contract violation" do
+    build =
+      build_config()
+      |> Keyword.update!(:targets, fn targets ->
+        Keyword.update!(targets, :desktop, fn target ->
+          Keyword.put(target, :backend, module: MalformedBackend, options: %{})
+        end)
+      end)
+
+    Application.put_env(@otp_app, :rekindle_build, build)
+
+    assert {:error,
+            %Failure{
+              target: nil,
+              stage: :internal,
+              code: :contract_violation,
+              message: "extension configuration error contract violation",
+              diagnostics: []
+            }} =
+             Rekindle.ProjectSupervisor.start_link(
+               otp_app: @otp_app,
+               name: unique_name(:malformed_extension)
              )
 
     assert :none = RuntimeState.snapshot(File.cwd!())
