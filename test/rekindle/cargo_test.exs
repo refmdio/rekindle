@@ -71,6 +71,92 @@ defmodule Rekindle.CargoTest do
              Cargo.build(project, target, :dev)
   end
 
+  test "passes the configured Cargo selection and build arguments exactly", %{project: project} do
+    {cargo, arguments_file, _started_file} = fake_cargo(project, :artifact)
+
+    configured = %{
+      target(:web)
+      | package: "fixture_ui",
+        binary: "web",
+        features: ["canvas", "logging"],
+        profiles: %{dev: "fast", release: "shipping"}
+    }
+
+    assert {:ok, result} = Cargo.build(project, configured, :dev, cargo: cargo)
+    assert result.artifact == Path.join(project.root, "web.wasm")
+
+    assert File.read!(arguments_file) |> String.split("\n", trim: true) == [
+             "build",
+             "--manifest-path",
+             Path.join(project.client_root, "Cargo.toml"),
+             "--message-format=json-render-diagnostics",
+             "--package",
+             "fixture_ui",
+             "--bin",
+             "web",
+             "--profile",
+             "fast",
+             "--target",
+             "wasm32-unknown-unknown",
+             "--features",
+             "canvas,logging"
+           ]
+  end
+
+  test "rejects mismatched Cargo artifacts", %{project: project} do
+    {cargo, _arguments_file, _started_file} = fake_cargo(project, :mismatched_artifact)
+
+    assert {:error, %Cargo.Error{kind: :artifact_not_found}} =
+             Cargo.build(project, target(:desktop), :dev, cargo: cargo)
+  end
+
+  test "rejects ambiguous packages and binaries", %{project: project} do
+    package = cargo_package(project, "fixture_ui", "fixture_ui 0.1.0")
+    other = cargo_package(project, "other_ui", "other_ui 0.1.0")
+
+    metadata = %Cargo.Metadata{
+      packages: [package, other],
+      workspace_members: MapSet.new([package.id, other.id]),
+      target_directory: Path.join(project.client_root, "target")
+    }
+
+    assert {:error, %Cargo.Error{kind: :ambiguous_package}} =
+             Cargo.resolve(metadata, project, target(:desktop))
+
+    duplicate = %{package | targets: package.targets ++ package.targets}
+    metadata = %{metadata | packages: [duplicate], workspace_members: MapSet.new([package.id])}
+
+    assert {:error, %Cargo.Error{kind: :ambiguous_binary}} =
+             Cargo.resolve(metadata, project, target(:desktop))
+  end
+
+  test "maps Cargo build timeout and cancellation", %{project: project} do
+    {cargo, _arguments_file, _started_file} = fake_cargo(project, :wait)
+
+    assert {:error, %Cargo.Error{kind: :timeout}} =
+             Cargo.build(project, target(:desktop), :dev, cargo: cargo, timeout: 100)
+
+    {cargo, _arguments_file, started_file} = fake_cargo(project, :wait)
+    cancel_ref = make_ref()
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        send(parent, {:cargo_runner, self()})
+
+        Cargo.build(project, target(:desktop), :dev,
+          cargo: cargo,
+          cancel_ref: cancel_ref
+        )
+      end)
+
+    assert_receive {:cargo_runner, runner}
+    assert wait_for_file(started_file, 50)
+    send(runner, {:rekindle_cancel, cancel_ref})
+
+    assert {:error, %Cargo.Error{kind: :cancelled}} = Task.await(task)
+  end
+
   defp target(name) do
     %Config.Target{
       name: name,
@@ -85,6 +171,101 @@ defmodule Rekindle.CargoTest do
   defp rustup_path(tool) do
     {path, 0} = System.cmd("rustup", ["which", tool])
     String.trim(path)
+  end
+
+  defp fake_cargo(project, mode) do
+    path = Path.join(project.root, "fake-cargo-#{mode}")
+    arguments_file = path <> ".arguments"
+    started_file = path <> ".started"
+    File.rm(arguments_file)
+    File.rm(started_file)
+    package = cargo_package(project, "fixture_ui", "fixture_ui 0.1.0")
+
+    metadata =
+      Jason.encode!(%{
+        "packages" => [
+          %{
+            "id" => package.id,
+            "name" => package.name,
+            "manifest_path" => package.manifest_path,
+            "targets" => package.targets,
+            "dependencies" => [%{"name" => "gpui"}]
+          }
+        ],
+        "workspace_members" => [package.id],
+        "target_directory" => Path.join(project.client_root, "target")
+      })
+
+    artifact_target = if mode == :mismatched_artifact, do: "other", else: "web"
+
+    artifact =
+      Jason.encode!(%{
+        "reason" => "compiler-artifact",
+        "package_id" => package.id,
+        "target" => %{"name" => artifact_target, "kind" => ["bin"]},
+        "filenames" => [Path.join(project.root, "web.wasm")],
+        "executable" => Path.join(project.root, "desktop")
+      })
+
+    build =
+      case mode do
+        :wait ->
+          """
+          echo $$ > '#{started_file}'
+          exec /usr/bin/sleep 30
+          """
+
+        _ ->
+          "printf '%s\\n' '#{artifact}'"
+      end
+
+    File.write!(
+      path,
+      """
+      #!/bin/sh
+      if [ "$1" = "metadata" ]; then
+        printf '%s\\n' '#{metadata}'
+        exit 0
+      fi
+      printf '%s\\n' "$@" > '#{arguments_file}'
+      #{build}
+      """
+    )
+
+    File.chmod!(path, 0o755)
+    {path, arguments_file, started_file}
+  end
+
+  defp cargo_package(project, name, id) do
+    %{
+      id: id,
+      name: name,
+      manifest_path: Path.join(project.client_root, "Cargo.toml"),
+      targets: [
+        %{
+          "name" => "desktop",
+          "kind" => ["bin"],
+          "src_path" => Path.join(project.client_root, "src/bin/desktop.rs")
+        },
+        %{
+          "name" => "web",
+          "kind" => ["bin"],
+          "src_path" => Path.join(project.client_root, "src/bin/web.rs")
+        }
+      ],
+      dependencies: ["gpui"]
+    }
+  end
+
+  defp wait_for_file(_path, 0), do: false
+
+  defp wait_for_file(path, attempts) do
+    if File.exists?(path) do
+      true
+    else
+      Process.sleep(10)
+      wait_for_file(path, attempts - 1)
+    end
   end
 end
 
