@@ -111,21 +111,18 @@ defmodule Rekindle.Cargo do
   defp execute(project, target, profile, package, binary, options) do
     executable = Rekindle.Toolchain.cargo_path(options)
 
-    arguments =
-      [
-        "build",
-        "--manifest-path",
-        Path.join(project.client_root, "Cargo.toml"),
-        "--message-format=json-render-diagnostics",
-        "--package",
-        package.name,
-        "--bin",
-        binary,
-        "--profile",
-        Map.fetch!(target.profiles, profile)
-      ]
-      |> target_arguments(target.name)
-      |> feature_arguments(target.features)
+    base_arguments = [
+      "build",
+      "--manifest-path",
+      Path.join(project.client_root, "Cargo.toml"),
+      "--message-format=json-render-diagnostics",
+      "--package",
+      package.name,
+      "--bin",
+      binary,
+      "--profile",
+      Map.fetch!(target.profiles, profile)
+    ]
 
     process_options = [
       cd: project.client_root,
@@ -135,23 +132,37 @@ defmodule Rekindle.Cargo do
       env: Keyword.get(options, :env, [])
     ]
 
-    case Process.run(executable, arguments, process_options) do
-      {:ok, result} ->
-        {:ok, result}
+    with {:ok, arguments} <- target_arguments(base_arguments, target.name, options) do
+      arguments = feature_arguments(arguments, target.features)
 
-      {:error, :timeout} ->
-        error(:timeout, "cargo build timed out")
+      case Process.run(executable, arguments, process_options) do
+        {:ok, result} ->
+          {:ok, result}
 
-      {:error, :cancelled} ->
-        error(:cancelled, "cargo build was cancelled")
+        {:error, :timeout} ->
+          error(:timeout, "cargo build timed out")
 
-      {:error, {:start, reason}} ->
-        error(:start_failed, "cargo build could not start: #{Exception.message(reason)}")
+        {:error, :cancelled} ->
+          error(:cancelled, "cargo build was cancelled")
+
+        {:error, {:start, reason}} ->
+          error(:start_failed, "cargo build could not start: #{Exception.message(reason)}")
+      end
     end
   end
 
-  defp target_arguments(arguments, :web), do: arguments ++ ["--target", @web_target]
-  defp target_arguments(arguments, :desktop), do: arguments
+  defp target_arguments(arguments, :web, _options),
+    do: {:ok, arguments ++ ["--target", @web_target]}
+
+  defp target_arguments(arguments, :desktop, options) do
+    case Rekindle.Toolchain.host_target(options) do
+      {:ok, target} ->
+        {:ok, arguments ++ ["--target", target]}
+
+      {:error, error} ->
+        error(:host_target, Exception.message(error))
+    end
+  end
 
   defp feature_arguments(arguments, []), do: arguments
 

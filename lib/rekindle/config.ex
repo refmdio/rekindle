@@ -59,6 +59,15 @@ defmodule Rekindle.Config do
     end
   end
 
+  @doc false
+  @spec validate_client_root(Path.t()) :: :ok | {:error, Error.t()}
+  def validate_client_root(project_root) do
+    case project_path(Path.expand(project_root), "client") do
+      {:ok, _client_root} -> :ok
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
+
   defp parse(config) do
     with :ok <- keyword(config, "Rekindle configuration"),
          :ok <- unique_keys(config, "Rekindle configuration"),

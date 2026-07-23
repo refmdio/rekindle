@@ -15,7 +15,8 @@ if Code.ensure_loaded?(Igniter) do
       app = Application.app_name(igniter)
       {igniter, endpoint} = Igniter.Libs.Phoenix.select_endpoint(igniter)
 
-      with :ok <- endpoint_required(endpoint),
+      with :ok <- client_root_contained(),
+           :ok <- endpoint_required(endpoint),
            {:ok, requested} <- requested_selection(options),
            {:ok, existing} <- existing_selection(igniter, app),
            {:ok, selection, mode} <-
@@ -24,6 +25,13 @@ if Code.ensure_loaded?(Igniter) do
         install(igniter, app, endpoint, selection, mode)
       else
         {:error, message} -> Igniter.add_issue(igniter, message)
+      end
+    end
+
+    defp client_root_contained do
+      case Config.validate_client_root(File.cwd!()) do
+        :ok -> :ok
+        {:error, error} -> {:error, Exception.message(error)}
       end
     end
 

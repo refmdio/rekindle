@@ -62,11 +62,8 @@ if Code.ensure_loaded?(Igniter) do
             callback.(client_root, true)
 
           {:error, :enoent} ->
-            try do
-              callback.(client_root, false)
-            after
-              File.rm(lock)
-            end
+            {:error,
+             "Cargo.lock is required to adopt a live Cargo project; run cargo generate-lockfile --manifest-path client/Cargo.toml"}
 
           {:error, reason} ->
             {:error, "cannot inspect Cargo.lock: #{:file.format_error(reason)}"}
@@ -143,24 +140,9 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp host_platform do
-      rustc = System.find_executable("rustc") || "rustc"
-
-      case Process.run(rustc, ["-vV"],
-             cd: File.cwd!(),
-             timeout: 30_000,
-             output_limit: 16_000
-           ) do
-        {:ok, %{status: 0, output: output}} ->
-          case Regex.run(~r/^host:\s+(\S+)$/m, output) do
-            [_, platform] -> {:ok, platform}
-            _ -> {:error, "rustc did not report its host platform"}
-          end
-
-        {:ok, result} ->
-          {:error, "rustc host detection failed with status #{result.status}: #{result.output}"}
-
-        {:error, reason} ->
-          {:error, "rustc host detection failed: #{inspect(reason)}"}
+      case Rekindle.Toolchain.host_target() do
+        {:ok, platform} -> {:ok, platform}
+        {:error, error} -> {:error, Exception.message(error)}
       end
     end
 

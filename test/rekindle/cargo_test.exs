@@ -145,6 +145,17 @@ defmodule Rekindle.CargoTest do
            ]
   end
 
+  test "pins desktop builds to the detected host target", %{project: project} do
+    {cargo, arguments_file, _started_file, _metadata_cwd_file, _build_cwd_file} =
+      fake_cargo(project, :desktop_artifact)
+
+    assert {:ok, host} = Rekindle.Toolchain.host_target()
+    assert {:ok, _result} = Cargo.build(project, target(:desktop), :dev, cargo: cargo)
+
+    arguments = File.read!(arguments_file) |> String.split("\n", trim: true)
+    assert Enum.take(arguments, -2) == ["--target", host]
+  end
+
   test "rejects mismatched Cargo artifacts", %{project: project} do
     {cargo, _arguments_file, _started_file, _metadata_cwd_file, _build_cwd_file} =
       fake_cargo(project, :mismatched_artifact)
@@ -246,7 +257,12 @@ defmodule Rekindle.CargoTest do
         "target_directory" => Path.join(project.client_root, "target")
       })
 
-    artifact_target = if mode == :mismatched_artifact, do: "other", else: "web"
+    artifact_target =
+      case mode do
+        :mismatched_artifact -> "other"
+        :desktop_artifact -> "desktop"
+        _ -> "web"
+      end
 
     artifact =
       Jason.encode!(%{

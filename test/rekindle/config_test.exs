@@ -137,6 +137,15 @@ defmodule Rekindle.ConfigTest do
     assert project.public_dir == Path.join(root, "priv/static")
   end
 
+  test "rejects a client root linked outside the project" do
+    root = tmp_dir()
+    outside = tmp_dir()
+    File.ln_s!(outside, Path.join(root, "client"))
+
+    assert {:error, %Config.Error{kind: :invalid_path}} =
+             Config.validate_client_root(root)
+  end
+
   defp tmp_dir do
     path =
       Path.join(

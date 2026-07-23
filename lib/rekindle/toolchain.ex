@@ -29,6 +29,29 @@ defmodule Rekindle.Toolchain do
     Keyword.get(options, :rustup) || System.find_executable("rustup") || "rustup"
   end
 
+  @spec host_target(keyword()) :: {:ok, String.t()} | {:error, Error.t()}
+  def host_target(options \\ []) do
+    rustc = Keyword.get(options, :rustc) || System.find_executable("rustc") || "rustc"
+
+    case Process.run(rustc, ["-vV"],
+           cd: Keyword.get(options, :cd, File.cwd!()),
+           timeout: Keyword.get(options, :timeout, 30_000),
+           output_limit: 16_000
+         ) do
+      {:ok, %{status: 0, output: output}} ->
+        case Regex.run(~r/^host:\s+(\S+)$/m, output) do
+          [_, target] -> {:ok, target}
+          _ -> error(:invalid_rustc, "rustc did not report its host target")
+        end
+
+      {:ok, result} ->
+        error(:invalid_rustc, "rustc host detection failed", output: result.output)
+
+      {:error, reason} ->
+        process_error(:invalid_rustc, "rustc host detection", reason)
+    end
+  end
+
   @spec installed_rust_targets(keyword()) :: {:ok, [String.t()]} | {:error, Error.t()}
   def installed_rust_targets(options \\ []) do
     case Process.run(rustup_path(options), ["target", "list", "--installed"],

@@ -377,8 +377,20 @@ defmodule Rekindle.InstallTest do
 
     adopted =
       File.cd!(root, fn ->
-        result = install(original, integration: "gpui", targets: ["web"])
+        lockless = install(original, integration: "gpui", targets: ["web"])
+        assert Enum.any?(lockless.issues, &String.contains?(&1, "Cargo.lock is required"))
         refute File.exists?("client/Cargo.lock")
+
+        {_output, 0} =
+          System.cmd(
+            Rekindle.Toolchain.cargo_path(),
+            ["generate-lockfile", "--manifest-path", "client/Cargo.toml"],
+            stderr_to_stdout: true
+          )
+
+        lock = File.read!("client/Cargo.lock")
+        result = install(original, integration: "gpui", targets: ["web"])
+        assert File.read!("client/Cargo.lock") == lock
         result
       end)
 
