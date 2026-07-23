@@ -12,30 +12,23 @@ defmodule Rekindle.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       name: "Rekindle",
-      description: "Phoenix-native build system and development runtime for GPUI applications.",
+      description: "Mix-first build system and development runtime for Rust UI applications.",
       source_url: @source_url,
       package: package()
     ]
   end
 
   def application do
-    [extra_applications: [:crypto, :logger], mod: {Rekindle.Application, []}]
+    [extra_applications: [:logger]]
   end
 
-  defp deps do
-    [
-      {:jason, "~> 1.4"},
-      {:phoenix, "~> 1.8"},
-      {:phoenix_live_view, "~> 1.2"},
-      {:igniter, "~> 0.8.2", optional: true}
-    ]
-  end
+  defp deps, do: []
 
   defp package do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w[lib crates templates mix.exs README.md LICENSE]
+      files: ~w[lib mix.exs README.md LICENSE]
     ]
   end
 end

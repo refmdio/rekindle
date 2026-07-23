@@ -1,9 +1,0 @@
-defmodule Rekindle.ComponentCompileFixtures.MissingEndpoint do
-  use Phoenix.Component
-
-  def render(assigns) do
-    ~H"""
-    <Rekindle.Phoenix.Components.gpui_page otp_app={:fixture_app} />
-    """
-  end
-end
