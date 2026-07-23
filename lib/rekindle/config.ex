@@ -23,20 +23,22 @@ defmodule Rekindle.Config do
 
   @spec load(atom(), keyword()) :: {:ok, t()} | {:error, Error.t()}
   def load(otp_app, options \\ []) when is_atom(otp_app) do
-    root = options |> Keyword.get(:project_root, File.cwd!()) |> Path.expand()
+    configured_root = options |> Keyword.get(:project_root, File.cwd!()) |> Path.expand()
 
-    with {:ok, config} <- fetch(otp_app),
+    with {:ok, root} <- resolve_path(configured_root),
+         {:ok, config} <- fetch(otp_app),
          :ok <- keyword(config, "Rekindle configuration"),
          :ok <- unique_keys(config, "Rekindle configuration"),
          :ok <- known_keys(config, @config_keys, "Rekindle configuration"),
          {:ok, integration} <- integration(config),
          {:ok, targets} <- targets(config),
+         {:ok, client_root} <- project_path(root, "client"),
          {:ok, public_dir} <- project_path(root, Keyword.get(config, :public_dir, "priv/static")) do
       {:ok,
        %__MODULE__{
          otp_app: otp_app,
          root: root,
-         client_root: Path.join(root, "client"),
+         client_root: client_root,
          integration: integration,
          targets: targets,
          public_dir: public_dir
@@ -171,10 +173,13 @@ defmodule Rekindle.Config do
     if Path.type(relative) == :relative do
       expanded = Path.expand(relative, root)
 
-      if expanded == root or String.starts_with?(expanded, root <> "/") do
-        {:ok, expanded}
+      with true <- expanded == root or String.starts_with?(expanded, root <> "/"),
+           {:ok, resolved} <- resolve_path(expanded),
+           true <- resolved == root or String.starts_with?(resolved, root <> "/") do
+        {:ok, resolved}
       else
-        error(:invalid_path, "path must remain inside the project: #{inspect(relative)}")
+        false -> error(:invalid_path, "path must remain inside the project: #{inspect(relative)}")
+        {:error, %Error{} = error} -> {:error, error}
       end
     else
       error(:invalid_path, "path must be project-relative: #{inspect(relative)}")
@@ -187,6 +192,39 @@ defmodule Rekindle.Config do
         :invalid_path,
         "expected :public_dir to be a project-relative path, got: #{inspect(value)}"
       )
+
+  defp resolve_path(path), do: resolve_path(Path.split(Path.expand(path)), nil, 40)
+
+  defp resolve_path(_parts, _resolved, 0),
+    do: error(:invalid_path, "path contains too many symbolic links")
+
+  defp resolve_path([], resolved, _links), do: {:ok, resolved}
+
+  defp resolve_path([part | rest], nil, links),
+    do: resolve_path(rest, part, links)
+
+  defp resolve_path([part | rest], resolved, links) do
+    candidate = Path.join(resolved, part)
+
+    case File.read_link(candidate) do
+      {:ok, target} ->
+        target =
+          if Path.type(target) == :absolute,
+            do: target,
+            else: Path.expand(target, Path.dirname(candidate))
+
+        resolve_path(Path.split(target) ++ rest, nil, links - 1)
+
+      {:error, :einval} ->
+        resolve_path(rest, candidate, links)
+
+      {:error, :enoent} ->
+        {:ok, Path.join([candidate | rest])}
+
+      {:error, reason} ->
+        error(:invalid_path, "cannot resolve path #{inspect(candidate)}: #{inspect(reason)}")
+    end
+  end
 
   defp keyword(value, label) do
     if Keyword.keyword?(value) do

@@ -86,6 +86,47 @@ defmodule Rekindle.ConfigTest do
              Config.load(:rekindle_config_test)
   end
 
+  test "rejects configured and fixed paths that escape through symbolic links" do
+    root = tmp_dir()
+    outside = tmp_dir()
+
+    File.ln_s!(outside, Path.join(root, "static-link"))
+
+    Application.put_env(:rekindle_config_test, Rekindle,
+      integration: :gpui,
+      targets: [web: []],
+      public_dir: "static-link"
+    )
+
+    assert {:error, %Config.Error{kind: :invalid_path}} =
+             Config.load(:rekindle_config_test, project_root: root)
+
+    File.ln_s!(outside, Path.join(root, "client"))
+
+    Application.put_env(:rekindle_config_test, Rekindle,
+      integration: :gpui,
+      targets: [web: []]
+    )
+
+    assert {:error, %Config.Error{kind: :invalid_path}} =
+             Config.load(:rekindle_config_test, project_root: root)
+  end
+
+  test "resolves symbolic links that remain inside the project" do
+    root = tmp_dir()
+    File.mkdir_p!(Path.join(root, "priv/static"))
+    File.ln_s!("priv/static", Path.join(root, "static-link"))
+
+    Application.put_env(:rekindle_config_test, Rekindle,
+      integration: :gpui,
+      targets: [web: []],
+      public_dir: "static-link"
+    )
+
+    assert {:ok, project} = Config.load(:rekindle_config_test, project_root: root)
+    assert project.public_dir == Path.join(root, "priv/static")
+  end
+
   defp tmp_dir do
     path =
       Path.join(
