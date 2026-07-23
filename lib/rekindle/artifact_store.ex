@@ -64,6 +64,10 @@ defmodule Rekindle.ArtifactStore do
   def seal(%Staging{store: store} = staging, %Descriptor{} = descriptor, options \\ []),
     do: GenServer.call(store, {:seal, staging, descriptor, options}, :infinity)
 
+  @spec discard(Staging.t()) :: :ok | {:error, Failure.t()}
+  def discard(%Staging{store: store} = staging),
+    do: GenServer.call(store, {:discard, staging}, :infinity)
+
   @spec activate(GenServer.server(), GenerationRef.t(), non_neg_integer()) ::
           :ok | {:error, Failure.t()}
   @spec activate(GenServer.server(), GenerationRef.t(), non_neg_integer(), keyword()) ::
@@ -204,6 +208,23 @@ defmodule Rekindle.ArtifactStore do
 
       {:quarantine, %Failure{} = failure} ->
         {:reply, {:error, failure}, %{state | quarantined?: true}}
+    end
+  end
+
+  def handle_call({:discard, staging}, {owner, _tag}, state) do
+    case Map.get(state.attempts, staging.attempt_id) do
+      %{owner: ^owner, staging: ^staging} ->
+        case cleanup_attempt(state, staging.attempt_id) do
+          :ok -> {:reply, :ok, drop_attempt(state, staging.attempt_id, false)}
+          {:error, %Failure{} = failure} -> {:reply, {:error, failure}, state}
+        end
+
+      nil when staging.store == self() ->
+        {:reply, :ok, state}
+
+      _ ->
+        {:reply, {:error, invalid(:internal, :contract_violation, "Staging discard is invalid")},
+         state}
     end
   end
 

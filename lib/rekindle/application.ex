@@ -7,6 +7,7 @@ defmodule Rekindle.Application do
   def start(_type, _args) do
     children = [
       {Registry, keys: :unique, name: Rekindle.RuntimeRegistry},
+      Rekindle.QualifiedPath,
       Rekindle.Toolchain.RootAuthority
     ]
 

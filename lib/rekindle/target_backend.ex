@@ -17,6 +17,7 @@ defmodule Rekindle.TargetBackend do
   }
 
   alias Rekindle.TargetBackend.CallbackCoordinator
+  alias Rekindle.TargetBackend.Executor
 
   @id_pattern ~r/\A[a-z][a-z0-9_.-]{0,127}\z/
   @max_plan_entries 1_024
@@ -94,6 +95,17 @@ defmodule Rekindle.TargetBackend do
        )
      ]}
   end
+
+  @spec execute(
+          admission(),
+          Rekindle.target(),
+          (Rekindle.QualifiedPath.t() -> BackendContext.t()),
+          keyword()
+        ) ::
+          {:ok, Rekindle.AdmittedSeal.t(), ExecutionResult.t(), [Diagnostic.t()]}
+          | {:error, Failure.t()}
+  def execute(admission, target, context_builder, options),
+    do: Executor.execute(admission, target, context_builder, options)
 
   @doc false
   @spec validate_plan_result(term()) ::
