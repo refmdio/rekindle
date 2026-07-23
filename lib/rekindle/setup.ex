@@ -43,7 +43,7 @@ defmodule Rekindle.Setup do
   end
 
   defp declared_targets(project, :all),
-    do: {:ok, project.build.targets |> Map.keys() |> Enum.sort()}
+    do: {:ok, Enum.filter([:web, :desktop], &Map.has_key?(project.build.targets, &1))}
 
   defp declared_targets(project, target) do
     if Map.has_key?(project.build.targets, target) do

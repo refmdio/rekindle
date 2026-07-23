@@ -23,11 +23,35 @@ defmodule Rekindle.SetupTest do
       )
 
     assert outcome.exit_status == 0
-    assert_receive {:target, :desktop}
-    assert_receive {:target, :web}
-    assert_receive {:helper, false}
-    assert outcome.stdout =~ "desktop target verified"
-    assert outcome.stdout =~ "helper verified"
+    assert_receive first_effect
+    assert_receive second_effect
+    assert_receive third_effect
+
+    assert [first_effect, second_effect, third_effect] == [
+             {:target, :web},
+             {:target, :desktop},
+             {:helper, false}
+           ]
+
+    assert {:ok,
+            %{
+              targets: [
+                %{target: :web, status: :installed},
+                %{target: :desktop, status: :installed}
+              ],
+              helper: :installed,
+              source_build_helper: false
+            }} = outcome.value
+
+    lines = String.split(outcome.stdout, "\n", trim: true)
+
+    assert Enum.take(lines, 3) == [
+             "web target verified",
+             "desktop target verified",
+             "helper verified"
+           ]
+
+    assert length(lines) == 4
   end
 
   test "accepts every exact target and explicit source helper build" do
