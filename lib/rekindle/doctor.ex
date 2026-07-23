@@ -24,7 +24,7 @@ defmodule Rekindle.Doctor do
 
     checks =
       [passed(:configuration, "Rekindle configuration is valid")]
-      |> check_executable(:cargo, Toolchain.cargo_path(options))
+      |> check_cargo_readiness(options)
       |> check_executable(:rustup, Toolchain.rustup_path(options))
       |> check_rust_targets(targets, options)
       |> check_wasm_bindgen(targets, options)
@@ -32,6 +32,19 @@ defmodule Rekindle.Doctor do
       |> check_outputs(project, targets)
 
     finish(checks)
+  end
+
+  defp check_cargo_readiness(checks, options) do
+    check =
+      case Toolchain.cargo_version(options) do
+        {:ok, version} ->
+          passed(:cargo, "cargo #{version} found at #{Toolchain.cargo_path(options)}")
+
+        {:error, error} ->
+          failed(:cargo, Exception.message(error))
+      end
+
+    checks ++ [check]
   end
 
   defp check_executable(checks, name, path) do

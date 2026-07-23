@@ -164,6 +164,74 @@ defmodule Rekindle.ToolingIntegrationTest do
     assert_trace_cwds(context.root, "wasm-bindgen", Path.join(context.root, "client"))
   end
 
+  test "Doctor applies the Cargo readiness contract without mutating the project", context do
+    real_cargo = System.find_executable("cargo")
+
+    Application.put_env(:rekindle_tooling_test, Rekindle,
+      integration: :gpui,
+      targets: [desktop: []]
+    )
+
+    cases = [
+      {"failing", "#!/bin/sh\nexit 42\n"},
+      {"non-executable", "#!/bin/sh\necho 'cargo 1.2.3'\n"},
+      {"invalid-version",
+       """
+       #!/bin/sh
+       if [ "$1" = "--version" ]; then
+         echo "definitely-not-cargo"
+         exit 0
+       fi
+       exec "#{real_cargo}" "$@"
+       """},
+      {"oversized",
+       """
+       #!/bin/sh
+       if [ "$1" = "--version" ]; then
+         printf 'cargo 1.2.3 '
+         head -c 5000 /dev/zero | tr '\\000' x
+         exit 0
+       fi
+       exec "#{real_cargo}" "$@"
+       """}
+    ]
+
+    Enum.each(cases, fn {name, contents} ->
+      cargo = Path.join(context.root, "doctor-#{name}-cargo")
+      File.write!(cargo, contents)
+      File.chmod!(cargo, if(name == "non-executable", do: 0o644, else: 0o755))
+      before = snapshot(context.root)
+
+      assert {:error, checks} =
+               Doctor.run(:rekindle_tooling_test, Keyword.put(context.options, :cargo, cargo))
+
+      assert error?(checks, :cargo)
+      assert snapshot(context.root) == before
+    end)
+
+    valid = Path.join(context.root, "doctor-valid-cargo")
+
+    write_executable(
+      valid,
+      """
+      #!/bin/sh
+      if [ "$1" = "--version" ]; then
+        echo "cargo 1.88.0"
+        exit 0
+      fi
+      exec "#{real_cargo}" "$@"
+      """
+    )
+
+    before = snapshot(context.root)
+
+    assert {:ok, checks} =
+             Doctor.run(:rekindle_tooling_test, Keyword.put(context.options, :cargo, valid))
+
+    assert check!(checks, :cargo).message =~ "cargo 1.88.0"
+    assert snapshot(context.root) == before
+  end
+
   test "Doctor reports malformed configuration and missing prerequisites", context do
     Application.put_env(:rekindle_tooling_test, Rekindle,
       integration: :unknown,
@@ -274,6 +342,7 @@ defmodule Rekindle.ToolingIntegrationTest do
     previous_path = System.get_env("PATH")
     previous_home = System.get_env("HOME")
     previous_cache = System.get_env("XDG_CACHE_HOME")
+    real_cargo = System.find_executable("cargo")
 
     on_exit(fn ->
       restore_application_env(:rekindle, previous)
@@ -297,6 +366,24 @@ defmodule Rekindle.ToolingIntegrationTest do
 
       Mix.Task.reenable("rekindle.doctor")
       assert capture_io(fn -> Mix.Tasks.Rekindle.Doctor.run([]) end) =~ "Cargo metadata is valid"
+
+      write_executable(
+        Path.join(context.root, "cargo"),
+        """
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          echo "not a Cargo version"
+          exit 0
+        fi
+        exec "#{real_cargo}" "$@"
+        """
+      )
+
+      Mix.Task.reenable("rekindle.doctor")
+
+      assert_raise Mix.Error, "Rekindle Doctor found errors", fn ->
+        capture_io(fn -> Mix.Tasks.Rekindle.Doctor.run([]) end)
+      end
 
       Application.put_env(:rekindle, Rekindle,
         integration: :invalid,

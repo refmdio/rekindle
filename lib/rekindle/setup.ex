@@ -4,7 +4,6 @@ defmodule Rekindle.Setup do
   alias Rekindle.Config
   alias Rekindle.Toolchain
   alias Rekindle.Toolchain.Check
-  alias Rekindle.Toolchain.Process
 
   @rust_targets %{web: "wasm32-unknown-unknown", desktop: "x86_64-unknown-linux-gnu"}
 
@@ -46,11 +45,10 @@ defmodule Rekindle.Setup do
   end
 
   defp executables(options) do
-    cargo = Toolchain.cargo_path(options)
     rustup = Toolchain.rustup_path(options)
 
     checks = [
-      cargo_check(cargo, options),
+      cargo_check(options),
       executable_check(:rustup, rustup)
     ]
 
@@ -65,31 +63,13 @@ defmodule Rekindle.Setup do
     end
   end
 
-  defp cargo_check(path, options) do
-    if Path.type(path) == :absolute and File.regular?(path) do
-      case Process.run(path, ["--version"],
-             cd: Keyword.fetch!(options, :cd),
-             timeout: Keyword.get(options, :timeout, 30_000),
-             output_limit: 4_096,
-             env: Keyword.get(options, :process_env, [])
-           ) do
-        {:ok, %{status: 0, output: output, truncated?: false}} ->
-          case output |> String.trim() |> String.split(~r/\s+/, trim: true) do
-            ["cargo", version | _rest] ->
-              case Version.parse(version) do
-                {:ok, _version} -> passed(:cargo, "cargo found at #{path}")
-                :error -> failed(:cargo, "cargo at #{path} failed its readiness check")
-              end
+  defp cargo_check(options) do
+    case Toolchain.cargo_version(options) do
+      {:ok, version} ->
+        passed(:cargo, "cargo #{version} found at #{Toolchain.cargo_path(options)}")
 
-            _ ->
-              failed(:cargo, "cargo at #{path} failed its readiness check")
-          end
-
-        _ ->
-          failed(:cargo, "cargo at #{path} failed its readiness check")
-      end
-    else
-      failed(:cargo, "cargo executable was not found")
+      {:error, error} ->
+        failed(:cargo, Exception.message(error))
     end
   end
 

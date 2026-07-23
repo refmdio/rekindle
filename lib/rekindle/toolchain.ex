@@ -13,6 +13,17 @@ defmodule Rekindle.Toolchain do
     Keyword.get(options, :cargo) || System.find_executable("cargo") || "cargo"
   end
 
+  @spec cargo_version(keyword()) :: {:ok, String.t()} | {:error, Error.t()}
+  def cargo_version(options \\ []) do
+    path = cargo_path(options)
+
+    if Path.type(path) == :absolute and File.regular?(path) do
+      check_cargo_version(path, options)
+    else
+      error(:missing_cargo, "cargo executable was not found")
+    end
+  end
+
   @spec rustup_path(keyword()) :: Path.t()
   def rustup_path(options \\ []) do
     Keyword.get(options, :rustup) || System.find_executable("rustup") || "rustup"
@@ -152,6 +163,53 @@ defmodule Rekindle.Toolchain do
       {:error, reason} ->
         process_error(:version_check_failed, "wasm-bindgen version check", reason)
     end
+  end
+
+  defp check_cargo_version(path, options) do
+    case Process.run(path, ["--version"],
+           cd: Keyword.get(options, :cd, File.cwd!()),
+           timeout: Keyword.get(options, :timeout, 30_000),
+           output_limit: 4_096,
+           env: Keyword.get(options, :process_env, [])
+         ) do
+      {:ok, %{status: 0, output: output, truncated?: false}} ->
+        parse_cargo_version(path, output)
+
+      {:ok, %{truncated?: true}} ->
+        error(:cargo_not_ready, "cargo at #{path} returned an oversized version response")
+
+      {:ok, result} ->
+        error(
+          :cargo_not_ready,
+          "cargo at #{path} failed its readiness check with status #{result.status}",
+          output: result.output
+        )
+
+      {:error, reason} ->
+        process_error(:cargo_not_ready, "cargo at #{path} failed its readiness check", reason)
+    end
+  end
+
+  defp parse_cargo_version(path, output) do
+    case output |> String.trim() |> String.split(~r/\s+/, trim: true) do
+      ["cargo", version | _rest] ->
+        case Version.parse(version) do
+          {:ok, _version} -> {:ok, version}
+          :error -> invalid_cargo_version(path, output)
+        end
+
+      _ ->
+        invalid_cargo_version(path, output)
+    end
+  end
+
+  defp invalid_cargo_version(path, output) do
+    reported = String.trim(output)
+    suffix = if reported == "", do: "", else: "; reported: #{reported}"
+
+    error(:cargo_not_ready, "cargo at #{path} returned an invalid version#{suffix}",
+      output: output
+    )
   end
 
   defp cache_home(environment) do
