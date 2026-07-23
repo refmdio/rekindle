@@ -51,6 +51,9 @@ defmodule Rekindle.ToolingIntegrationTest do
 
     assert {:ok, second} = Setup.run(:rekindle_tooling_test, :enabled, context.options)
     refute Enum.any?(second, &(&1.status == :changed))
+    assert_trace_cwds(context.root, "rustup", Path.join(context.root, "client"))
+    assert_trace_cwds(context.root, "cargo", Path.join(context.root, "client"))
+    assert_trace_cwds(context.root, "wasm-bindgen", Path.join(context.root, "client"))
 
     assert {:ok, path} =
              Toolchain.resolve_wasm_bindgen("0.2.126", env: context.environment, cd: context.root)
@@ -85,6 +88,7 @@ defmodule Rekindle.ToolingIntegrationTest do
 
   test "Doctor checks a healthy project without mutating it", context do
     assert {:ok, _checks} = Setup.run(:rekindle_tooling_test, :enabled, context.options)
+    clear_traces(context.root)
     before = snapshot(context.root)
 
     assert {:ok, checks} = Doctor.run(:rekindle_tooling_test, context.options)
@@ -98,6 +102,9 @@ defmodule Rekindle.ToolingIntegrationTest do
            )
 
     assert snapshot(context.root) == before
+    assert_trace_cwds(context.root, "rustup", Path.join(context.root, "client"))
+    assert_trace_cwds(context.root, "cargo", Path.join(context.root, "client"))
+    assert_trace_cwds(context.root, "wasm-bindgen", Path.join(context.root, "client"))
   end
 
   test "Doctor reports malformed configuration and missing prerequisites", context do
@@ -268,12 +275,14 @@ defmodule Rekindle.ToolingIntegrationTest do
     state = Path.join(root, "rust-targets")
     File.write!(state, Enum.join(installed, "\n") <> "\n")
     path = Path.join(root, "rustup")
+    trace = prepare_trace(root, "rustup")
     add = if Keyword.get(options, :add?, true), do: "echo \"$3\" >> \"#{state}\"", else: ":"
 
     write_executable(
       path,
       """
       #!/bin/sh
+      printf '%s\\n' "$PWD" >> "#{trace}"
       if [ "$1 $2 $3" = "target list --installed" ]; then
         cat "#{state}"
         exit 0
@@ -292,6 +301,8 @@ defmodule Rekindle.ToolingIntegrationTest do
   defp fake_cargo(root, install_result) do
     real_cargo = System.find_executable("cargo")
     path = Path.join(root, "cargo")
+    cargo_trace = prepare_trace(root, "cargo")
+    wasm_bindgen_trace = prepare_trace(root, "wasm-bindgen")
 
     install =
       case install_result do
@@ -305,7 +316,11 @@ defmodule Rekindle.ToolingIntegrationTest do
             shift
           done
           mkdir -p "$install_root/bin"
-          printf '#!/bin/sh\\necho "wasm-bindgen 0.2.126"\\n' > "$install_root/bin/wasm-bindgen"
+          cat > "$install_root/bin/wasm-bindgen" <<'REKINDLE_TOOL'
+          #!/bin/sh
+          printf '%s\\n' "$PWD" >> "#{wasm_bindgen_trace}"
+          echo "wasm-bindgen 0.2.126"
+          REKINDLE_TOOL
           chmod +x "$install_root/bin/wasm-bindgen"
           exit 0
           """
@@ -321,6 +336,7 @@ defmodule Rekindle.ToolingIntegrationTest do
       path,
       """
       #!/bin/sh
+      printf '%s\\n' "$PWD" >> "#{cargo_trace}"
       if [ "$1" = "install" ]; then
         #{install}
       fi
@@ -339,6 +355,31 @@ defmodule Rekindle.ToolingIntegrationTest do
     |> Enum.map(fn path -> {Path.relative_to(path, root), File.read!(path)} end)
     |> Enum.sort()
   end
+
+  defp clear_traces(root) do
+    Enum.each(["rustup", "cargo", "wasm-bindgen"], &File.rm(trace_file(root, &1)))
+  end
+
+  defp assert_trace_cwds(root, name, expected) do
+    paths =
+      root
+      |> trace_file(name)
+      |> File.read!()
+      |> String.split("\n", trim: true)
+
+    assert paths != []
+    assert Enum.all?(paths, &(&1 == expected))
+  end
+
+  defp prepare_trace(root, name) do
+    path = trace_file(root, name)
+    File.rm(path)
+    on_exit(fn -> File.rm(path) end)
+    path
+  end
+
+  defp trace_file(root, name),
+    do: Path.join(System.tmp_dir!(), "#{Path.basename(root)}-#{name}-cwd")
 
   defp write_executable(path, contents) do
     File.mkdir_p!(Path.dirname(path))
