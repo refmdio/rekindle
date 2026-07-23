@@ -13,7 +13,7 @@ defmodule Rekindle do
   """
   @spec build(:web | :desktop, keyword()) ::
           {:ok, Rekindle.Build.Result.t()}
-          | {:error, Config.Error.t() | Rekindle.Build.Error.t()}
+          | {:error, Config.Error.t() | Rekindle.Build.Error.t() | Rekindle.Cargo.Error.t()}
   def build(target, options \\ []) do
     with {:ok, otp_app} <- fetch_otp_app(options),
          {:ok, project} <- Config.load(otp_app, options) do

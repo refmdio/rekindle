@@ -57,4 +57,25 @@ defmodule Rekindle.BuildTest do
 
     assert message =~ "client/src/bin/desktop.rs"
   end
+
+  test "returns a Cargo artifact without starting it", %{root: root} do
+    File.cp_r!("test/fixtures/cargo_project", Path.join(root, "client"))
+
+    Application.put_env(:rekindle_build_test, Rekindle,
+      integration: :gpui,
+      targets: [desktop: [profiles: [dev: "dev", release: "release"]]]
+    )
+
+    assert {:ok, %Rekindle.Build.Result{} = result} =
+             Rekindle.build(:desktop,
+               otp_app: :rekindle_build_test,
+               project_root: root,
+               profile: :release
+             )
+
+    assert result.target == :desktop
+    assert result.profile == :release
+    assert File.regular?(result.artifact)
+    assert result.artifact =~ "/release/desktop"
+  end
 end

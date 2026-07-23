@@ -22,7 +22,11 @@ defmodule Rekindle.MixProject do
     [extra_applications: [:logger]]
   end
 
-  defp deps, do: []
+  defp deps do
+    [
+      {:jason, "~> 1.4"}
+    ]
+  end
 
   defp package do
     [

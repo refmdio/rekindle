@@ -8,7 +8,7 @@ defmodule Rekindle.Build do
   @targets [:web, :desktop]
 
   @spec run(Config.t(), atom(), keyword()) ::
-          {:ok, Rekindle.Build.Result.t()} | {:error, Error.t()}
+          {:ok, Rekindle.Build.Result.t()} | {:error, Error.t() | Rekindle.Cargo.Error.t()}
   def run(%Config{} = project, target, options) do
     profile = Keyword.get(options, :profile, :dev)
 
@@ -16,7 +16,7 @@ defmodule Rekindle.Build do
          :ok <- validate_profile(profile),
          {:ok, target_config} <- enabled_target(project, target),
          :ok <- entry_exists(project, target_config) do
-      dispatch(project, target_config, profile)
+      dispatch(project, target_config, profile, options)
     end
   end
 
@@ -57,11 +57,27 @@ defmodule Rekindle.Build do
     end
   end
 
-  defp dispatch(_project, %{name: target}, profile) do
-    error(
-      :builder_unavailable,
-      "#{target} artifact building for the #{profile} profile is not available yet"
-    )
+  defp dispatch(project, target, profile, options) do
+    cargo_options = Keyword.take(options, [:timeout, :cancel_ref])
+
+    case Rekindle.Cargo.build(project, target, profile, cargo_options) do
+      {:ok, result} ->
+        {:ok,
+         %Rekindle.Build.Result{
+           target: target.name,
+           profile: profile,
+           artifact: result.artifact,
+           metadata: %{
+             package: result.package,
+             binary: result.binary,
+             target_directory: result.target_directory,
+             diagnostics: result.diagnostics
+           }
+         }}
+
+      {:error, error} ->
+        {:error, error}
+    end
   end
 
   defp error(kind, message), do: {:error, Error.new(kind, message)}
