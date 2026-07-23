@@ -52,9 +52,11 @@ defmodule Rekindle.TargetBackend do
           required(:options) => CanonicalValue.t(),
           required(:options_digest) => String.t()
         }
+  @type admission_error ::
+          [ConfigError.t()] | {:invalid_configuration_errors, ConfigError.t()}
 
   @spec admit(module(), Rekindle.target(), term()) ::
-          {:ok, admission()} | {:error, [ConfigError.t()]}
+          {:ok, admission()} | {:error, admission_error()}
   def admit(module, target, options \\ %{})
 
   def admit(module, target, options)
@@ -78,6 +80,7 @@ defmodule Rekindle.TargetBackend do
     else
       {:error, %ConfigError{} = error} -> {:error, [error]}
       {:error, errors} when is_list(errors) -> {:error, errors}
+      {:error, {:invalid_configuration_errors, %ConfigError{}} = invalid} -> {:error, invalid}
     end
   end
 
@@ -177,8 +180,16 @@ defmodule Rekindle.TargetBackend do
 
   @doc false
   @spec configuration_failure(Rekindle.target(), term()) :: Rekindle.Failure.t()
+  def configuration_failure(
+        target,
+        {:invalid_configuration_errors, %ConfigError{}}
+      )
+      when target in [:web, :desktop] do
+    invalid_configuration_failure(target)
+  end
+
   def configuration_failure(target, errors) when target in [:web, :desktop] do
-    if valid_error_list?(errors) and not invalid_configuration_error_list?(errors) do
+    if valid_error_list?(errors) do
       diagnostics =
         Enum.map(errors, fn error ->
           {:ok, diagnostic} =
@@ -202,14 +213,7 @@ defmodule Rekindle.TargetBackend do
         retryable?: false
       )
     else
-      Rekindle.Failure.new!(
-        target: target,
-        stage: :internal,
-        code: :contract_violation,
-        message: "extension configuration error contract violation",
-        diagnostics: [],
-        retryable?: false
-      )
+      invalid_configuration_failure(target)
     end
   end
 
@@ -261,7 +265,7 @@ defmodule Rekindle.TargetBackend do
         validate_error_arm(errors)
 
       {:ok, _other} ->
-        {:error, error([:backend, :options], "validate/2 returned an invalid result")}
+        {:error, invalid_configuration_errors()}
 
       {:error, %Rekindle.Failure{} = failure} ->
         {:error, callback_error(:validate, failure)}
@@ -310,19 +314,20 @@ defmodule Rekindle.TargetBackend do
     do: {:error, invalid_configuration_errors()}
 
   defp invalid_configuration_errors do
-    error([:backend, :options], "extension configuration error contract violation")
+    {:invalid_configuration_errors,
+     error([:backend, :options], "extension configuration error contract violation")}
   end
 
-  defp invalid_configuration_error_list?([
-         %ConfigError{
-           path: ["backend", "options"],
-           code: :invalid_value,
-           message: "extension configuration error contract violation"
-         }
-       ]),
-       do: true
-
-  defp invalid_configuration_error_list?(_errors), do: false
+  defp invalid_configuration_failure(target) do
+    Rekindle.Failure.new!(
+      target: target,
+      stage: :internal,
+      code: :contract_violation,
+      message: "extension configuration error contract violation",
+      diagnostics: [],
+      retryable?: false
+    )
+  end
 
   defp error_key(%ConfigError{} = error) do
     {CanonicalValue.encode!(error.path), Atom.to_string(error.code), error.message}

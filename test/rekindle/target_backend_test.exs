@@ -180,26 +180,25 @@ defmodule Rekindle.TargetBackendTest do
     assert {:error, [%ConfigError{path: ["backend", "normalized_options"]}]} =
              TargetBackend.admit(InvalidOptionsBackend, :web, %{})
 
-    assert {:error, [%ConfigError{path: ["backend", "options"]}]} =
+    assert {:error, {:invalid_configuration_errors, %ConfigError{path: ["backend", "options"]}}} =
              TargetBackend.admit(InvalidValidateResultBackend, :web, %{})
 
-    assert {:error, [%ConfigError{path: ["backend", "options"]}]} =
+    assert {:error, {:invalid_configuration_errors, %ConfigError{path: ["backend", "options"]}}} =
              TargetBackend.admit(EmptyValidateErrorsBackend, :web, %{})
 
-    assert {:error, [%ConfigError{path: ["backend", "options"]}]} =
+    assert {:error, {:invalid_configuration_errors, %ConfigError{path: ["backend", "options"]}}} =
              TargetBackend.admit(InvalidValidateErrorsBackend, :web, %{})
   end
 
   test "rejects improper and oversized backend error collections before traversal" do
     for shape <- ~w[improper_outer oversized_outer improper_path oversized_path] do
       assert {:error,
-              [
-                %ConfigError{
-                  path: ["backend", "options"],
-                  code: :invalid_value,
-                  message: "extension configuration error contract violation"
-                }
-              ]} = TargetBackend.admit(ErrorShapeBackend, :web, %{"case" => shape})
+              {:invalid_configuration_errors,
+               %ConfigError{
+                 path: ["backend", "options"],
+                 code: :invalid_value,
+                 message: "extension configuration error contract violation"
+               }}} = TargetBackend.admit(ErrorShapeBackend, :web, %{"case" => shape})
     end
   end
 
@@ -277,17 +276,16 @@ defmodule Rekindle.TargetBackendTest do
              TargetBackend.admit(ConfigErrorsBackend, :web, %{"case" => "valid"})
 
     for kind <- ~w[empty unsorted duplicate oversized] do
-      assert {:error, errors} = TargetBackend.admit(ConfigErrorsBackend, :web, %{"case" => kind})
+      assert {:error, invalid} = TargetBackend.admit(ConfigErrorsBackend, :web, %{"case" => kind})
 
-      assert [
-               %ConfigError{
-                 path: ["backend", "options"],
-                 code: :invalid_value,
-                 message: "extension configuration error contract violation"
-               }
-             ] = errors
+      assert {:invalid_configuration_errors,
+              %ConfigError{
+                path: ["backend", "options"],
+                code: :invalid_value,
+                message: "extension configuration error contract violation"
+              }} = invalid
 
-      failure = TargetBackend.configuration_failure(:web, errors)
+      failure = TargetBackend.configuration_failure(:web, invalid)
       assert failure.code == :contract_violation
       assert failure.stage == :internal
       assert failure.message == "extension configuration error contract violation"
@@ -316,6 +314,18 @@ defmodule Rekindle.TargetBackendTest do
     assert invalid.code == :contract_violation
     assert invalid.diagnostics == []
     assert invalid.message == "extension configuration error contract violation"
+
+    colliding = [
+      ConfigError.new(
+        ["backend", "options"],
+        :invalid_value,
+        "extension configuration error contract violation"
+      )
+    ]
+
+    collision_failure = TargetBackend.configuration_failure(:desktop, colliding)
+    assert collision_failure.code == :config_invalid
+    assert length(collision_failure.diagnostics) == 1
   end
 
   test "validates the exact plan and finalize return unions" do
