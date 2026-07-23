@@ -238,7 +238,7 @@ defmodule Rekindle.InstallTest do
         String.replace(
           manifest,
           "'cfg(not(target_arch = \"wasm32\"))'",
-          "'x86_64-unknown-linux-gnu'"
+          "'#{host_target!()}'"
         )
       end)
 
@@ -662,5 +662,10 @@ defmodule Rekindle.InstallTest do
     File.mkdir_p!(path)
     on_exit(fn -> File.rm_rf!(path) end)
     path
+  end
+
+  defp host_target! do
+    {:ok, target} = Rekindle.Toolchain.host_target()
+    target
   end
 end

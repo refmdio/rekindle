@@ -5,8 +5,6 @@ if Code.ensure_loaded?(Igniter) do
     alias Rekindle.Integration
     alias Rekindle.Toolchain.Process
 
-    @platforms %{web: "wasm32-unknown-unknown"}
-
     @spec validate(Igniter.t(), Integration.name(), [Integration.target()]) ::
             {:ok, %{Integration.target() => keyword()}} | {:error, String.t()}
     def validate(igniter, integration, targets) do
@@ -129,21 +127,15 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp platforms(targets) do
-      if :desktop in targets do
-        case host_platform() do
-          {:ok, platform} -> {:ok, Map.put(@platforms, :desktop, platform)}
-          {:error, message} -> {:error, message}
-        end
-      else
-        {:ok, @platforms}
-      end
-    end
+      Enum.reduce_while(targets, {:ok, %{}}, fn target, {:ok, platforms} ->
+        case Rekindle.Toolchain.target(target) do
+          {:ok, platform} ->
+            {:cont, {:ok, Map.put(platforms, target, platform)}}
 
-    defp host_platform do
-      case Rekindle.Toolchain.host_target() do
-        {:ok, platform} -> {:ok, platform}
-        {:error, error} -> {:error, Exception.message(error)}
-      end
+          {:error, error} ->
+            {:halt, {:error, Exception.message(error)}}
+        end
+      end)
     end
 
     defp metadata(root, platform, features, no_dependencies?, locked?) do

@@ -6,8 +6,6 @@ defmodule Rekindle.Cargo do
   alias Rekindle.Diagnostic
   alias Rekindle.Toolchain.Process
 
-  @web_target "wasm32-unknown-unknown"
-
   @enforce_keys [:artifact, :package, :binary, :target_directory, :diagnostics]
   defstruct [:artifact, :package, :binary, :target_directory, :diagnostics, output: ""]
 
@@ -151,11 +149,8 @@ defmodule Rekindle.Cargo do
     end
   end
 
-  defp target_arguments(arguments, :web, _options),
-    do: {:ok, arguments ++ ["--target", @web_target]}
-
-  defp target_arguments(arguments, :desktop, options) do
-    case Rekindle.Toolchain.host_target(options) do
+  defp target_arguments(arguments, target_name, options) do
+    case Rekindle.Toolchain.target(target_name, options) do
       {:ok, target} ->
         {:ok, arguments ++ ["--target", target]}
 

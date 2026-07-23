@@ -70,7 +70,7 @@ defmodule Rekindle.IntegrationsTest do
           do: cargo_check!(root, "web", "wasm32-unknown-unknown")
 
         if :desktop in targets,
-          do: cargo_check!(root, "desktop", "x86_64-unknown-linux-gnu")
+          do: cargo_check!(root, "desktop", host_target!())
       end
     end
   end
@@ -132,6 +132,11 @@ defmodule Rekindle.IntegrationsTest do
   defp rustup_tool!(root, tool) do
     {path, 0} = System.cmd("rustup", ["which", tool], cd: root)
     String.trim(path)
+  end
+
+  defp host_target! do
+    {:ok, target} = Rekindle.Toolchain.host_target()
+    target
   end
 
   defp tmp_dir(name) do

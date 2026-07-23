@@ -5,8 +5,6 @@ defmodule Rekindle.Setup do
   alias Rekindle.Toolchain
   alias Rekindle.Toolchain.Check
 
-  @rust_targets %{web: "wasm32-unknown-unknown", desktop: "x86_64-unknown-linux-gnu"}
-
   @spec run(atom(), :enabled | :all | :web | :desktop, keyword()) ::
           {:ok, [Check.t()]} | {:error, [Check.t()]}
   def run(otp_app, selection \\ :enabled, options \\ []) do
@@ -77,24 +75,31 @@ defmodule Rekindle.Setup do
     case Toolchain.installed_rust_targets(options) do
       {:ok, installed} ->
         Enum.reduce_while(targets, {:ok, []}, fn target, {:ok, checks} ->
-          triple = Map.fetch!(@rust_targets, target)
-
-          if triple in installed do
-            {:cont, {:ok, checks ++ [passed(:"rust_#{target}", "#{triple} is installed")]}}
-          else
-            case install_and_verify_rust_target(triple, options) do
-              :ok ->
-                {:cont,
-                 {:ok, checks ++ [changed(:"rust_#{target}", "installed Rust target #{triple}")]}}
-
-              {:error, error} ->
-                {:halt, {:error, checks ++ [failed(:"rust_#{target}", Exception.message(error))]}}
-            end
-          end
+          prepare_rust_target(target, installed, checks, options)
         end)
 
       {:error, error} ->
         {:error, [failed(:rust_targets, Exception.message(error))]}
+    end
+  end
+
+  defp prepare_rust_target(target, installed, checks, options) do
+    with {:ok, triple} <- Toolchain.target(target, options) do
+      if triple in installed do
+        {:cont, {:ok, checks ++ [passed(:"rust_#{target}", "#{triple} is installed")]}}
+      else
+        case install_and_verify_rust_target(triple, options) do
+          :ok ->
+            {:cont,
+             {:ok, checks ++ [changed(:"rust_#{target}", "installed Rust target #{triple}")]}}
+
+          {:error, error} ->
+            {:halt, {:error, checks ++ [failed(:"rust_#{target}", Exception.message(error))]}}
+        end
+      end
+    else
+      {:error, error} ->
+        {:halt, {:error, checks ++ [failed(:"rust_#{target}", Exception.message(error))]}}
     end
   end
 

@@ -30,7 +30,7 @@ defmodule Rekindle.ToolingIntegrationTest do
       "XDG_CACHE_HOME" => Path.join(root, "cache")
     }
 
-    rustup = fake_rustup(root, ["x86_64-unknown-linux-gnu"])
+    rustup = fake_rustup(root, [host_target!()])
     cargo = fake_cargo(root, :install)
 
     options = [
@@ -297,7 +297,7 @@ defmodule Rekindle.ToolingIntegrationTest do
   end
 
   test "setup rejects commands that succeed without installing their result", context do
-    rustup = fake_rustup(context.root, ["x86_64-unknown-linux-gnu"], add?: false)
+    rustup = fake_rustup(context.root, [host_target!()], add?: false)
     options = Keyword.put(context.options, :rustup, rustup)
 
     assert {:error, checks} = Setup.run(:rekindle_tooling_test, :web, options)
@@ -309,7 +309,7 @@ defmodule Rekindle.ToolingIntegrationTest do
     rustup =
       fake_rustup(context.root, [
         "wasm32-unknown-unknown",
-        "x86_64-unknown-linux-gnu"
+        host_target!()
       ])
 
     options =
@@ -565,6 +565,11 @@ defmodule Rekindle.ToolingIntegrationTest do
 
   defp restore_system_env(name, nil), do: System.delete_env(name)
   defp restore_system_env(name, value), do: System.put_env(name, value)
+
+  defp host_target! do
+    {:ok, target} = Rekindle.Toolchain.host_target()
+    target
+  end
 
   defp tmp_dir do
     path =

@@ -52,6 +52,11 @@ defmodule Rekindle.Toolchain do
     end
   end
 
+  @spec target(:web | :desktop, keyword()) :: {:ok, String.t()} | {:error, Error.t()}
+  def target(name, options \\ [])
+  def target(:web, _options), do: {:ok, "wasm32-unknown-unknown"}
+  def target(:desktop, options), do: host_target(options)
+
   @spec installed_rust_targets(keyword()) :: {:ok, [String.t()]} | {:error, Error.t()}
   def installed_rust_targets(options \\ []) do
     case Process.run(rustup_path(options), ["target", "list", "--installed"],

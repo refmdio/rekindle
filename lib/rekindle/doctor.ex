@@ -8,8 +8,6 @@ defmodule Rekindle.Doctor do
   alias Rekindle.Toolchain
   alias Rekindle.Toolchain.Check
 
-  @rust_targets %{web: "wasm32-unknown-unknown", desktop: "x86_64-unknown-linux-gnu"}
-
   @spec run(atom(), keyword()) :: {:ok, [Check.t()]} | {:error, [Check.t()]}
   def run(otp_app, options \\ []) do
     case Config.load(otp_app, options) do
@@ -63,15 +61,19 @@ defmodule Rekindle.Doctor do
       {:ok, installed} ->
         checks ++
           Enum.map(targets, fn target ->
-            triple = Map.fetch!(@rust_targets, target)
+            case Toolchain.target(target, options) do
+              {:ok, triple} ->
+                if triple in installed do
+                  passed(:"rust_#{target}", "#{triple} is installed")
+                else
+                  failed(
+                    :"rust_#{target}",
+                    "#{triple} is missing; run mix rekindle.setup #{target}"
+                  )
+                end
 
-            if triple in installed do
-              passed(:"rust_#{target}", "#{triple} is installed")
-            else
-              failed(
-                :"rust_#{target}",
-                "#{triple} is missing; run mix rekindle.setup #{target}"
-              )
+              {:error, error} ->
+                failed(:"rust_#{target}", Exception.message(error))
             end
           end)
 
