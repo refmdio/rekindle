@@ -72,7 +72,8 @@ defmodule Rekindle.CargoTest do
   end
 
   test "passes the configured Cargo selection and build arguments exactly", %{project: project} do
-    {cargo, arguments_file, _started_file} = fake_cargo(project, :artifact)
+    {cargo, arguments_file, _started_file, working_directory_file} =
+      fake_cargo(project, :artifact)
 
     configured = %{
       target(:web)
@@ -84,6 +85,7 @@ defmodule Rekindle.CargoTest do
 
     assert {:ok, result} = Cargo.build(project, configured, :dev, cargo: cargo)
     assert result.artifact == Path.join(project.root, "web.wasm")
+    assert File.read!(working_directory_file) == project.client_root <> "\n"
 
     assert File.read!(arguments_file) |> String.split("\n", trim: true) == [
              "build",
@@ -104,7 +106,8 @@ defmodule Rekindle.CargoTest do
   end
 
   test "rejects mismatched Cargo artifacts", %{project: project} do
-    {cargo, _arguments_file, _started_file} = fake_cargo(project, :mismatched_artifact)
+    {cargo, _arguments_file, _started_file, _working_directory_file} =
+      fake_cargo(project, :mismatched_artifact)
 
     assert {:error, %Cargo.Error{kind: :artifact_not_found}} =
              Cargo.build(project, target(:desktop), :dev, cargo: cargo)
@@ -131,12 +134,15 @@ defmodule Rekindle.CargoTest do
   end
 
   test "maps Cargo build timeout and cancellation", %{project: project} do
-    {cargo, _arguments_file, _started_file} = fake_cargo(project, :wait)
+    {cargo, _arguments_file, _started_file, _working_directory_file} =
+      fake_cargo(project, :wait)
 
     assert {:error, %Cargo.Error{kind: :timeout}} =
              Cargo.build(project, target(:desktop), :dev, cargo: cargo, timeout: 100)
 
-    {cargo, _arguments_file, started_file} = fake_cargo(project, :wait)
+    {cargo, _arguments_file, started_file, _working_directory_file} =
+      fake_cargo(project, :wait)
+
     cancel_ref = make_ref()
     parent = self()
 
@@ -177,8 +183,10 @@ defmodule Rekindle.CargoTest do
     path = Path.join(project.root, "fake-cargo-#{mode}")
     arguments_file = path <> ".arguments"
     started_file = path <> ".started"
+    working_directory_file = path <> ".cwd"
     File.rm(arguments_file)
     File.rm(started_file)
+    File.rm(working_directory_file)
     package = cargo_package(project, "fixture_ui", "fixture_ui 0.1.0")
 
     metadata =
@@ -227,13 +235,14 @@ defmodule Rekindle.CargoTest do
         printf '%s\\n' '#{metadata}'
         exit 0
       fi
+      printf '%s\\n' "$PWD" > '#{working_directory_file}'
       printf '%s\\n' "$@" > '#{arguments_file}'
       #{build}
       """
     )
 
     File.chmod!(path, 0o755)
-    {path, arguments_file, started_file}
+    {path, arguments_file, started_file, working_directory_file}
   end
 
   defp cargo_package(project, name, id) do

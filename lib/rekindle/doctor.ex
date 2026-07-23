@@ -21,6 +21,7 @@ defmodule Rekindle.Doctor do
   end
 
   defp inspect_project(project, options) do
+    options = Keyword.put(options, :cd, project.client_root)
     targets = project.targets |> Map.keys() |> Enum.sort()
 
     checks =

@@ -96,7 +96,7 @@ defmodule Rekindle.Cargo.Metadata do
 
   defp process_options(project, options) do
     [
-      cd: project.root,
+      cd: project.client_root,
       timeout: Keyword.get(options, :timeout, 120_000),
       output_limit: Keyword.get(options, :output_limit, 8_000_000),
       cancel_ref: Keyword.get(options, :cancel_ref),

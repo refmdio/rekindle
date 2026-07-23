@@ -12,7 +12,7 @@ defmodule Rekindle.Setup do
   def run(otp_app, selection \\ :enabled, options \\ []) do
     with {:ok, project} <- Config.load(otp_app, options),
          {:ok, targets} <- select_targets(project, selection) do
-      prepare(targets, options)
+      prepare(targets, Keyword.put(options, :cd, project.client_root))
     else
       {:error, error} -> {:error, [failed(:configuration, Exception.message(error))]}
     end
