@@ -487,7 +487,7 @@ defmodule Rekindle.Cargo.ProcessTest do
 
     File.write!(
       child,
-      "#!/bin/sh\ntrap '' TERM\nexec /usr/bin/sleep 30\n"
+      "#!/bin/sh\nprintf 'rekindle) child\\n' > /proc/self/comm\ntrap '' TERM\nwhile :; do /usr/bin/sleep 30; done\n"
     )
 
     File.chmod!(child, 0o755)

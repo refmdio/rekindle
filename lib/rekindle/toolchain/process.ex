@@ -253,7 +253,8 @@ defmodule Rekindle.Toolchain.Process do
   end
 
   defp process_group_pid(stat) do
-    with [_process, fields] <- String.split(stat, ") ", parts: 2),
+    with [{delimiter, 2} | _] <- stat |> :binary.matches(") ") |> Enum.reverse(),
+         fields <- binary_part(stat, delimiter + 2, byte_size(stat) - delimiter - 2),
          [_state, _parent, group | _rest] <- String.split(fields),
          {group_pid, ""} <- Integer.parse(group) do
       {:ok, group_pid}
