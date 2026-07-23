@@ -67,6 +67,40 @@ defmodule Rekindle.ApplicationTest do
              start_supervised({Rekindle, otp_app: @otp_app, name: second})
   end
 
+  test "restarts the project state owner under the same normalized identity" do
+    name = unique_name(:restart)
+    assert {:ok, _supervisor} = start_supervised({Rekindle, otp_app: @otp_app, name: name})
+
+    key = {:project, File.cwd!()}
+    assert [{owner, _value}] = Registry.lookup(Rekindle.RuntimeRegistry, key)
+    monitor = Process.monitor(owner)
+    Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^owner, :killed}, 1_000
+
+    assert eventually(fn ->
+             case Registry.lookup(Rekindle.RuntimeRegistry, key) do
+               [{replacement, _value}] when replacement != owner -> Process.alive?(replacement)
+               _ -> false
+             end
+           end)
+
+    assert {:ok, %{status: :idle, owned_process_count: 0}} = RuntimeState.snapshot(File.cwd!())
+  end
+
+  test "stops the owner and releases all project-scoped registrations" do
+    ports_before = MapSet.new(Port.list())
+    name = unique_name(:shutdown)
+    child_id = {Rekindle, @otp_app}
+    assert {:ok, supervisor} = start_supervised({Rekindle, otp_app: @otp_app, name: name})
+    monitor = Process.monitor(supervisor)
+
+    assert :ok = stop_supervised(child_id)
+    assert_receive {:DOWN, ^monitor, :process, ^supervisor, :shutdown}, 1_000
+    assert :none = RuntimeState.snapshot(File.cwd!())
+    assert [] = Registry.lookup(Rekindle.RuntimeRegistry, {:events, @otp_app})
+    assert ports_before == MapSet.new(Port.list())
+  end
+
   test "fails before runtime ownership when configuration is invalid" do
     Application.put_env(@otp_app, :rekindle_build, schema: 2)
 
@@ -76,7 +110,7 @@ defmodule Rekindle.ApplicationTest do
                name: unique_name(:invalid)
              )
 
-    assert Enum.any?(errors, &(&1.code in [:config_invalid, :path_invalid]))
+    assert Enum.any?(errors, &(&1.code == :invalid_value))
     assert :none = RuntimeState.snapshot(File.cwd!())
   end
 
@@ -100,6 +134,18 @@ defmodule Rekindle.ApplicationTest do
 
   defp unique_name(prefix),
     do: Module.concat(__MODULE__, "#{prefix}_#{System.unique_integer([:positive])}")
+
+  defp eventually(assertion, attempts \\ 50)
+  defp eventually(_assertion, 0), do: false
+
+  defp eventually(assertion, attempts) do
+    if assertion.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(assertion, attempts - 1)
+    end
+  end
 
   defp restore(key, nil), do: Application.delete_env(@otp_app, key)
   defp restore(key, value), do: Application.put_env(@otp_app, key, value)
