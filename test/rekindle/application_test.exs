@@ -70,7 +70,7 @@ defmodule Rekindle.ApplicationTest do
               status: :idle,
               target_count: 0,
               owned_process_count: 0
-            }} = RuntimeState.snapshot(File.cwd!())
+            }} = RuntimeState.snapshot(@otp_app, File.cwd!())
 
     assert Process.alive?(supervisor)
     assert ports_before == MapSet.new(Port.list())
@@ -103,7 +103,8 @@ defmodule Rekindle.ApplicationTest do
              end
            end)
 
-    assert {:ok, %{status: :idle, owned_process_count: 0}} = RuntimeState.snapshot(File.cwd!())
+    assert {:ok, %{status: :idle, owned_process_count: 0}} =
+             RuntimeState.snapshot(@otp_app, File.cwd!())
   end
 
   test "restarts the complete project session boundary with a new identity" do
@@ -111,7 +112,7 @@ defmodule Rekindle.ApplicationTest do
     assert {:ok, _supervisor} = start_supervised({Rekindle, otp_app: @otp_app, name: name})
 
     root = File.cwd!()
-    assert {:ok, first_identity} = ProjectSession.identity(root)
+    assert {:ok, first_identity} = ProjectSession.identity(@otp_app, root)
     [{first_session, _}] = Registry.lookup(Rekindle.RuntimeRegistry, {:session, root})
     [{first_state, _}] = Registry.lookup(Rekindle.RuntimeRegistry, {:project, root})
     [{first_events, _}] = Registry.lookup(Rekindle.RuntimeRegistry, {:events, @otp_app})
@@ -125,7 +126,8 @@ defmodule Rekindle.ApplicationTest do
                     Registry.lookup(Rekindle.RuntimeRegistry, {:project, root}),
                   [{events, _}] when events != first_events <-
                     Registry.lookup(Rekindle.RuntimeRegistry, {:events, @otp_app}),
-                  {:ok, identity} when identity != first_identity <- ProjectSession.identity(root) do
+                  {:ok, identity} when identity != first_identity <-
+                    ProjectSession.identity(@otp_app, root) do
                true
              else
                _ -> false
@@ -142,7 +144,7 @@ defmodule Rekindle.ApplicationTest do
 
     assert :ok = stop_supervised(child_id)
     assert_receive {:DOWN, ^monitor, :process, ^supervisor, :shutdown}, 1_000
-    assert :none = RuntimeState.snapshot(File.cwd!())
+    assert :none = RuntimeState.snapshot(@otp_app, File.cwd!())
     assert [] = Registry.lookup(Rekindle.RuntimeRegistry, {:events, @otp_app})
     assert ports_before == MapSet.new(Port.list())
   end
@@ -165,7 +167,7 @@ defmodule Rekindle.ApplicationTest do
              )
 
     assert Enum.any?(diagnostics, &(&1.code == :invalid_value))
-    assert :none = RuntimeState.snapshot(File.cwd!())
+    assert :none = RuntimeState.snapshot(@otp_app, File.cwd!())
   end
 
   test "reports missing configuration through the same public failure boundary" do
@@ -185,7 +187,7 @@ defmodule Rekindle.ApplicationTest do
                name: unique_name(:missing)
              )
 
-    assert :none = RuntimeState.snapshot(File.cwd!())
+    assert :none = RuntimeState.snapshot(@otp_app, File.cwd!())
   end
 
   test "reports malformed extension configuration as a contract violation" do
@@ -212,7 +214,7 @@ defmodule Rekindle.ApplicationTest do
                name: unique_name(:malformed_extension)
              )
 
-    assert :none = RuntimeState.snapshot(File.cwd!())
+    assert :none = RuntimeState.snapshot(@otp_app, File.cwd!())
   end
 
   defp build_config do

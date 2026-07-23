@@ -14,19 +14,19 @@ defmodule Rekindle.RuntimeState do
     )
   end
 
-  @spec snapshot(atom() | String.t()) :: {:ok, map()} | :none
-  def snapshot(project_root) do
+  @spec snapshot(Rekindle.otp_app(), String.t()) :: {:ok, map()} | :none
+  def snapshot(otp_app, project_root) do
     case lookup(project_root) do
-      [{pid, _value}] -> GenServer.call(pid, :snapshot)
+      [{pid, _value}] -> GenServer.call(pid, {:snapshot, otp_app})
       [] -> :none
     end
   end
 
-  @spec current(atom() | String.t(), Rekindle.target()) ::
+  @spec current(Rekindle.otp_app(), String.t(), Rekindle.target()) ::
           {:ok, Rekindle.GenerationRef.t()} | :none
-  def current(project_root, target) when target in [:web, :desktop] do
+  def current(otp_app, project_root, target) when target in [:web, :desktop] do
     case lookup(project_root) do
-      [{pid, _value}] -> GenServer.call(pid, {:current, target})
+      [{pid, _value}] -> GenServer.call(pid, {:current, otp_app, target})
       [] -> :none
     end
   end
@@ -40,7 +40,7 @@ defmodule Rekindle.RuntimeState do
   def init(project), do: {:ok, %__MODULE__{project: project}}
 
   @impl true
-  def handle_call(:snapshot, _from, state) do
+  def handle_call({:snapshot, otp_app}, _from, %{project: %{otp_app: otp_app}} = state) do
     {:reply,
      {:ok,
       %{
@@ -52,7 +52,13 @@ defmodule Rekindle.RuntimeState do
       }}, state}
   end
 
-  def handle_call({:current, target}, _from, state) do
+  def handle_call({:snapshot, _otp_app}, _from, state), do: {:reply, :none, state}
+
+  def handle_call(
+        {:current, otp_app, target},
+        _from,
+        %{project: %{otp_app: otp_app}} = state
+      ) do
     reply =
       case Map.get(state.targets, target) do
         %{current: %Rekindle.GenerationRef{} = generation} -> {:ok, generation}
@@ -61,6 +67,8 @@ defmodule Rekindle.RuntimeState do
 
     {:reply, reply, state}
   end
+
+  def handle_call({:current, _otp_app, _target}, _from, state), do: {:reply, :none, state}
 
   def handle_call(
         {:put_current, %Rekindle.GenerationRef{target: target} = generation},

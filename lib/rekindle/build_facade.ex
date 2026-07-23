@@ -103,13 +103,24 @@ defmodule Rekindle.BuildFacade do
   end
 
   defp schedule_build(project, target, mode, handler, options) do
-    runner = Keyword.get(options, :build_runner, &ProjectSession.build/3)
-
-    runner.(project.project_root, target, fn revision ->
+    executor = fn admitted_project, revision ->
       handler
-      |> invoke(:build, [project, mode, revision])
+      |> invoke(:build, [admitted_project, mode, revision])
       |> validate_build_result(target, mode, revision)
-    end)
+    end
+
+    case Keyword.fetch(options, :build_runner) do
+      {:ok, runner} ->
+        runner.(project.project_root, target, fn revision -> executor.(project, revision) end)
+
+      :error ->
+        ProjectSession.build(
+          project.otp_app,
+          project.project_root,
+          target,
+          executor
+        )
+    end
   rescue
     _exception -> {:error, contract_failure("Project build session failed")}
   catch
@@ -117,9 +128,10 @@ defmodule Rekindle.BuildFacade do
   end
 
   defp read_current(project, target, options) do
-    reader = Keyword.get(options, :current_reader, &RuntimeState.current/2)
-
-    reader.(project.project_root, target)
+    case Keyword.fetch(options, :current_reader) do
+      {:ok, reader} -> reader.(project.project_root, target)
+      :error -> RuntimeState.current(project.otp_app, project.project_root, target)
+    end
   rescue
     _exception -> :invalid
   catch

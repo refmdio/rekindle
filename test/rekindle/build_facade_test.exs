@@ -2,7 +2,7 @@ defmodule Rekindle.BuildFacadeTest do
   use ExUnit.Case, async: false
 
   alias Rekindle.Config.{BuildConfig, DevConfig, Project}
-  alias Rekindle.{BuildFacade, BuildResult, Failure, GenerationRef}
+  alias Rekindle.{BuildFacade, BuildResult, Failure, GenerationRef, ProjectSession}
 
   @otp_app :rekindle_build_facade_test
   @digest String.duplicate("a", 64)
@@ -23,6 +23,17 @@ defmodule Rekindle.BuildFacadeTest do
 
     @impl true
     def build(_project, _mode, _revision), do: raise("handler detail")
+  end
+
+  defmodule AdmittedProjectHandler do
+    @behaviour Rekindle.TargetHandler
+
+    @impl true
+    def build(project, _mode, _revision) do
+      owner = Application.fetch_env!(:rekindle_build_facade_test, :test_owner)
+      send(owner, {:admitted_project, project.otp_app, project.application_id})
+      Application.fetch_env!(:rekindle_build_facade_test, :build_result)
+    end
   end
 
   setup do
@@ -180,6 +191,56 @@ defmodule Rekindle.BuildFacadeTest do
     assert :none = Rekindle.current(valid_app, :web)
   end
 
+  test "live state and builds reject a different application at the same root" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "rekindle-build-facade-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(root)
+    live = %{project([:web]) | project_root: root, application_id: "admitted"}
+    foreign_app = :rekindle_build_facade_foreign
+    foreign = %{live | otp_app: foreign_app, application_id: "foreign"}
+
+    on_exit(fn -> File.rm_rf(root) end)
+
+    state =
+      start_supervised!({Rekindle.RuntimeState, project: live},
+        id: {:runtime_state, make_ref()}
+      )
+
+    start_supervised!({ProjectSession, project: live}, id: {:project_session, make_ref()})
+
+    generation = generation(:web)
+    assert :ok = Rekindle.RuntimeState.put_current(state, generation)
+
+    assert :none =
+             BuildFacade.current(foreign_app, :web,
+               load_project: fn ^foreign_app -> {:ok, foreign} end
+             )
+
+    Application.put_env(@otp_app, :build_result, {:ok, build_result(:web, :dev)})
+
+    assert {:error, %{code: :unexpected_state}} =
+             BuildFacade.build(foreign_app, :web, :dev,
+               handlers: %{web: AdmittedProjectHandler},
+               load_project: fn ^foreign_app -> {:ok, foreign} end
+             )
+
+    refute_receive {:admitted_project, ^foreign_app, _application_id}
+
+    request_model = %{live | application_id: "fresh-unadmitted"}
+
+    assert {:ok, %BuildResult{}} =
+             BuildFacade.build(@otp_app, :web, :dev,
+               handlers: %{web: AdmittedProjectHandler},
+               load_project: fn @otp_app -> {:ok, request_model} end
+             )
+
+    assert_receive {:admitted_project, @otp_app, "admitted"}
+  end
+
   defp loader(targets) do
     project = project(targets)
     fn @otp_app -> {:ok, project} end
@@ -197,7 +258,7 @@ defmodule Rekindle.BuildFacadeTest do
       build: %BuildConfig{
         schema: 1,
         client: "client",
-        targets: Map.new(targets, &{&1, %{}}),
+        targets: Map.new(targets, &{&1, %{backend: :canonical}}),
         cache: %{},
         process: %{}
       },

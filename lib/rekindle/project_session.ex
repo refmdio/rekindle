@@ -26,20 +26,25 @@ defmodule Rekindle.ProjectSession do
     )
   end
 
-  @spec build(String.t(), Rekindle.target(), (non_neg_integer() ->
-                                                {:ok, BuildResult.t()} | {:error, Failure.t()})) ::
+  @spec build(
+          Rekindle.otp_app(),
+          String.t(),
+          Rekindle.target(),
+          (Rekindle.Config.Project.t(), non_neg_integer() ->
+             {:ok, BuildResult.t()} | {:error, Failure.t()})
+        ) ::
           {:ok, BuildResult.t()} | {:error, Failure.t()}
-  def build(project_root, target, executor) when is_function(executor, 1) do
+  def build(otp_app, project_root, target, executor) when is_function(executor, 2) do
     case lookup(project_root) do
-      [{pid, _value}] -> GenServer.call(pid, {:build, target, executor}, :infinity)
+      [{pid, _value}] -> GenServer.call(pid, {:build, otp_app, target, executor}, :infinity)
       [] -> unavailable(target)
     end
   end
 
-  @spec identity(String.t()) :: {:ok, String.t()} | :none
-  def identity(project_root) do
+  @spec identity(Rekindle.otp_app(), String.t()) :: {:ok, String.t()} | :none
+  def identity(otp_app, project_root) do
     case lookup(project_root) do
-      [{pid, _value}] -> GenServer.call(pid, :identity)
+      [{pid, _value}] -> GenServer.call(pid, {:identity, otp_app})
       [] -> :none
     end
   end
@@ -74,17 +79,23 @@ defmodule Rekindle.ProjectSession do
   end
 
   @impl true
-  def handle_call(:identity, _from, state), do: {:reply, {:ok, state.session_id}, state}
+  def handle_call({:identity, otp_app}, _from, %{project: %{otp_app: otp_app}} = state),
+    do: {:reply, {:ok, state.session_id}, state}
 
-  def handle_call({:build, target, executor}, from, state) do
+  def handle_call({:identity, _otp_app}, _from, state), do: {:reply, :none, state}
+
+  def handle_call({:build, otp_app, target, executor}, from, state) do
     caller = make_ref()
+    nodes = target_nodes(state.project)
 
-    with true <- is_function(executor, 1),
+    with true <- otp_app == state.project.otp_app,
+         true <- is_function(executor, 2),
+         {:ok, target_node} <- Map.fetch(nodes, target),
          {:ok, session, _revision, effects} <-
            Session.request(
              state.session,
              target,
-             Map.fetch!(target_nodes(state.project), target),
+             target_node,
              caller
            ) do
       monitor = Process.monitor(elem(from, 0))
@@ -100,6 +111,7 @@ defmodule Rekindle.ProjectSession do
       {:noreply, apply_effects(state, effects)}
     else
       false -> {:reply, invalid(target, "Build executor is invalid"), state}
+      :error -> {:reply, invalid(target, "Build target is not admitted"), state}
       {:error, %Failure{} = failure} -> {:reply, {:error, failure}, state}
     end
   end
@@ -204,7 +216,7 @@ defmodule Rekindle.ProjectSession do
 
         {:ok, pid} =
           Task.Supervisor.start_child(state.worker_supervisor, fn ->
-            send(owner, {:project_build_result, revision, executor.(revision)})
+            send(owner, {:project_build_result, revision, executor.(state.project, revision)})
           end)
 
         monitor = Process.monitor(pid)
