@@ -126,6 +126,90 @@ defmodule Rekindle.InstallTest do
     end
   end
 
+  test "adopts every supported existing client without changing client files" do
+    for integration <- [:gpui, :egui, :slint],
+        targets <- [[:web], [:desktop], [:web, :desktop]] do
+      original = existing_client(integration, targets)
+      before = client_contents(original)
+
+      adopted =
+        install(original,
+          integration: Atom.to_string(integration),
+          targets: Enum.map(targets, &Atom.to_string/1)
+        )
+
+      assert adopted.issues == []
+      assert client_contents(adopted) == before
+      assert content(adopted, "config/config.exs") =~ "integration: #{inspect(integration)}"
+      refute "/client/target/" in ignore_lines(adopted)
+    end
+  end
+
+  test "requires both explicit selections to adopt a client" do
+    original = existing_client(:gpui, [:web])
+
+    for options <- [[], [integration: "gpui"], [targets: ["web"]]] do
+      rejected = install(original, options)
+
+      assert Enum.any?(rejected.issues, &String.contains?(&1, "required to adopt"))
+      assert changed_contents(rejected) == changed_contents(original)
+      assert client_contents(rejected) == client_contents(original)
+    end
+  end
+
+  test "rejects mismatched, ambiguous, malformed, and incomplete clients atomically" do
+    gpui = existing_client(:gpui, [:web])
+
+    ambiguous =
+      update_content(gpui, "client/Cargo.toml", fn manifest ->
+        String.replace(manifest, "[dependencies]", "[dependencies]\neframe = \"0.35\"")
+      end)
+
+    malformed = update_content(gpui, "client/Cargo.toml", &("[package\n" <> &1))
+
+    incomplete =
+      %{
+        gpui
+        | rewrite: Rewrite.delete(gpui.rewrite, "client/src/bin/web.rs"),
+          assigns:
+            Map.update!(gpui.assigns, :test_files, &Map.delete(&1, "client/src/bin/web.rs"))
+      }
+
+    cases = [
+      {gpui, [integration: "slint", targets: ["web"]], "does not match"},
+      {ambiguous, [integration: "gpui", targets: ["web"]], "ambiguous"},
+      {malformed, [integration: "gpui", targets: ["web"]], "is invalid"},
+      {incomplete, [integration: "gpui", targets: ["web"]], "is required"}
+    ]
+
+    for {original, options, message} <- cases do
+      rejected = install(original, options)
+
+      assert Enum.any?(rejected.issues, &String.contains?(&1, message))
+      assert changed_contents(rejected) == changed_contents(original)
+      assert client_contents(rejected) == client_contents(original)
+    end
+  end
+
+  test "adoption preserves custom Cargo target configuration and ignore policy" do
+    original =
+      existing_client(:egui, [:desktop], %{
+        "client/.cargo/config.toml" => """
+        [build]
+        target-dir = "../custom-target"
+        """,
+        ".gitignore" => "/custom-target/\n"
+      })
+
+    before = client_contents(original)
+    adopted = install(original, integration: "egui", targets: ["desktop"])
+
+    assert adopted.issues == []
+    assert client_contents(adopted) == before
+    assert "/custom-target/" in ignore_lines(adopted)
+    refute "/client/target/" in ignore_lines(adopted)
+  end
+
   test "rekindle.dev delegates arguments to phx.server" do
     Application.put_env(:rekindle, :phx_server_probe, self())
 
@@ -200,6 +284,15 @@ defmodule Rekindle.InstallTest do
     )
   end
 
+  defp existing_client(integration, targets, extra_files \\ %{}) do
+    files =
+      integration
+      |> Rekindle.Integration.render(targets)
+      |> Map.new(fn {path, contents} -> {Path.join("client", path), contents} end)
+
+    project(Map.merge(files, extra_files))
+  end
+
   defp install(igniter, options \\ []) do
     igniter
     |> Map.put(:args, %Args{options: options})
@@ -215,6 +308,21 @@ defmodule Rekindle.InstallTest do
     igniter.rewrite.sources
     |> Enum.filter(fn {_path, source} -> Rewrite.Source.updated?(source) end)
     |> Map.new(fn {path, source} -> {path, Rewrite.Source.get(source, :content)} end)
+  end
+
+  defp client_contents(igniter) do
+    igniter.rewrite.sources
+    |> Enum.filter(fn {path, _source} -> String.starts_with?(path, "client/") end)
+    |> Map.new(fn {path, source} -> {path, Rewrite.Source.get(source, :content)} end)
+  end
+
+  defp update_content(igniter, path, update) do
+    source = igniter.rewrite.sources[path]
+
+    source =
+      Rewrite.Source.update(source, :content, update.(Rewrite.Source.get(source, :content)))
+
+    %{igniter | rewrite: Rewrite.update!(igniter.rewrite, source)}
   end
 
   defp ignore_lines(igniter) do

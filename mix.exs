@@ -25,6 +25,7 @@ defmodule Rekindle.MixProject do
   defp deps do
     [
       {:jason, "~> 1.4"},
+      {:toml_elixir, "~> 3.1"},
       {:igniter, "~> 0.8", optional: true}
     ]
   end

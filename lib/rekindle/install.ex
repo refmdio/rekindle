@@ -15,10 +15,10 @@ if Code.ensure_loaded?(Igniter) do
 
       with {:ok, requested} <- requested_selection(options),
            {:ok, existing} <- existing_selection(igniter, app),
-           {:ok, selection, install?} <-
+           {:ok, selection, mode} <-
              select(requested, existing, Igniter.exists?(igniter, "client/Cargo.toml")),
-           :ok <- available_paths(igniter, selection, install?) do
-        install(igniter, app, selection, install?)
+           :ok <- validate_client(igniter, selection, mode) do
+        install(igniter, app, selection, mode)
       else
         {:error, message} -> Igniter.add_issue(igniter, message)
       end
@@ -109,18 +109,25 @@ if Code.ensure_loaded?(Igniter) do
        %{
          integration: requested.integration || :gpui,
          targets: requested.targets || @targets
-       }, true}
+       }, :generate}
     end
 
-    defp select(_requested, nil, true) do
-      {:error,
-       "client/Cargo.toml already exists; pass both --integration and --targets to adopt it"}
+    defp select(%{integration: nil}, nil, true) do
+      {:error, "client/Cargo.toml already exists; --integration is required to adopt it"}
+    end
+
+    defp select(%{targets: nil}, nil, true) do
+      {:error, "client/Cargo.toml already exists; --targets is required to adopt it"}
+    end
+
+    defp select(requested, nil, true) do
+      {:ok, requested, :adopt}
     end
 
     defp select(requested, existing, true) do
       with :ok <- same_or_omitted(:integration, requested.integration, existing.integration),
            :ok <- same_or_omitted(:targets, requested.targets, existing.targets) do
-        {:ok, existing, false}
+        {:ok, existing, :existing}
       end
     end
 
@@ -136,9 +143,7 @@ if Code.ensure_loaded?(Igniter) do
        "requested #{name} #{inspect(requested)} conflicts with existing Rekindle configuration #{inspect(existing)}"}
     end
 
-    defp available_paths(_igniter, _selection, false), do: :ok
-
-    defp available_paths(igniter, selection, true) do
+    defp validate_client(igniter, selection, :generate) do
       selection.integration
       |> Integration.render(selection.targets)
       |> Map.keys()
@@ -149,21 +154,117 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp install(igniter, app, selection, install?) do
+    defp validate_client(_igniter, _selection, :existing), do: :ok
+
+    defp validate_client(igniter, selection, :adopt) do
+      with {:ok, manifest} <- read_manifest(igniter),
+           :ok <- direct_dependency(manifest, selection.integration),
+           :ok <- target_entries(igniter, selection.targets) do
+        :ok
+      end
+    end
+
+    defp read_manifest(igniter) do
+      igniter = Igniter.include_existing_file(igniter, "client/Cargo.toml", required?: true)
+      contents = igniter.rewrite.sources["client/Cargo.toml"] |> Rewrite.Source.get(:content)
+
+      case TomlElixir.decode(contents) do
+        {:ok, %{"package" => package} = manifest} when is_map(package) ->
+          {:ok, manifest}
+
+        {:ok, _manifest} ->
+          {:error, "client/Cargo.toml must describe a Cargo package"}
+
+        {:error, error} ->
+          {:error, "client/Cargo.toml is invalid: #{Exception.message(error)}"}
+      end
+    end
+
+    defp direct_dependency(manifest, selected) do
+      integrations =
+        manifest
+        |> dependency_tables()
+        |> Enum.flat_map(fn dependencies ->
+          Enum.flat_map(dependencies, fn {name, requirement} ->
+            package =
+              if is_map(requirement), do: Map.get(requirement, "package", name), else: name
+
+            case package do
+              "gpui" -> [:gpui]
+              "eframe" -> [:egui]
+              "slint" -> [:slint]
+              _ -> []
+            end
+          end)
+        end)
+        |> Enum.uniq()
+
+      case integrations do
+        [^selected] ->
+          :ok
+
+        [] ->
+          {:error,
+           "client/Cargo.toml has no direct #{Integration.dependency(selected)} dependency"}
+
+        [found] ->
+          {:error,
+           "client/Cargo.toml dependency #{found} does not match the selected #{selected} integration"}
+
+        found ->
+          {:error,
+           "client/Cargo.toml has ambiguous UI framework dependencies: #{Enum.join(found, ", ")}"}
+      end
+    end
+
+    defp dependency_tables(manifest) do
+      root =
+        case manifest["dependencies"] do
+          dependencies when is_map(dependencies) -> [dependencies]
+          _ -> []
+        end
+
+      target =
+        manifest
+        |> Map.get("target", %{})
+        |> Enum.flat_map(fn
+          {_selector, %{"dependencies" => dependencies}} when is_map(dependencies) ->
+            [dependencies]
+
+          _ ->
+            []
+        end)
+
+      root ++ target
+    end
+
+    defp target_entries(igniter, targets) do
+      case Enum.find(targets, fn target ->
+             not Igniter.exists?(igniter, "client/src/bin/#{target}.rs")
+           end) do
+        nil ->
+          :ok
+
+        target ->
+          {:error, "client/src/bin/#{target}.rs is required to adopt the #{target} target"}
+      end
+    end
+
+    defp install(igniter, app, selection, mode) do
       igniter
-      |> maybe_generate_client(selection, install?)
+      |> maybe_generate_client(selection, mode)
       |> configure(app, selection)
       |> Application.add_new_child(
         {Rekindle, {:code, Sourceror.parse_string!("[otp_app: #{inspect(app)}]")}}
       )
       |> TaskAliases.add_alias(:setup, "rekindle.setup", if_exists: :append)
       |> maybe_add_web_alias(selection.targets)
-      |> update_ignores(selection.targets, install?)
+      |> update_ignores(selection.targets, mode)
     end
 
-    defp maybe_generate_client(igniter, _selection, false), do: igniter
+    defp maybe_generate_client(igniter, _selection, mode) when mode != :generate, do: igniter
 
-    defp maybe_generate_client(igniter, selection, true) do
+    defp maybe_generate_client(igniter, selection, :generate) do
       selection.integration
       |> Integration.render(selection.targets)
       |> Enum.reduce(igniter, fn {relative, contents}, igniter ->
@@ -201,10 +302,10 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp update_ignores(igniter, targets, generated?) do
+    defp update_ignores(igniter, targets, mode) do
       entries =
         ["/.rekindle/"] ++
-          if(generated?, do: ["/client/target/"], else: []) ++
+          if(mode == :generate, do: ["/client/target/"], else: []) ++
           if(:web in targets, do: ["/priv/static/rekindle/"], else: []) ++
           if(:desktop in targets, do: ["/dist/rekindle/"], else: [])
 

@@ -16,4 +16,5 @@
   "spitfire": {:hex, :spitfire, "0.3.13", "edd207b065eaec57acc5484097d0aa3e97fe4246168c54e67a9af040b8dee4c1", [:mix], [], "hexpm", "3601be88ceed4967b584e96444de3e1d12d6555ae0864a7390b9cd5332d134b4"},
   "telemetry": {:hex, :telemetry, "1.4.2", "a0cb522801dffb1c49fe6e30561badffc7b6d0e180db1300df759faa22062855", [:rebar3], [], "hexpm", "928f6495066506077862c0d1646609eed891a4326bee3126ba54b60af61febb1"},
   "text_diff": {:hex, :text_diff, "0.1.0", "1caf3175e11a53a9a139bc9339bd607c47b9e376b073d4571c031913317fecaa", [:mix], [], "hexpm", "d1ffaaecab338e49357b6daa82e435f877e0649041ace7755583a0ea3362dbd7"},
+  "toml_elixir": {:hex, :toml_elixir, "3.1.0", "7e3d8803f1e27e0585b13f57e68a37f4b7437c0cf8ad868abd56f10def144dc1", [:mix], [], "hexpm", "95e676725c6d411dd079bb34e2167b505600930280d6c7a51f6000ea669c2f69"},
 }
