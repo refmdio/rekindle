@@ -25,7 +25,7 @@ defmodule Rekindle.ProjectSupervisor do
       {Rekindle.ProjectSession, project: project}
     ]
 
-    Supervisor.init(children, strategy: :one_for_one)
+    Supervisor.init(children, strategy: :one_for_all)
   end
 
   defp configuration_failure(errors) when is_list(errors) and errors != [] do

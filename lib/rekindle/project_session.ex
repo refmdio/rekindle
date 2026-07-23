@@ -6,7 +6,7 @@ defmodule Rekindle.ProjectSession do
   alias Rekindle.{BuildResult, Failure}
   alias Rekindle.Scheduler.Session
 
-  defstruct [:project, :session, pending: %{}, jobs: %{}, monitors: %{}]
+  defstruct [:project, :session, :session_id, pending: %{}, jobs: %{}, monitors: %{}]
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(options) do
@@ -22,11 +22,17 @@ defmodule Rekindle.ProjectSession do
                                                 {:ok, BuildResult.t()} | {:error, Failure.t()})) ::
           {:ok, BuildResult.t()} | {:error, Failure.t()}
   def build(project_root, target, executor) when is_function(executor, 1) do
-    key = {:session, Path.expand(project_root)}
-
-    case Registry.lookup(Rekindle.RuntimeRegistry, key) do
+    case lookup(project_root) do
       [{pid, _value}] -> GenServer.call(pid, {:build, target, executor}, :infinity)
       [] -> unavailable(target)
+    end
+  end
+
+  @spec identity(String.t()) :: {:ok, String.t()} | :none
+  def identity(project_root) do
+    case lookup(project_root) do
+      [{pid, _value}] -> GenServer.call(pid, :identity)
+      [] -> :none
     end
   end
 
@@ -36,7 +42,12 @@ defmodule Rekindle.ProjectSession do
 
     case Session.new(nodes, %{}, project.dev.debounce_ms) do
       {:ok, session, _admission_revision, _effects} ->
-        {:ok, %__MODULE__{project: project, session: session}}
+        {:ok,
+         %__MODULE__{
+           project: project,
+           session: session,
+           session_id: :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+         }}
 
       {:error, %Failure{} = failure} ->
         {:stop, failure}
@@ -44,6 +55,8 @@ defmodule Rekindle.ProjectSession do
   end
 
   @impl true
+  def handle_call(:identity, _from, state), do: {:reply, {:ok, state.session_id}, state}
+
   def handle_call({:build, target, executor}, from, state) do
     caller = make_ref()
 
@@ -237,6 +250,11 @@ defmodule Rekindle.ProjectSession do
       {:desktop, %{backend: {:external, _}}} ->
         {:desktop, [:external_desktop, :seal_desktop]}
     end)
+  end
+
+  defp lookup(project_root) do
+    key = {:session, Path.expand(project_root)}
+    Registry.lookup(Rekindle.RuntimeRegistry, key)
   end
 
   defp unavailable(target),

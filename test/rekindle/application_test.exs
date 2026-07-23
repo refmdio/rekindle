@@ -1,7 +1,7 @@
 defmodule Rekindle.ApplicationTest do
   use ExUnit.Case, async: false
 
-  alias Rekindle.{Failure, RuntimeState}
+  alias Rekindle.{Failure, ProjectSession, RuntimeState}
 
   @otp_app :rekindle_lifecycle_test
 
@@ -104,6 +104,33 @@ defmodule Rekindle.ApplicationTest do
            end)
 
     assert {:ok, %{status: :idle, owned_process_count: 0}} = RuntimeState.snapshot(File.cwd!())
+  end
+
+  test "restarts the complete project session boundary with a new identity" do
+    name = unique_name(:session_restart)
+    assert {:ok, _supervisor} = start_supervised({Rekindle, otp_app: @otp_app, name: name})
+
+    root = File.cwd!()
+    assert {:ok, first_identity} = ProjectSession.identity(root)
+    [{first_session, _}] = Registry.lookup(Rekindle.RuntimeRegistry, {:session, root})
+    [{first_state, _}] = Registry.lookup(Rekindle.RuntimeRegistry, {:project, root})
+    [{first_events, _}] = Registry.lookup(Rekindle.RuntimeRegistry, {:events, @otp_app})
+
+    Process.exit(first_session, :kill)
+
+    assert eventually(fn ->
+             with [{session, _}] when session != first_session <-
+                    Registry.lookup(Rekindle.RuntimeRegistry, {:session, root}),
+                  [{state, _}] when state != first_state <-
+                    Registry.lookup(Rekindle.RuntimeRegistry, {:project, root}),
+                  [{events, _}] when events != first_events <-
+                    Registry.lookup(Rekindle.RuntimeRegistry, {:events, @otp_app}),
+                  {:ok, identity} when identity != first_identity <- ProjectSession.identity(root) do
+               true
+             else
+               _ -> false
+             end
+           end)
   end
 
   test "stops the owner and releases all project-scoped registrations" do
