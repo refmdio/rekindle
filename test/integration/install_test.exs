@@ -372,7 +372,15 @@ defmodule Rekindle.InstallTest do
       end)
 
     before = client_contents(original)
-    adopted = install(original, integration: "gpui", targets: ["web"])
+    root = tmp_dir()
+    write_project(root, original)
+
+    adopted =
+      File.cd!(root, fn ->
+        result = install(original, integration: "gpui", targets: ["web"])
+        refute File.exists?("client/Cargo.lock")
+        result
+      end)
 
     assert adopted.issues == []
     assert client_contents(adopted) == before
@@ -622,5 +630,25 @@ defmodule Rekindle.InstallTest do
   defp index(content, value) do
     {index, _length} = :binary.match(content, value)
     index
+  end
+
+  defp write_project(root, igniter) do
+    Enum.each(igniter.rewrite.sources, fn {relative, source} ->
+      path = Path.join(root, relative)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, Rewrite.Source.get(source, :content))
+    end)
+  end
+
+  defp tmp_dir do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "rekindle-install-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(path)
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
   end
 end

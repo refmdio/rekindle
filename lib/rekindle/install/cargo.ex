@@ -10,15 +10,15 @@ if Code.ensure_loaded?(Igniter) do
     @spec validate(Igniter.t(), Integration.name(), [Integration.target()]) ::
             {:ok, %{Integration.target() => keyword()}} | {:error, String.t()}
     def validate(igniter, integration, targets) do
-      with_client_root(igniter, fn root ->
+      with_client_root(igniter, fn root, locked? ->
         with {:ok, platforms} <- platforms(targets) do
           targets
           |> Enum.reduce_while({:ok, %{}}, fn target, {:ok, resolved} ->
             platform = Map.fetch!(platforms, target)
 
-            with {:ok, structure} <- metadata(root, platform, [], true),
+            with {:ok, structure} <- metadata(root, platform, [], true, locked?),
                  {:ok, package, binary, features} <- target(structure, root, target),
-                 {:ok, metadata} <- metadata(root, platform, features, false),
+                 {:ok, metadata} <- metadata(root, platform, features, false, locked?),
                  :ok <- dependency(metadata, package["id"], integration, target) do
               options = [
                 package: package["name"],
@@ -37,58 +37,70 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp with_client_root(igniter, callback) do
-      project_root = temporary_root()
-      client_root = Path.join(project_root, "client")
+      client_root = Path.expand("client")
 
-      try do
-        :ok = copy_project(project_root)
-        :ok = materialize(igniter, project_root)
-        callback.(client_root)
-      after
-        File.rm_rf(project_root)
+      if File.regular?(Path.join(client_root, "Cargo.toml")) do
+        with_lock_preserved(client_root, callback)
+      else
+        project_root = temporary_root()
+
+        try do
+          :ok = materialize(igniter, project_root)
+          callback.(Path.join(project_root, "client"), false)
+        after
+          File.rm_rf(project_root)
+        end
       end
     end
 
-    defp copy_project(destination) do
-      source = File.cwd!()
+    defp with_lock_preserved(client_root, callback) do
+      with {:ok, workspace_root} <- workspace_root(client_root) do
+        lock = Path.join(workspace_root, "Cargo.lock")
 
-      if File.regular?(Path.join(source, "client/Cargo.toml")),
-        do: copy_directory(source, destination, ""),
-        else: :ok
-    end
+        case File.read(lock) do
+          {:ok, _contents} ->
+            callback.(client_root, true)
 
-    defp copy_directory(source, destination, relative) do
-      File.mkdir_p!(destination)
+          {:error, :enoent} ->
+            try do
+              callback.(client_root, false)
+            after
+              File.rm(lock)
+            end
 
-      source
-      |> File.ls!()
-      |> Enum.reject(&excluded?(Path.join(relative, &1)))
-      |> Enum.each(fn name ->
-        source_path = Path.join(source, name)
-        destination_path = Path.join(destination, name)
-        child_relative = Path.join(relative, name)
-
-        case File.lstat!(source_path).type do
-          :directory ->
-            copy_directory(source_path, destination_path, child_relative)
-
-          :regular ->
-            File.cp!(source_path, destination_path)
-
-          :symlink ->
-            File.ln_s!(File.read_link!(source_path), destination_path)
-
-          type ->
-            raise "project contains an unsupported #{type} entry: #{source_path}"
+          {:error, reason} ->
+            {:error, "cannot inspect Cargo.lock: #{:file.format_error(reason)}"}
         end
-      end)
+      end
     end
 
-    defp excluded?(relative) do
-      basename = Path.basename(relative)
+    defp workspace_root(client_root) do
+      arguments = [
+        "locate-project",
+        "--workspace",
+        "--message-format",
+        "plain",
+        "--manifest-path",
+        Path.join(client_root, "Cargo.toml")
+      ]
 
-      basename in [".git", "_build", "deps", "target", ".rekindle"] or
-        relative in ["priv/static/rekindle", "dist/rekindle"]
+      case Process.run(Rekindle.Toolchain.cargo_path(), arguments,
+             cd: client_root,
+             timeout: 30_000,
+             output_limit: 16_000
+           ) do
+        {:ok, %{status: 0, output: output}} ->
+          case output |> String.split("\n", trim: true) |> List.last() do
+            nil -> {:error, "cargo locate-project returned no workspace manifest"}
+            manifest -> {:ok, Path.dirname(manifest)}
+          end
+
+        {:ok, result} ->
+          {:error, "cargo locate-project failed with status #{result.status}: #{result.output}"}
+
+        {:error, reason} ->
+          {:error, "cargo locate-project could not run: #{inspect(reason)}"}
+      end
     end
 
     defp materialize(igniter, project_root) do
@@ -101,14 +113,22 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp temporary_root do
-      path =
-        Path.join(
-          System.tmp_dir!(),
-          "rekindle-adopt-#{System.unique_integer([:positive, :monotonic])}"
-        )
+      name =
+        "rekindle-adopt-" <> (:crypto.strong_rand_bytes(18) |> Base.url_encode64(padding: false))
 
-      File.mkdir_p!(path)
-      path
+      path = Path.join(System.tmp_dir!(), name)
+
+      case File.mkdir(path) do
+        :ok ->
+          File.chmod!(path, 0o700)
+          path
+
+        {:error, :eexist} ->
+          temporary_root()
+
+        {:error, reason} ->
+          raise File.Error, reason: reason, action: "create directory", path: path
+      end
     end
 
     defp platforms(targets) do
@@ -144,7 +164,7 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp metadata(root, platform, features, no_dependencies?) do
+    defp metadata(root, platform, features, no_dependencies?, locked?) do
       arguments =
         [
           "metadata",
@@ -156,7 +176,8 @@ if Code.ensure_loaded?(Igniter) do
           Path.join(root, "Cargo.toml")
         ] ++
           if(no_dependencies?, do: ["--no-deps"], else: []) ++
-          if(features == [], do: [], else: ["--features", Enum.join(features, ",")])
+          if(features == [], do: [], else: ["--features", Enum.join(features, ",")]) ++
+          if(locked?, do: ["--locked"], else: [])
 
       case Process.run(Rekindle.Toolchain.cargo_path(), arguments,
              cd: root,
