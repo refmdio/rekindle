@@ -289,17 +289,17 @@ defmodule Rekindle.ShutdownTest do
     assert %Result{status: :clean} = Shutdown.shutdown(coordinator)
 
     for _index <- 1..32 do
-      assert_receive :runner_shutdown_started
+      assert_received :runner_shutdown_started
     end
 
     completed =
       Enum.map(1..32, fn _index ->
-        assert_receive {:cleanup_started, index}
+        assert_received {:cleanup_started, index}
         index
       end)
 
     assert Enum.sort(completed) == Enum.to_list(1..32)
-    refute_receive :unaccepted_cleanup
+    refute_received :unaccepted_cleanup
   end
 
   test "all callbacks admitted before a shared deadline are attempted" do
