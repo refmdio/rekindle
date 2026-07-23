@@ -44,6 +44,10 @@ defmodule Mix.Tasks.Rekindle.Build do
     end
   end
 
+  defp print_diagnostics(%{output: output}) when is_binary(output) and output != "" do
+    Mix.shell().error(limit(output))
+  end
+
   defp print_diagnostics(_error), do: :ok
 
   defp limit(text) do

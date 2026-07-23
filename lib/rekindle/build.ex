@@ -8,7 +8,12 @@ defmodule Rekindle.Build do
   @targets [:web, :desktop]
 
   @spec run(Config.t(), atom(), keyword()) ::
-          {:ok, Rekindle.Build.Result.t()} | {:error, Error.t() | Rekindle.Cargo.Error.t()}
+          {:ok, Rekindle.Build.Result.t()}
+          | {:error,
+             Error.t()
+             | Rekindle.Cargo.Error.t()
+             | Rekindle.Toolchain.Error.t()
+             | Rekindle.Web.Error.t()}
   def run(%Config{} = project, target, options) do
     profile = Keyword.get(options, :profile, :dev)
 
@@ -57,8 +62,19 @@ defmodule Rekindle.Build do
     end
   end
 
+  defp dispatch(project, %{name: :web} = target, profile, options),
+    do: Rekindle.Web.Builder.build(project, target, profile, options)
+
   defp dispatch(project, target, profile, options) do
-    cargo_options = Keyword.take(options, [:timeout, :cancel_ref])
+    cargo_options =
+      Keyword.take(options, [
+        :cargo,
+        :rustc,
+        :timeout,
+        :output_limit,
+        :cancel_ref,
+        :env
+      ])
 
     case Rekindle.Cargo.build(project, target, profile, cargo_options) do
       {:ok, result} ->
