@@ -24,6 +24,7 @@ defmodule Rekindle.MixProject do
 
   defp deps do
     [
+      {:file_system, "~> 1.1"},
       {:jason, "~> 1.4"},
       {:muontrap, "~> 1.8"},
       {:plug, "~> 1.16"},

@@ -147,7 +147,11 @@ defmodule Rekindle.Development.Builder do
 
       if target_state.running do
         send(target_state.running.pid, {:rekindle_cancel, target_state.running.cancel_ref})
-        Task.shutdown(target_state.running.task, :brutal_kill)
+
+        case Task.yield(target_state.running.task, 1_500) do
+          nil -> Task.shutdown(target_state.running.task, :brutal_kill)
+          _result -> :ok
+        end
       end
     end)
   end
@@ -267,7 +271,10 @@ defmodule Rekindle.Development.Builder do
 
   defp notify(nil, _target, _result), do: :ok
 
-  defp notify(pid, target, result) when is_pid(pid) do
-    send(pid, {__MODULE__, target, result})
+  defp notify(destinations, target, result) when is_list(destinations) do
+    Enum.each(destinations, &notify(&1, target, result))
   end
+
+  defp notify(destination, target, result),
+    do: send(destination, {__MODULE__, target, result})
 end

@@ -14,14 +14,68 @@ defmodule Rekindle do
     endpoint = Keyword.fetch!(options, :endpoint)
 
     if Application.get_env(otp_app, endpoint, [])[:code_reloader] == true do
-      Supervisor.start_link(__MODULE__, otp_app)
+      Supervisor.start_link(__MODULE__, options)
     else
       :ignore
     end
   end
 
   @impl Supervisor
-  def init(_otp_app), do: Supervisor.init([], strategy: :one_for_one)
+  def init(options) do
+    otp_app = Keyword.fetch!(options, :otp_app)
+    project_root = Keyword.get(options, :project_root, File.cwd!())
+
+    case Config.load(otp_app, project_root: project_root) do
+      {:ok, project} ->
+        builder = process_name(otp_app, "Builder")
+        file_system = process_name(otp_app, "FileSystem")
+        desktop_supervisor = process_name(otp_app, "DesktopSupervisor")
+        desktop = process_name(otp_app, "Desktop")
+
+        desktop_children =
+          if Map.has_key?(project.targets, :desktop) do
+            [
+              %{
+                id: Rekindle.Desktop.Processes,
+                start:
+                  {DynamicSupervisor, :start_link,
+                   [[strategy: :one_for_one, name: desktop_supervisor]]},
+                type: :supervisor
+              },
+              {Rekindle.Desktop.Development,
+               name: desktop, project_root: project.root, supervisor: desktop_supervisor}
+            ]
+          else
+            []
+          end
+
+        notifications = if Map.has_key?(project.targets, :desktop), do: [desktop], else: []
+
+        children =
+          desktop_children ++
+            [
+              {Rekindle.Development.Builder,
+               name: builder, otp_app: otp_app, project_root: project.root, notify: notifications},
+              %{
+                id: Rekindle.Development.FileSystem,
+                start:
+                  {FileSystem, :start_link, [[dirs: [project.client_root], name: file_system]]}
+              },
+              {Rekindle.Development.Watcher,
+               source: file_system, builder: builder, root: project.client_root}
+            ]
+
+        Supervisor.init(children, strategy: :rest_for_one)
+
+      {:error, error} ->
+        raise error
+    end
+  end
+
+  defp process_name(otp_app, role) do
+    app = otp_app |> Atom.to_string() |> Macro.camelize()
+    Module.concat([Rekindle.Development, app, role])
+  end
 
   @doc """
   Builds artifacts for an enabled target.

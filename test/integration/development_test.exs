@@ -127,6 +127,29 @@ defmodule Rekindle.DevelopmentTest do
              Builder.status(builder)
   end
 
+  test "cancels a running build when its supervisor stops", %{root: root} do
+    test = self()
+
+    build = fn _target, options ->
+      send(test, :build_started)
+      expected_cancel = options[:cancel_ref]
+
+      receive do
+        {:rekindle_cancel, ^expected_cancel} -> send(test, :build_cancelled)
+      end
+
+      {:error, :cancelled}
+    end
+
+    builder = start_builder(root, build)
+    Builder.rebuild(builder, :web)
+    assert_receive :build_started
+
+    stop_supervised(Builder)
+    assert_receive :build_cancelled
+    refute Process.alive?(builder)
+  end
+
   test "serves the current generation and checks GPUI capability before import", %{root: root} do
     generation = publish_web(root, "export default 'ready';")
     options = Development.init(otp_app: :rekindle_development_test, project_root: root)
@@ -188,7 +211,7 @@ defmodule Rekindle.DevelopmentTest do
     second = desktop_result(root, "second", :running)
 
     DesktopDevelopment.replace(launcher, first)
-    assert_receive {DesktopDevelopment, {:ready, ^first}}
+    assert_receive {DesktopDevelopment, {:ready, ^first}}, 1_000
 
     assert %{current: %{pid: first_pid}, candidate: nil} =
              DesktopDevelopment.status(launcher)
@@ -201,7 +224,7 @@ defmodule Rekindle.DevelopmentTest do
     assert Process.alive?(first_pid)
     assert read_marker(root)["generation"] == first.metadata.generation
 
-    assert_receive {DesktopDevelopment, {:ready, ^second}}
+    assert_receive {DesktopDevelopment, {:ready, ^second}}, 1_000
     refute Process.alive?(first_pid)
     assert read_marker(root)["generation"] == second.metadata.generation
   end
@@ -214,17 +237,87 @@ defmodule Rekindle.DevelopmentTest do
     broken = desktop_result(root, "broken", :exit)
 
     DesktopDevelopment.replace(launcher, first)
-    assert_receive {DesktopDevelopment, {:ready, ^first}}
+    assert_receive {DesktopDevelopment, {:ready, ^first}}, 1_000
     %{current: %{pid: first_pid}} = DesktopDevelopment.status(launcher)
 
     DesktopDevelopment.replace(launcher, broken)
-    assert_receive {DesktopDevelopment, {:error, %Rekindle.Desktop.Error{kind: :readiness}}}
+
+    assert_receive {DesktopDevelopment, {:error, %Rekindle.Desktop.Error{kind: :readiness}}},
+                   1_000
 
     assert %{current: %{pid: ^first_pid}, candidate: nil} =
              DesktopDevelopment.status(launcher)
 
     assert Process.alive?(first_pid)
     assert read_marker(root)["generation"] == first.metadata.generation
+  end
+
+  test "stops the desktop process with its owning supervisor", %{root: root} do
+    supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+    launcher = start_launcher(root, supervisor)
+    result = desktop_result(root, "shutdown", :running)
+
+    DesktopDevelopment.replace(launcher, result)
+    assert_receive {DesktopDevelopment, {:ready, ^result}}, 1_000
+    %{current: %{pid: daemon}} = DesktopDevelopment.status(launcher)
+
+    stop_supervised(DesktopDevelopment)
+    assert_until(fn -> not Process.alive?(daemon) end)
+  end
+
+  test "maps client changes to affected targets and ignores Cargo output", %{root: root} do
+    client = Path.join(root, "client")
+
+    assert Rekindle.Development.Watcher.targets(client, Path.join(client, "src/lib.rs")) == [
+             :web,
+             :desktop
+           ]
+
+    assert Rekindle.Development.Watcher.targets(
+             client,
+             Path.join(client, "src/bin/web.rs")
+           ) == [:web]
+
+    assert Rekindle.Development.Watcher.targets(
+             client,
+             Path.join(client, "src/bin/desktop.rs")
+           ) == [:desktop]
+
+    assert Rekindle.Development.Watcher.targets(client, Path.join(client, "public/icon.svg")) == [
+             :web
+           ]
+
+    assert Rekindle.Development.Watcher.targets(
+             client,
+             Path.join(client, "target/debug/client")
+           ) == []
+
+    assert Rekindle.Development.Watcher.targets(client, Path.join(root, "outside.rs")) == []
+  end
+
+  test "removes only superseded development generations", %{root: root} do
+    web_root = Path.join([root, ".rekindle", "dev", "web"])
+    release_root = Path.join([root, ".rekindle", "release", "web"])
+    generations = Enum.map(1..3, &String.duplicate(Integer.to_string(&1), 64))
+
+    Enum.with_index(generations, fn generation, index ->
+      path = Path.join(web_root, generation)
+      File.mkdir_p!(path)
+      File.touch!(path, {{2026, 1, 1}, {0, 0, index}})
+    end)
+
+    File.mkdir_p!(Path.join(release_root, hd(generations)))
+    File.write!(Path.join(web_root, "user-file"), "keep")
+
+    {:ok, project} =
+      Rekindle.Config.load(:rekindle_development_test, project_root: root)
+
+    assert :ok = Rekindle.Development.Cleanup.web(project, List.last(generations))
+
+    assert File.dir?(Path.join(web_root, List.last(generations)))
+    assert length(Path.wildcard(Path.join(web_root, String.duplicate("?", 64)))) == 2
+    assert File.regular?(Path.join(web_root, "user-file"))
+    assert File.dir?(Path.join(release_root, hd(generations)))
   end
 
   defp start_builder(root, build, options \\ []) do

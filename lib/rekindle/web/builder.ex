@@ -51,7 +51,10 @@ defmodule Rekindle.Web.Builder do
   @doc false
   @spec activate(Rekindle.Config.t(), Result.t()) :: :ok | {:error, Error.t()}
   def activate(project, %Result{target: :web, profile: profile, metadata: metadata}) do
-    select(project, profile, %{"generation" => metadata.generation})
+    with :ok <- select(project, profile, %{"generation" => metadata.generation}) do
+      if profile == :dev, do: Rekindle.Development.Cleanup.web(project, metadata.generation)
+      :ok
+    end
   end
 
   defp bindgen(executable, artifact, output, options) do

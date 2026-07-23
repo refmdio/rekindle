@@ -21,6 +21,8 @@ defmodule Rekindle.Desktop.Development do
 
   @impl GenServer
   def init(options) do
+    Process.flag(:trap_exit, true)
+
     {:ok,
      %{
        root: options |> Keyword.get(:project_root, File.cwd!()) |> Path.expand(),
@@ -66,6 +68,7 @@ defmodule Rekindle.Desktop.Development do
       case write_marker(state.root, candidate.result) do
         :ok ->
           stop(state.supervisor, state.current)
+          Rekindle.Development.Cleanup.desktop(state.root, candidate.result)
           notify(state.notify, {:ready, candidate.result})
           {:noreply, %{state | current: candidate, candidate: nil}}
 
