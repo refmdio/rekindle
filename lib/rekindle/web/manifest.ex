@@ -156,10 +156,18 @@ defmodule Rekindle.Web.Manifest do
   end
 
   defp references(source) do
-    ~r/["']((?:\.{1,2}\/)?[^"'?#]+\.(?:js|wasm))(?:[?#][^"']*)?["']/
-    |> Regex.scan(source, capture: :all_but_first)
-    |> List.flatten()
-    |> Enum.reject(&url?/1)
+    import_references =
+      ~r/\b(?:import|export)\s+(?:[^"'()]*?\s+from\s+)?["']([^"'?#]+\.(?:js|wasm))(?:[?#][^"']*)?["']|\bimport\s*\(\s*["']([^"'?#]+\.(?:js|wasm))(?:[?#][^"']*)?["']\s*\)/
+      |> Regex.scan(source, capture: :all_but_first)
+      |> List.flatten()
+
+    url_references =
+      ~r/\bnew\s+URL\s*\(\s*["']([^"'?#]+\.wasm)(?:[?#][^"']*)?["']\s*,\s*import\.meta\.url\s*\)/
+      |> Regex.scan(source, capture: :all_but_first)
+      |> List.flatten()
+
+    (import_references ++ url_references)
+    |> Enum.reject(&(&1 == "" or url?(&1)))
     |> Enum.uniq()
   end
 

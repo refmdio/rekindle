@@ -279,7 +279,7 @@ defmodule Rekindle.WebBuildTest do
       case "$mode" in
         success)
           mkdir -p "$output/snippets"
-          printf "import './snippets/helper.js';\\nconst wasm = new URL('app_bg.wasm', import.meta.url);\\n" > "$output/app.js"
+          printf "import './snippets/helper.js';\\nconst imports = {'./app_bg.js': {}};\\nconst wasm = new URL('app_bg.wasm', import.meta.url);\\n" > "$output/app.js"
           printf 'wasm' > "$output/app_bg.wasm"
           printf 'export const ready = true;\\n' > "$output/snippets/helper.js"
           ;;

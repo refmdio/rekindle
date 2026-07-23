@@ -31,6 +31,10 @@ defmodule Rekindle.IntegrationsTest do
       assert both["Cargo.toml"] =~ ~s(name = "sample-client")
       assert both["Cargo.toml"] =~ framework
 
+      if name == :gpui do
+        assert both["Cargo.toml"] =~ ~s(features = ["wayland", "x11"])
+      end
+
       assert both["Cargo.toml"] =~
                ~s(wasm-bindgen = "=#{Rekindle.Toolchain.wasm_bindgen_version()}")
 
@@ -72,6 +76,66 @@ defmodule Rekindle.IntegrationsTest do
         if :desktop in targets,
           do: cargo_check!(root, "desktop", host_target!())
       end
+    end
+  end
+
+  test "packages Web and desktop generations for every built-in integration" do
+    previous = Application.get_env(:rekindle_integration_matrix_test, Rekindle)
+
+    on_exit(fn ->
+      if previous do
+        Application.put_env(:rekindle_integration_matrix_test, Rekindle, previous)
+      else
+        Application.delete_env(:rekindle_integration_matrix_test, Rekindle)
+      end
+    end)
+
+    for name <- Integration.names() do
+      root = tmp_dir("#{name}-package")
+      client = Path.join(root, "client")
+      package = "matrix_#{name}"
+      write(client, Integration.render(name, [:web, :desktop], package_name: package))
+
+      Application.put_env(:rekindle_integration_matrix_test, Rekindle,
+        integration: name,
+        targets: [
+          web: [package: package, binary: "web", features: ["web"]],
+          desktop: [package: package, binary: "desktop", features: ["desktop"]]
+        ]
+      )
+
+      cargo = rustup_tool!(client, "cargo")
+      {rustc, 0} = System.cmd("rustup", ["which", "rustc"], cd: client)
+
+      environment =
+        System.get_env()
+        |> Map.put(
+          "CARGO_TARGET_DIR",
+          Path.join(System.tmp_dir!(), "rekindle-integration-package-target")
+        )
+        |> Map.put("CARGO_TERM_COLOR", "never")
+        |> Map.put("RUSTC", String.trim(rustc))
+
+      options = [
+        otp_app: :rekindle_integration_matrix_test,
+        project_root: root,
+        cargo: cargo,
+        rustc: String.trim(rustc),
+        env: environment
+      ]
+
+      assert {:ok, web} = Rekindle.build(:web, options)
+      assert web.metadata.package == package
+      assert web.metadata.rust_target == "wasm32-unknown-unknown"
+      assert File.regular?(web.artifact)
+      assert File.regular?(web.metadata.manifest)
+
+      assert {:ok, desktop} = Rekindle.build(:desktop, options)
+      assert desktop.metadata.package == package
+      assert desktop.metadata.rust_target == host_target!()
+      assert File.regular?(desktop.artifact)
+      assert File.regular?(desktop.metadata.manifest)
+      assert_desktop_starts!(desktop.artifact, name)
     end
   end
 
@@ -137,6 +201,25 @@ defmodule Rekindle.IntegrationsTest do
   defp host_target! do
     {:ok, target} = Rekindle.Toolchain.host_target()
     target
+  end
+
+  defp assert_desktop_starts!(artifact, integration) do
+    case Rekindle.Toolchain.Process.run(artifact, [],
+           cd: Path.dirname(artifact),
+           timeout: 1_000,
+           output_limit: 64_000
+         ) do
+      {:error, :timeout} ->
+        :ok
+
+      {:ok, result} ->
+        flunk(
+          "#{integration} desktop exited during startup with status #{result.status}:\n#{result.output}"
+        )
+
+      {:error, reason} ->
+        flunk("#{integration} desktop could not start: #{inspect(reason)}")
+    end
   end
 
   defp tmp_dir(name) do
