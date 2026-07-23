@@ -4,6 +4,10 @@ defmodule Rekindle.Toolchain.Process do
   @default_timeout 120_000
   @default_output_limit 8_000_000
   @termination_grace 500
+  @probe_grace 200
+  @probe_reap_grace 20
+  @probe_natural_exit 1_500
+  @probe_executables ["/usr/bin/sleep", "/bin/sleep"]
 
   @enforce_keys [:status, :output, :truncated?]
   defstruct [:status, :output, :truncated?]
@@ -231,13 +235,8 @@ defmodule Rekindle.Toolchain.Process do
   end
 
   defp verify_process_tools(tools) do
-    with {:ok, group_pid} <- current_group_pid(),
-         {"", 0} <-
-           System.cmd(tools.pkill, ["-0", "-g", Integer.to_string(group_pid)],
-             stderr_to_stdout: true
-           ),
-         {"", 0} <-
-           System.cmd(tools.kill, ["-0", System.pid()], stderr_to_stdout: true) do
+    with :ok <- verify_signal(tools, :group),
+         :ok <- verify_signal(tools, :process) do
       :ok
     else
       _ ->
@@ -246,9 +245,127 @@ defmodule Rekindle.Toolchain.Process do
     end
   end
 
-  defp current_group_pid do
-    with {:ok, stat} <- File.read("/proc/self/stat") do
-      process_group_pid(stat)
+  defp verify_signal(tools, kind) do
+    probe = Enum.find(@probe_executables, &File.exists?/1)
+
+    if is_nil(probe), do: raise("probe executable was not found")
+
+    port =
+      Port.open(
+        {:spawn_executable, String.to_charlist(tools.setsid)},
+        [
+          :binary,
+          :exit_status,
+          :stderr_to_stdout,
+          :use_stdio,
+          args: ["--wait", probe, "1"],
+          cd: "/"
+        ]
+      )
+
+    process_pid = probe_process_pid(port, @probe_grace)
+
+    signal_result =
+      case {kind, process_pid} do
+        {:group, pid} when is_integer(pid) ->
+          System.cmd(tools.pkill, ["-TERM", "-g", Integer.to_string(pid)], stderr_to_stdout: true)
+
+        {:process, pid} when is_integer(pid) ->
+          System.cmd(tools.kill, ["-TERM", Integer.to_string(pid)], stderr_to_stdout: true)
+
+        _ ->
+          {"", 1}
+      end
+
+    exited = await_process_exit(process_pid, @probe_grace)
+
+    finish_probe(port, exited)
+
+    if match?({_output, 0}, signal_result) and exited == :ok, do: :ok, else: :error
+  rescue
+    _error -> :error
+  end
+
+  defp await_process_exit(pid, timeout) when is_integer(pid) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_process_exit_until(pid, deadline)
+  end
+
+  defp await_process_exit(_pid, _timeout), do: :timeout
+
+  defp await_process_exit_until(pid, deadline) do
+    if File.exists?("/proc/#{pid}") do
+      if System.monotonic_time(:millisecond) >= deadline do
+        :timeout
+      else
+        Process.sleep(5)
+        await_process_exit_until(pid, deadline)
+      end
+    else
+      :ok
+    end
+  end
+
+  defp finish_probe(port, :ok) do
+    if await_exit(port, @probe_reap_grace) == :timeout and Port.info(port) do
+      Port.close(port)
+    end
+  end
+
+  defp finish_probe(port, :timeout) do
+    if await_exit(port, @probe_natural_exit) == :timeout and Port.info(port) do
+      Port.close(port)
+    end
+  end
+
+  defp probe_process_pid(port, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    probe_process_pid_until(port, deadline)
+  end
+
+  defp probe_process_pid_until(port, deadline) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, os_pid} ->
+        case probe_group_leader(os_pid) do
+          {:ok, pid} -> pid
+          :error -> retry_probe_pid(port, deadline)
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp retry_probe_pid(port, deadline) do
+    if System.monotonic_time(:millisecond) >= deadline do
+      nil
+    else
+      Process.sleep(5)
+      probe_process_pid_until(port, deadline)
+    end
+  end
+
+  defp probe_group_leader(os_pid) do
+    with {:ok, stat} <- File.read("/proc/#{os_pid}/stat"),
+         {:ok, group_pid} <- process_group_pid(stat) do
+      if group_pid == os_pid do
+        {:ok, os_pid}
+      else
+        probe_child_group_leader(os_pid)
+      end
+    else
+      _ -> :error
+    end
+  end
+
+  defp probe_child_group_leader(os_pid) do
+    with child when is_integer(child) <- session_child_pid(os_pid),
+         true <- child != os_pid,
+         {:ok, stat} <- File.read("/proc/#{child}/stat"),
+         {:ok, ^child} <- process_group_pid(stat) do
+      {:ok, child}
+    else
+      _ -> :error
     end
   end
 

@@ -382,7 +382,7 @@ defmodule Rekindle.Cargo.ProcessTest do
 
     File.mkdir_p!(bin)
 
-    for name <- ["setsid", "pgrep", "kill"] do
+    for name <- ["setsid", "kill"] do
       File.ln_s!(System.find_executable(name), Path.join(bin, name))
     end
 
@@ -399,9 +399,11 @@ defmodule Rekindle.Cargo.ProcessTest do
     refute File.exists?(marker)
   end
 
-  test "falls back to direct group-member cleanup when pkill is a no-op" do
+  test "does not launch when group signaling falsely reports success" do
     root = tmp_dir()
     bin = Path.join(root, "bin")
+    marker = Path.join(root, "started")
+    executable = Path.join(root, "mark-started")
     previous_path = System.fetch_env!("PATH")
 
     File.mkdir_p!(bin)
@@ -412,42 +414,82 @@ defmodule Rekindle.Cargo.ProcessTest do
 
     File.write!(Path.join(bin, "pkill"), "#!/bin/sh\nexit 0\n")
     File.chmod!(Path.join(bin, "pkill"), 0o755)
+    File.write!(executable, "#!/bin/sh\ntouch \"#{marker}\"\n")
+    File.chmod!(executable, 0o755)
+    on_exit(fn -> System.put_env("PATH", previous_path) end)
+    System.put_env("PATH", bin)
+
+    assert {:error, {:start, error}} = Process.run(executable, [], cd: root, timeout: 100)
+    assert Exception.message(error) == "process group controls are not operational"
+    refute File.exists?(marker)
+  end
+
+  test "does not launch when direct signaling falsely reports success" do
+    root = tmp_dir()
+    bin = Path.join(root, "bin")
+    marker = Path.join(root, "started")
+    executable = Path.join(root, "mark-started")
+    previous_path = System.fetch_env!("PATH")
+
+    File.mkdir_p!(bin)
+
+    for name <- ["setsid", "pkill"] do
+      File.ln_s!(System.find_executable(name), Path.join(bin, name))
+    end
+
+    File.write!(Path.join(bin, "kill"), "#!/bin/sh\nexit 0\n")
+    File.chmod!(Path.join(bin, "kill"), 0o755)
+    File.write!(executable, "#!/bin/sh\ntouch \"#{marker}\"\n")
+    File.chmod!(executable, 0o755)
+    on_exit(fn -> System.put_env("PATH", previous_path) end)
+    System.put_env("PATH", bin)
+
+    assert {:error, {:start, error}} = Process.run(executable, [], cd: root)
+    assert Exception.message(error) == "process group controls are not operational"
+    refute File.exists?(marker)
+  end
+
+  test "does not launch when all signal controls falsely report success" do
+    root = tmp_dir()
+    bin = Path.join(root, "bin")
+    previous_path = System.fetch_env!("PATH")
+
+    File.mkdir_p!(bin)
+    File.ln_s!(System.find_executable("setsid"), Path.join(bin, "setsid"))
+
+    for name <- ["pkill", "kill"] do
+      File.write!(Path.join(bin, name), "#!/bin/sh\nexit 0\n")
+      File.chmod!(Path.join(bin, name), 0o755)
+    end
+
     on_exit(fn -> System.put_env("PATH", previous_path) end)
     System.put_env("PATH", bin)
 
     timeout_parent = Path.join(root, "timeout-parent")
     timeout_child = Path.join(root, "timeout-child")
 
-    assert {:error, :timeout} =
+    assert {:error, {:start, error}} =
              Process.run(wait_executable(root), [timeout_parent, timeout_child],
                cd: root,
                timeout: 100
              )
 
-    refute_process(timeout_parent)
-    refute_process(timeout_child)
+    assert Exception.message(error) == "process group controls are not operational"
+    refute File.exists?(timeout_parent)
+    refute File.exists?(timeout_child)
 
     cancel_parent = Path.join(root, "cancel-parent")
     cancel_child = Path.join(root, "cancel-child")
-    cancel_ref = make_ref()
-    parent = self()
 
-    task =
-      Task.async(fn ->
-        send(parent, {:no_op_runner, self()})
+    assert {:error, {:start, error}} =
+             Process.run(wait_executable(root), [cancel_parent, cancel_child],
+               cd: root,
+               cancel_ref: make_ref()
+             )
 
-        Process.run(wait_executable(root), [cancel_parent, cancel_child],
-          cd: root,
-          cancel_ref: cancel_ref
-        )
-      end)
-
-    assert_receive {:no_op_runner, runner}
-    assert wait_for_file(cancel_child, 50)
-    send(runner, {:rekindle_cancel, cancel_ref})
-    assert Task.await(task) == {:error, :cancelled}
-    refute_process(cancel_parent)
-    refute_process(cancel_child)
+    assert Exception.message(error) == "process group controls are not operational"
+    refute File.exists?(cancel_parent)
+    refute File.exists?(cancel_child)
   end
 
   test "times out and reaps the child" do
