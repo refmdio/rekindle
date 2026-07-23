@@ -398,6 +398,74 @@ defmodule Rekindle.Cargo.MessagesTest do
     assert warning.line == 3
     assert warning.rendered == "warning: unused value"
   end
+
+  test "returns typed errors for malformed recognized messages" do
+    artifact = %{
+      "reason" => "compiler-artifact",
+      "package_id" => "fixture_ui 0.1.0",
+      "target" => %{"name" => "web", "kind" => ["bin"]},
+      "filenames" => ["/tmp/web.wasm"],
+      "executable" => nil
+    }
+
+    diagnostic = %{
+      "reason" => "compiler-message",
+      "message" => %{
+        "level" => "error",
+        "message" => "failed",
+        "rendered" => "error: failed",
+        "spans" => []
+      }
+    }
+
+    malformed = [
+      put_in(artifact, ["target"], nil),
+      put_in(artifact, ["target", "name"], nil),
+      put_in(artifact, ["target", "kind"], nil),
+      put_in(artifact, ["filenames"], nil),
+      put_in(artifact, ["filenames"], [1]),
+      put_in(artifact, ["executable"], 1),
+      put_in(diagnostic, ["message"], nil),
+      put_in(diagnostic, ["message", "spans"], nil),
+      put_in(diagnostic, ["message", "level"], nil),
+      put_in(diagnostic, ["message", "message"], nil),
+      put_in(diagnostic, ["message", "rendered"], 1),
+      put_in(diagnostic, ["message", "spans"], [
+        %{"is_primary" => true, "file_name" => nil, "line_start" => nil}
+      ])
+    ]
+
+    Enum.each(malformed, fn message ->
+      process = %Process{
+        status: 0,
+        output: Jason.encode!(message),
+        truncated?: false
+      }
+
+      assert {:error, %Rekindle.Cargo.Error{kind: :invalid_message}} =
+               Messages.decode(process, "fixture_ui 0.1.0", "web", :web)
+    end)
+  end
+
+  test "continues to ignore unknown JSON and capture non-JSON output" do
+    artifact =
+      Jason.encode!(%{
+        "reason" => "compiler-artifact",
+        "package_id" => "fixture_ui 0.1.0",
+        "target" => %{"name" => "web", "kind" => ["bin"]},
+        "filenames" => ["/tmp/web.wasm"],
+        "executable" => nil
+      })
+
+    process = %Process{
+      status: 0,
+      output: Jason.encode!(%{"reason" => "build-script-executed"}) <> "\nnote\n" <> artifact,
+      truncated?: false
+    }
+
+    assert {:ok, "/tmp/web.wasm", [], "note"} =
+             Messages.decode(process, "fixture_ui 0.1.0", "web", :web)
+  end
 end
 
 defmodule Rekindle.Cargo.ProcessTest do

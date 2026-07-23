@@ -127,7 +127,71 @@ defmodule Rekindle.BuildTest do
     assert byte_size(output) == 64_000
   end
 
+  test "Mix build reports malformed Cargo messages as a controlled failure", %{root: root} do
+    File.cp_r!("test/fixtures/cargo_project", Path.join(root, "client"))
+
+    malformed =
+      Jason.encode!(%{
+        "reason" => "compiler-message",
+        "message" => %{
+          "level" => "error",
+          "message" => "failed",
+          "rendered" => "error: failed",
+          "spans" => nil
+        }
+      })
+
+    fake_bin = fake_output_cargo(root, malformed)
+    previous_path = System.fetch_env!("PATH")
+    previous = Application.get_env(:rekindle, Rekindle)
+
+    on_exit(fn ->
+      System.put_env("PATH", previous_path)
+
+      if previous do
+        Application.put_env(:rekindle, Rekindle, previous)
+      else
+        Application.delete_env(:rekindle, Rekindle)
+      end
+    end)
+
+    Application.put_env(:rekindle, Rekindle,
+      integration: :gpui,
+      targets: [desktop: []]
+    )
+
+    System.put_env("PATH", fake_bin <> ":" <> previous_path)
+
+    output =
+      File.cd!(root, fn ->
+        Mix.Task.reenable("rekindle.build")
+
+        capture_io(:stderr, fn ->
+          assert_raise Mix.Error, "cargo returned a malformed compiler-message message", fn ->
+            Mix.Tasks.Rekindle.Build.run(["desktop"])
+          end
+        end)
+      end)
+
+    assert output =~ ~s("reason":"compiler-message")
+  end
+
   defp fake_diagnostic_cargo(root, rendered) do
+    diagnostic =
+      Jason.encode!(%{
+        "reason" => "compiler-message",
+        "message" => %{
+          "level" => "error",
+          "message" => "oversized diagnostic",
+          "rendered" => rendered,
+          "spans" => []
+        }
+      })
+
+    fake_output_cargo(root, diagnostic)
+  end
+
+  defp fake_output_cargo(root, output) do
     bin = Path.join(root, "fake-bin")
     path = Path.join(bin, "cargo")
     package_id = "fixture_ui 0.1.0"
@@ -153,17 +217,6 @@ defmodule Rekindle.BuildTest do
         "target_directory" => Path.join(root, "client/target")
       })
 
-    diagnostic =
-      Jason.encode!(%{
-        "reason" => "compiler-message",
-        "message" => %{
-          "level" => "error",
-          "message" => "oversized diagnostic",
-          "rendered" => rendered,
-          "spans" => []
-        }
-      })
-
     File.mkdir_p!(bin)
 
     File.write!(
@@ -174,7 +227,7 @@ defmodule Rekindle.BuildTest do
         printf '%s\\n' '#{metadata}'
         exit 0
       fi
-      printf '%s\\n' '#{diagnostic}'
+      printf '%s\\n' '#{output}'
       exit 1
       """
     )

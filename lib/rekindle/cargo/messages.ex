@@ -7,26 +7,44 @@ defmodule Rekindle.Cargo.Messages do
   @spec decode(Rekindle.Toolchain.Process.t(), String.t(), String.t(), :web | :desktop) ::
           {:ok, Path.t(), [Diagnostic.t()], String.t()} | {:error, Error.t()}
   def decode(process, package_id, binary, target) do
-    {artifact, diagnostics, output} =
+    result =
       process.output
       |> String.split("\n", trim: true)
-      |> Enum.reduce({nil, [], []}, fn line, {artifact, diagnostics, output} ->
+      |> Enum.reduce_while({nil, [], []}, fn line, {artifact, diagnostics, output} ->
         case Jason.decode(line) do
           {:ok, %{"reason" => "compiler-artifact"} = message} ->
-            {matching_artifact(message, package_id, binary, target) || artifact, diagnostics,
-             output}
+            if artifact_message?(message) do
+              {:cont,
+               {matching_artifact(message, package_id, binary, target) || artifact, diagnostics,
+                output}}
+            else
+              {:halt, invalid_message("compiler-artifact", line)}
+            end
 
           {:ok, %{"reason" => "compiler-message", "message" => message}} ->
-            {artifact, [diagnostic(message) | diagnostics], output}
+            if diagnostic_message?(message) do
+              {:cont, {artifact, [diagnostic(message) | diagnostics], output}}
+            else
+              {:halt, invalid_message("compiler-message", line)}
+            end
+
+          {:ok, %{"reason" => "compiler-message"}} ->
+            {:halt, invalid_message("compiler-message", line)}
 
           {:ok, _message} ->
-            {artifact, diagnostics, output}
+            {:cont, {artifact, diagnostics, output}}
 
           {:error, _reason} ->
-            {artifact, diagnostics, [line | output]}
+            {:cont, {artifact, diagnostics, [line | output]}}
         end
       end)
 
+    finish(result, process, target)
+  end
+
+  defp finish({:error, _error} = result, _process, _target), do: result
+
+  defp finish({artifact, diagnostics, output}, process, target) do
     diagnostics = Enum.reverse(diagnostics)
     output = output |> Enum.reverse() |> Enum.join("\n")
     diagnostics = failure_diagnostic(process.status, diagnostics, output)
@@ -56,6 +74,46 @@ defmodule Rekindle.Cargo.Messages do
       true ->
         {:ok, artifact, diagnostics, output}
     end
+  end
+
+  defp artifact_message?(message) do
+    is_binary(message["package_id"]) and
+      match?(
+        %{"name" => name, "kind" => kind}
+        when is_binary(name) and is_list(kind),
+        message["target"]
+      ) and
+      Enum.all?(message["target"]["kind"], &is_binary/1) and
+      is_list(message["filenames"]) and
+      Enum.all?(message["filenames"], &is_binary/1) and
+      (is_nil(message["executable"]) or is_binary(message["executable"]))
+  end
+
+  defp diagnostic_message?(message) when is_map(message) do
+    is_binary(message["level"]) and
+      is_binary(message["message"]) and
+      (is_nil(message["rendered"]) or is_binary(message["rendered"])) and
+      is_list(message["spans"]) and
+      Enum.all?(message["spans"], &span?/1)
+  end
+
+  defp diagnostic_message?(_message), do: false
+
+  defp span?(%{"is_primary" => false}), do: true
+
+  defp span?(%{
+         "is_primary" => true,
+         "file_name" => file,
+         "line_start" => line
+       })
+       when is_binary(file) and is_integer(line),
+       do: true
+
+  defp span?(_span), do: false
+
+  defp invalid_message(reason, output) do
+    {:error,
+     Error.new(:invalid_message, "cargo returned a malformed #{reason} message", output: output)}
   end
 
   defp matching_artifact(message, package_id, binary, target) do
