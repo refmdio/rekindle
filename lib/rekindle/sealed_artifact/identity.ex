@@ -15,8 +15,8 @@ defmodule Rekindle.SealedArtifact.Identity do
          {:ok, members} <- web_members(members) do
       {:ok,
        digest(
-         "rekindle-web-artifact-v1\0",
-         %{"v" => 1, "build_key" => build_key, "members" => members}
+         "rekindle-web-artifact-v2\0",
+         %{"v" => 2, "build_key" => build_key, "members" => members}
        )}
     else
       _ -> :error
@@ -34,8 +34,8 @@ defmodule Rekindle.SealedArtifact.Identity do
          {:ok, executable} <- desktop_executable(executable) do
       {:ok,
        digest(
-         "rekindle-native-artifact-v1\0",
-         %{"v" => 1, "build_key" => build_key, "executable" => executable}
+         "rekindle-native-artifact-v2\0",
+         %{"v" => 2, "build_key" => build_key, "executable" => executable}
        )}
     else
       _ -> :error

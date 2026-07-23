@@ -7,17 +7,17 @@ defmodule Rekindle.SealedArtifact.IdentityTest do
 
   test "derives the fixed Web identity vector from its exact canonical preimage" do
     member = %{"path" => "app.js", "role" => "javascript", "sha256" => @zero, "size" => 12}
-    identity = %{"v" => 1, "build_key" => @zero, "members" => [member]}
+    identity = %{"v" => 2, "build_key" => @zero, "members" => [member]}
 
     assert CanonicalValue.encode!(identity) ==
-             ~s({"build_key":"#{@zero}","members":[{"path":"app.js","role":"javascript","sha256":"#{@zero}","size":12}],"v":1})
+             ~s({"build_key":"#{@zero}","members":[{"path":"app.js","role":"javascript","sha256":"#{@zero}","size":12}],"v":2})
 
     manifest = %{
       "build" => %{"build_key" => @zero},
       "members" => [Map.merge(member, %{"mime" => "ignored", "cache" => "immutable"})]
     }
 
-    assert {:ok, "33f0d2c8298577613b0cfc452dc9a787ea2f696267fb3d0871cbc311286eaa18"} =
+    assert {:ok, "7a920dcdf1a19ccaf2ae1d10940136565fd0e84fe4f0ae10ad9a2126def7e508"} =
              Identity.derive(:web, manifest)
   end
 
@@ -29,14 +29,14 @@ defmodule Rekindle.SealedArtifact.IdentityTest do
       "size" => 42
     }
 
-    identity = %{"v" => 1, "build_key" => @zero, "executable" => executable}
+    identity = %{"v" => 2, "build_key" => @zero, "executable" => executable}
 
     assert CanonicalValue.encode!(identity) ==
-             ~s({"build_key":"#{@zero}","executable":{"mode":"executable_owner","path":"application","sha256":"#{@zero}","size":42},"v":1})
+             ~s({"build_key":"#{@zero}","executable":{"mode":"executable_owner","path":"application","sha256":"#{@zero}","size":42},"v":2})
 
     manifest = %{"build" => %{"build_key" => @zero}, "executable" => executable}
 
-    assert {:ok, "23fbbf98367227a7d507c3ebeab9d151e8c46f2e3572e5c4caa247e7ebd014de"} =
+    assert {:ok, "a247ced27878baf0ece37be2c7a6734a285219ce8bfa278f4deceb0610707a0a"} =
              Identity.derive(:desktop, manifest)
   end
 

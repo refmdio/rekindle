@@ -28,6 +28,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     asset = %{
       "os" => host.os,
       "arch" => host.arch,
+      "target_triple" => host.target_triple,
       "url" => "https://release.example/rekindle_toolchain",
       "size" => byte_size(bytes),
       "sha256" => sha256(bytes)
@@ -674,6 +675,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       put_in(hello, ["expected", "toolframe"], "1"),
       %{hello | "host" => nil},
       update_in(hello, ["host"], &Map.delete(&1, "arch")),
+      update_in(hello, ["host"], &Map.delete(&1, "target_triple")),
       put_in(hello, ["host", "extra"], "value"),
       put_in(hello, ["host", "os"], 1),
       Map.put(hello, "extra", true)
@@ -684,7 +686,8 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
       {put_in(hello, ["expected", "toolframe"], 2), "protocol_mismatch"},
       {put_in(hello, ["expected", "wasm_bindgen_schema"], "0.0.0"), "schema_mismatch"},
       {put_in(hello, ["expected", "helper_version"], "9.9.9"), "version_mismatch"},
-      {put_in(hello, ["host", "arch"], "other"), "host_mismatch"}
+      {put_in(hello, ["host", "arch"], "other"), "host_mismatch"},
+      {put_in(hello, ["host", "target_triple"], "other"), "host_mismatch"}
     ]
 
     for invalid <- missing_hellos ++ invalid_hellos do
@@ -1167,7 +1170,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
     manifest =
       output
-      |> Path.join("rekindle-web-manifest-v1.json")
+      |> Path.join("rekindle-web-manifest-v2.json")
       |> File.read!()
       |> Jason.decode!()
 
@@ -1199,7 +1202,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
     schema_mutations = [
       {"unknown root field", &Map.put(&1, "unknown", true)},
-      {"contract version", &Map.put(&1, "contract_version", 2)},
+      {"contract version", &Map.put(&1, "contract_version", 1)},
       {"Rekindle semver", &Map.put(&1, "rekindle_version", "01.0.0")},
       {"application identity", &Map.put(&1, "application_id", "cafe\u0301")},
       {"non-ASCII application identity", &Map.put(&1, "application_id", "é")},
@@ -1424,7 +1427,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     end
 
     File.write!(
-      Path.join(output, "rekindle-web-manifest-v1.json"),
+      Path.join(output, "rekindle-web-manifest-v2.json"),
       CanonicalValue.encode!(manifest)
     )
 
@@ -1432,7 +1435,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     forged = put_in(forged["manifest_digest"], web_manifest_digest(forged))
 
     File.write!(
-      Path.join(output, "rekindle-web-manifest-v1.json"),
+      Path.join(output, "rekindle-web-manifest-v2.json"),
       CanonicalValue.encode!(forged)
     )
 
@@ -1585,7 +1588,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
     members =
       output
-      |> Path.join("rekindle-web-manifest-v1.json")
+      |> Path.join("rekindle-web-manifest-v2.json")
       |> File.read!()
       |> Jason.decode!()
       |> Map.fetch!("members")
@@ -1718,7 +1721,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
     manifest_value =
       package_output
-      |> Path.join("rekindle-web-manifest-v1.json")
+      |> Path.join("rekindle-web-manifest-v2.json")
       |> File.read!()
       |> Jason.decode!()
 
@@ -1734,7 +1737,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
            end)
 
     assert {:ok, artifact_root} = Web.root(package_output, :read, id: package_root["id"])
-    assert {:ok, manifest} = Web.file(artifact_root, "rekindle-web-manifest-v1.json")
+    assert {:ok, manifest} = Web.file(artifact_root, "rekindle-web-manifest-v2.json")
 
     assert {:ok, request, state} =
              Web.operation(
@@ -1822,7 +1825,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
        end},
       {"manifest symlink",
        fn ->
-         path = Path.join(package_output, "rekindle-web-manifest-v1.json")
+         path = Path.join(package_output, "rekindle-web-manifest-v2.json")
          replace_with_symlink.(path, Path.join(root, "manifest-backup"))
        end},
       {"marker symlink",
@@ -2092,7 +2095,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     :crypto.hash(
       :sha256,
       [
-        "rekindle-web-manifest-v1\0",
+        "rekindle-web-manifest-v2\0",
         manifest |> Map.delete("manifest_digest") |> CanonicalValue.encode!()
       ]
     )
@@ -2104,13 +2107,13 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
   defp with_web_artifact_id(manifest) do
     identity = %{
-      "v" => 1,
+      "v" => 2,
       "build_key" => manifest["build"]["build_key"],
       "members" => Enum.map(manifest["members"], &Map.take(&1, ~w[path role sha256 size]))
     }
 
     artifact_id =
-      :crypto.hash(:sha256, ["rekindle-web-artifact-v1\0", CanonicalValue.encode!(identity)])
+      :crypto.hash(:sha256, ["rekindle-web-artifact-v2\0", CanonicalValue.encode!(identity)])
       |> Base.encode16(case: :lower)
 
     Map.put(manifest, "artifact_id", artifact_id)
@@ -2118,7 +2121,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
   defp assert_web_manifest_verified(helper, root, output, manifest, label) do
     manifest = with_web_manifest_digest(manifest)
-    path = Path.join(output, "rekindle-web-manifest-v1.json")
+    path = Path.join(output, "rekindle-web-manifest-v2.json")
     File.write!(path, CanonicalValue.encode!(manifest))
 
     assert :ok ==
@@ -2128,7 +2131,7 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
              }),
            label
 
-    assert {:ok, descriptor} = Web.file(root, "rekindle-web-manifest-v1.json"), label
+    assert {:ok, descriptor} = Web.file(root, "rekindle-web-manifest-v2.json"), label
 
     assert {:ok, request, state} =
              Web.operation(
@@ -2150,9 +2153,9 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
   defp assert_web_manifest_rejected(helper, root, output, manifest, label) do
     manifest = with_web_manifest_digest(manifest)
-    path = Path.join(output, "rekindle-web-manifest-v1.json")
+    path = Path.join(output, "rekindle-web-manifest-v2.json")
     File.write!(path, CanonicalValue.encode!(manifest))
-    assert {:ok, descriptor} = Web.file(root, "rekindle-web-manifest-v1.json"), label
+    assert {:ok, descriptor} = Web.file(root, "rekindle-web-manifest-v2.json"), label
 
     assert {:ok, request, state} =
              Web.operation(
@@ -2180,9 +2183,9 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
 
   defp assert_forged_manifest_success_rejected(root, output, manifest) do
     manifest = with_web_manifest_digest(manifest)
-    path = Path.join(output, "rekindle-web-manifest-v1.json")
+    path = Path.join(output, "rekindle-web-manifest-v2.json")
     File.write!(path, CanonicalValue.encode!(manifest))
-    assert {:ok, descriptor} = Web.file(root, "rekindle-web-manifest-v1.json")
+    assert {:ok, descriptor} = Web.file(root, "rekindle-web-manifest-v2.json")
 
     assert {:ok, request, state} =
              Web.operation(

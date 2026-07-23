@@ -731,7 +731,7 @@ defmodule Rekindle.ArtifactStore do
          {:ok, value} <- Jason.decode(bytes),
          true <- CanonicalValue.encode!(value) == bytes,
          true <- Map.keys(value) |> Enum.all?(&is_binary/1),
-         true <- value["contract_version"] == 1,
+         true <- value["contract_version"] == 2,
          true <- value["target"] == Atom.to_string(target),
          {:ok, artifact_id} <- Identity.derive(target, value),
          true <- artifact_id == value["artifact_id"],
@@ -3245,8 +3245,8 @@ defmodule Rekindle.ArtifactStore do
   defp manifest_digest(target, manifest) do
     domain =
       case target do
-        :web -> "rekindle-web-manifest-v1\0"
-        :desktop -> "rekindle-native-manifest-v1\0"
+        :web -> "rekindle-web-manifest-v2\0"
+        :desktop -> "rekindle-native-manifest-v2\0"
       end
 
     :crypto.hash(
@@ -3266,8 +3266,8 @@ defmodule Rekindle.ArtifactStore do
     |> Enum.take_while(&(&1 not in [".", ""]))
   end
 
-  defp target_manifest?(:web, "rekindle-web-manifest-v1.json"), do: true
-  defp target_manifest?(:desktop, "rekindle-native-manifest-v1.json"), do: true
+  defp target_manifest?(:web, "rekindle-web-manifest-v2.json"), do: true
+  defp target_manifest?(:desktop, "rekindle-native-manifest-v2.json"), do: true
   defp target_manifest?(_target, _path), do: false
 
   defp safe_root?(value) when is_binary(value),

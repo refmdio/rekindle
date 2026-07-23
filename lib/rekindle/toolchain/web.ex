@@ -12,7 +12,7 @@ defmodule Rekindle.Toolchain.Web do
   @ops ~w[bindgen_web package_web verify_web]
   @error_codes ~w[invalid_request incompatible_schema input_changed invalid_wasm bindgen_failed unsupported_import asset_escape asset_collision output_limit io_failed internal]
   @marker ".rekindle-attempt"
-  @manifest "rekindle-web-manifest-v1.json"
+  @manifest "rekindle-web-manifest-v2.json"
   @max_manifest_string_bytes 4_096
   @max_safe_integer 9_007_199_254_740_991
   @max_path_bytes 4_096
@@ -599,7 +599,7 @@ defmodule Rekindle.Toolchain.Web do
         ~w[rekindle_version application_id target build producer host_requirements hot_styles]
       )
 
-    if exact?(manifest, keys) and manifest["contract_version"] == 1 and
+    if exact?(manifest, keys) and manifest["contract_version"] == 2 and
          valid_manifest_base?(base, ~w[canonical_web extension]) and
          digest?(manifest["artifact_id"]) and digest?(manifest["manifest_digest"]) and
          relative?(manifest["entry"]) and is_list(manifest["members"]) and
@@ -642,7 +642,7 @@ defmodule Rekindle.Toolchain.Web do
     recorded = manifest["manifest_digest"]
 
     calculated =
-      domain_digest("rekindle-web-manifest-v1\0", Map.delete(manifest, "manifest_digest"))
+      domain_digest("rekindle-web-manifest-v2\0", Map.delete(manifest, "manifest_digest"))
 
     if recorded == calculated and terminal["manifest_digest"] == calculated,
       do: :ok,

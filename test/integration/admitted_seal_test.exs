@@ -621,7 +621,7 @@ defmodule Rekindle.AdmittedSealTest do
       web_member(root, "entry.js", "bootstrap", "import('./app.js');\n")
     ]
 
-    {"rekindle-web-manifest-v1.json", members}
+    {"rekindle-web-manifest-v2.json", members}
   end
 
   defp write_members(root, :desktop, revision) do
@@ -631,7 +631,7 @@ defmodule Rekindle.AdmittedSealTest do
     File.chmod!(Path.join(root, path), 0o700)
     digest = digest(bytes)
 
-    {"rekindle-native-manifest-v1.json",
+    {"rekindle-native-manifest-v2.json",
      [
        %{
          descriptor: %Member{
@@ -684,7 +684,7 @@ defmodule Rekindle.AdmittedSealTest do
 
   defp manifest(:web, artifact_id, profile, producer, members) do
     %{
-      "contract_version" => 1,
+      "contract_version" => 2,
       "rekindle_version" => "0.1.0",
       "application_id" => "editor",
       "target" => "web",
@@ -704,7 +704,7 @@ defmodule Rekindle.AdmittedSealTest do
 
   defp manifest(:desktop, artifact_id, profile, producer, [member]) do
     %{
-      "contract_version" => 1,
+      "contract_version" => 2,
       "rekindle_version" => "0.1.0",
       "application_id" => "editor",
       "target" => "desktop",
@@ -763,7 +763,7 @@ defmodule Rekindle.AdmittedSealTest do
 
   defp manifest_digest(target, manifest) do
     domain =
-      if target == :web, do: "rekindle-web-manifest-v1\0", else: "rekindle-native-manifest-v1\0"
+      if target == :web, do: "rekindle-web-manifest-v2\0", else: "rekindle-native-manifest-v2\0"
 
     :crypto.hash(:sha256, domain <> CanonicalValue.encode!(manifest))
     |> Base.encode16(case: :lower)
@@ -771,7 +771,7 @@ defmodule Rekindle.AdmittedSealTest do
 
   defp artifact_id(:web, build_key, members) do
     identity = %{
-      "v" => 1,
+      "v" => 2,
       "build_key" => build_key,
       "members" =>
         Enum.map(members, fn
@@ -780,17 +780,17 @@ defmodule Rekindle.AdmittedSealTest do
         end)
     }
 
-    digest("rekindle-web-artifact-v1\0" <> CanonicalValue.encode!(identity))
+    digest("rekindle-web-artifact-v2\0" <> CanonicalValue.encode!(identity))
   end
 
   defp artifact_id(:desktop, build_key, [executable]) do
     identity = %{
-      "v" => 1,
+      "v" => 2,
       "build_key" => build_key,
       "executable" => Map.take(executable.manifest, ~w[path sha256 size mode])
     }
 
-    digest("rekindle-native-artifact-v1\0" <> CanonicalValue.encode!(identity))
+    digest("rekindle-native-artifact-v2\0" <> CanonicalValue.encode!(identity))
   end
 
   defp digest(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)

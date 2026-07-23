@@ -1,18 +1,22 @@
 ExUnit.start()
 
 defmodule Rekindle.CompatibilityFixture do
-  alias Rekindle.Toolchain.CompatibilityManifest
+  alias Rekindle.Toolchain.{CompatibilityManifest, Helper}
 
   def release(asset) do
     template = %{"version" => "0.1.0", "manifest_sha256" => String.duplicate("d", 64)}
-    helper = %{"protocol" => 1, "version" => "0.1.0", "asset_sha256" => asset["sha256"]}
+
+    helper = %{
+      "protocol_digest" => Helper.protocol_digest(),
+      "asset_sha256" => asset["sha256"]
+    }
 
     gpui = %{
       "source" => "https://github.com/zed-industries/zed",
       "revision" => String.duplicate("a", 40)
     }
 
-    host = Map.take(asset, ~w[os arch])
+    host = Map.take(asset, ~w[os arch target_triple])
 
     base = %{
       "v" => 1,
@@ -87,7 +91,11 @@ defmodule Rekindle.CompatibilityFixture do
           "hosts" => [host]
         }
       },
-      "helper" => %{"protocol" => 1, "version" => "0.1.0", "assets" => [asset]},
+      "helper" => %{
+        "protocol" => Helper.compatibility(),
+        "protocol_digest" => Helper.protocol_digest(),
+        "assets" => [asset]
+      },
       "client_template" => %{
         "version" => template["version"],
         "rekindle_client" => "0.1.0",

@@ -15,6 +15,7 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
     asset = %{
       "os" => host.os,
       "arch" => host.arch,
+      "target_triple" => host.target_triple,
       "url" => "https://release.example/rekindle_toolchain",
       "size" => byte_size(bytes),
       "sha256" => sha256(bytes)
@@ -53,6 +54,7 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
     asset = %{
       "os" => host.os,
       "arch" => host.arch,
+      "target_triple" => host.target_triple,
       "url" => "https://release.example/rekindle_toolchain",
       "size" => 10,
       "sha256" => String.duplicate("a", 64)
@@ -73,6 +75,13 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
 
     tampered_values = [
       runtime_mismatch,
+      put_in(release, ["helper", "protocol", "web_manifest"], 1),
+      put_in(release, ["helper", "protocol_digest"], String.duplicate("b", 64)),
+      put_in(
+        release,
+        ["helper", "assets", Access.at(0), "target_triple"],
+        "x86_64-unknown-linux-musl"
+      ),
       put_in(release, ["client_template", "manifest_sha256"], String.duplicate("b", 64)),
       put_in(release, ["helper", "assets", Access.at(0), "sha256"], String.duplicate("b", 64)),
       update_in(release["evidence"], &tl/1),
@@ -118,6 +127,7 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
     asset = %{
       "os" => host.os,
       "arch" => host.arch,
+      "target_triple" => host.target_triple,
       "url" => "https://release.example/rekindle_toolchain",
       "size" => byte_size(bytes),
       "sha256" => sha256(bytes)
@@ -146,7 +156,7 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
              path,
              Path.join([
                release["rekindle_version"],
-               "#{host.os}-#{host.arch}",
+               host.target_triple,
                asset["sha256"]
              ])
            )
@@ -199,13 +209,18 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
   end
 
   defp coherent_helper_version(release, version) do
+    protocol =
+      put_in(release, ["helper", "protocol", "helper_version"], version)["helper"]["protocol"]
+
+    protocol_digest = Helper.protocol_digest(protocol)
+
     {tuples, tuple_ids} =
       Enum.map_reduce(release["tuples"], %{}, fn tuple, tuple_ids ->
         old_id = tuple["tuple_id"]
 
         tuple =
           tuple
-          |> put_in(["helper", "version"], version)
+          |> put_in(["helper", "protocol_digest"], protocol_digest)
           |> then(&Map.put(&1, "tuple_id", CompatibilityManifest.tuple_id(&1)))
 
         {tuple, Map.put(tuple_ids, old_id, tuple["tuple_id"])}
@@ -217,7 +232,8 @@ defmodule Rekindle.Toolchain.CompatibilityManifestTest do
       |> Enum.sort_by(&{&1["tuple_id"], &1["ci_job"]})
 
     release
-    |> put_in(["helper", "version"], version)
+    |> put_in(["helper", "protocol"], protocol)
+    |> put_in(["helper", "protocol_digest"], protocol_digest)
     |> Map.put("tuples", Enum.sort_by(tuples, & &1["tuple_id"]))
     |> Map.put("evidence", evidence)
   end

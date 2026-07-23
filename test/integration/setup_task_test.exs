@@ -351,6 +351,7 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     asset = %{
       "os" => host.os,
       "arch" => host.arch,
+      "target_triple" => host.target_triple,
       "url" => "https://fixtures.invalid/rekindle_toolchain",
       "size" => byte_size(helper),
       "sha256" => sha256(helper)

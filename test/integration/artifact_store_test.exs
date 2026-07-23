@@ -24,12 +24,12 @@ defmodule Rekindle.ArtifactStoreTest do
     refute generation1.generation_id == generation2.generation_id
 
     artifact = artifact_path(root, :web, descriptor.artifact_id)
-    assert Enum.sort(File.ls!(artifact)) == ["members", "rekindle-web-manifest-v1.json"]
+    assert Enum.sort(File.ls!(artifact)) == ["members", "rekindle-web-manifest-v2.json"]
     assert Enum.sort(File.ls!(Path.join(artifact, "members"))) == ["entry.js"]
     assert mode(artifact) == 0o500
     assert mode(Path.join(artifact, "members")) == 0o500
     assert mode(Path.join(artifact, "members/entry.js")) == 0o400
-    assert mode(Path.join(artifact, "rekindle-web-manifest-v1.json")) == 0o400
+    assert mode(Path.join(artifact, "rekindle-web-manifest-v2.json")) == 0o400
     assert :none = ArtifactStore.current(store, :web)
 
     assert :ok = ArtifactStore.activate(store, generation1, 1)
@@ -420,7 +420,7 @@ defmodule Rekindle.ArtifactStoreTest do
             File.rm!(Path.join(staging.path, "members/entry.js"))
 
             File.ln_s!(
-              "../rekindle-web-manifest-v1.json",
+              "../rekindle-web-manifest-v2.json",
               Path.join(staging.path, "members/entry.js")
             )
 
@@ -1958,7 +1958,7 @@ defmodule Rekindle.ArtifactStoreTest do
     artifact_id = artifact_id(:web, build_key, [identity_member])
 
     manifest_base = %{
-      "contract_version" => 1,
+      "contract_version" => 2,
       "target" => "web",
       "artifact_id" => artifact_id,
       "build" => %{"build_key" => build_key},
@@ -1969,13 +1969,13 @@ defmodule Rekindle.ArtifactStoreTest do
     manifest = Map.put(manifest_base, "manifest_digest", manifest_digest)
 
     File.write!(
-      Path.join(staging.path, "rekindle-web-manifest-v1.json"),
+      Path.join(staging.path, "rekindle-web-manifest-v2.json"),
       Rekindle.CanonicalValue.encode!(manifest)
     )
 
     descriptor = %Descriptor{
       artifact_id: artifact_id,
-      manifest_path: "rekindle-web-manifest-v1.json",
+      manifest_path: "rekindle-web-manifest-v2.json",
       manifest_digest: manifest_digest,
       profile: "dev",
       source_revision: source_revision,
@@ -2032,7 +2032,7 @@ defmodule Rekindle.ArtifactStoreTest do
     artifact_id = artifact_id(:desktop, build_key, identity_executable)
 
     manifest_base = %{
-      "contract_version" => 1,
+      "contract_version" => 2,
       "target" => "desktop",
       "artifact_id" => artifact_id,
       "build" => %{"build_key" => build_key},
@@ -2043,13 +2043,13 @@ defmodule Rekindle.ArtifactStoreTest do
     manifest = Map.put(manifest_base, "manifest_digest", manifest_digest)
 
     File.write!(
-      Path.join(staging.path, "rekindle-native-manifest-v1.json"),
+      Path.join(staging.path, "rekindle-native-manifest-v2.json"),
       Rekindle.CanonicalValue.encode!(manifest)
     )
 
     descriptor = %Descriptor{
       artifact_id: artifact_id,
-      manifest_path: "rekindle-native-manifest-v1.json",
+      manifest_path: "rekindle-native-manifest-v2.json",
       manifest_digest: manifest_digest,
       profile: "release",
       source_revision: marker,
@@ -2230,21 +2230,21 @@ defmodule Rekindle.ArtifactStoreTest do
   defp manifest_digest(target, value) do
     domain =
       case target do
-        :web -> "rekindle-web-manifest-v1\0"
-        :desktop -> "rekindle-native-manifest-v1\0"
+        :web -> "rekindle-web-manifest-v2\0"
+        :desktop -> "rekindle-native-manifest-v2\0"
       end
 
     digest(domain <> Rekindle.CanonicalValue.encode!(value))
   end
 
   defp artifact_id(:web, build_key, members) do
-    identity = %{"v" => 1, "build_key" => build_key, "members" => members}
-    digest("rekindle-web-artifact-v1\0" <> Rekindle.CanonicalValue.encode!(identity))
+    identity = %{"v" => 2, "build_key" => build_key, "members" => members}
+    digest("rekindle-web-artifact-v2\0" <> Rekindle.CanonicalValue.encode!(identity))
   end
 
   defp artifact_id(:desktop, build_key, executable) do
-    identity = %{"v" => 1, "build_key" => build_key, "executable" => executable}
-    digest("rekindle-native-artifact-v1\0" <> Rekindle.CanonicalValue.encode!(identity))
+    identity = %{"v" => 2, "build_key" => build_key, "executable" => executable}
+    digest("rekindle-native-artifact-v2\0" <> Rekindle.CanonicalValue.encode!(identity))
   end
 
   defp wrong_artifact_id(:web, manifest) do

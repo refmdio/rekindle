@@ -222,7 +222,7 @@ defmodule Rekindle.Toolchain.Installer do
   end
 
   defp validate_asset(asset, source_build?) do
-    required = ~w[os arch url size sha256]
+    required = ~w[os arch target_triple url size sha256]
 
     valid_url? =
       if source_build?,
@@ -243,12 +243,12 @@ defmodule Rekindle.Toolchain.Installer do
   defp validate_host(asset) do
     host = host()
 
-    if asset["os"] == host.os and asset["arch"] == host.arch,
+    if Map.take(asset, ~w[os arch target_triple]) == stringify_host(host),
       do: :ok,
       else: {:error, :unsupported_host, "helper asset does not match this host"}
   end
 
-  @spec host() :: %{os: String.t(), arch: String.t()}
+  @spec host() :: %{os: String.t(), arch: String.t(), target_triple: String.t()}
   def host do
     {family, name} = :os.type()
     os = if family == :unix and name == :darwin, do: "macos", else: Atom.to_string(name)
@@ -256,12 +256,22 @@ defmodule Rekindle.Toolchain.Installer do
     arch =
       :erlang.system_info(:system_architecture) |> List.to_string() |> String.split("-") |> hd()
 
-    %{os: os, arch: arch}
+    target_triple =
+      case {os, arch} do
+        {"linux", "x86_64"} -> "x86_64-unknown-linux-gnu"
+        {"macos", "aarch64"} -> "aarch64-apple-darwin"
+        _ -> :erlang.system_info(:system_architecture) |> List.to_string()
+      end
+
+    %{os: os, arch: arch, target_triple: target_triple}
   end
 
   defp destination(root, version, asset) do
-    Path.join([root, version, "#{asset["os"]}-#{asset["arch"]}", asset["sha256"], @executable])
+    Path.join([root, version, asset["target_triple"], asset["sha256"], @executable])
   end
+
+  defp stringify_host(host),
+    do: Map.new(host, fn {key, value} -> {Atom.to_string(key), value} end)
 
   defp invoke!(options, key, argument) do
     case Keyword.fetch(options, key) do

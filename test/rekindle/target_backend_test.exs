@@ -337,7 +337,7 @@ defmodule Rekindle.TargetBackendTest do
       env_set: [%{name: "PATH", value: "/usr/bin", secret: false}],
       diagnostic_mode: :cargo_json,
       timeout_ms: 1_000,
-      expected_manifest: "rekindle-web-manifest-v1.json"
+      expected_manifest: "rekindle-web-manifest-v2.json"
     }
 
     assert {:ok, ^plan} = TargetBackend.validate_plan_result({:ok, plan})
@@ -419,7 +419,7 @@ defmodule Rekindle.TargetBackendTest do
              TargetBackend.validate_plan_result({:error, %{failure | contract_version: 2}})
 
     artifact = %ExternalArtifact{
-      manifest: "rekindle-web-manifest-v1.json",
+      manifest: "rekindle-web-manifest-v2.json",
       supplemental_diagnostics: []
     }
 
@@ -466,7 +466,7 @@ defmodule Rekindle.TargetBackendTest do
     second = diagnostic(:second_warning, "second")
 
     artifact = %ExternalArtifact{
-      manifest: "rekindle-web-manifest-v1.json",
+      manifest: "rekindle-web-manifest-v2.json",
       supplemental_diagnostics: [
         %{first | message: "first at /home/user/private.rs", rendered: "raw /tmp/output"},
         second
@@ -596,7 +596,7 @@ defmodule Rekindle.TargetBackendTest do
 
   defp artifact(diagnostics) do
     %ExternalArtifact{
-      manifest: "rekindle-web-manifest-v1.json",
+      manifest: "rekindle-web-manifest-v2.json",
       supplemental_diagnostics: diagnostics
     }
   end

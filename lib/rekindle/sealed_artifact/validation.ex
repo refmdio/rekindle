@@ -12,7 +12,7 @@ defmodule Rekindle.SealedArtifact.Validation do
          {:ok, generation} <- GenerationRef.new(Map.from_struct(generation)),
          true <- generation.target == target,
          true <- uint?(source_revision),
-         true <- manifest["contract_version"] == 1,
+         true <- manifest["contract_version"] == 2,
          true <- manifest["target"] == Atom.to_string(target),
          {:ok, artifact_id} <- Identity.derive(target, manifest),
          true <- manifest["artifact_id"] == artifact_id,
@@ -93,7 +93,7 @@ defmodule Rekindle.SealedArtifact.Validation do
     base = Map.delete(manifest, "manifest_digest")
 
     domain =
-      if target == :web, do: "rekindle-web-manifest-v1\0", else: "rekindle-native-manifest-v1\0"
+      if target == :web, do: "rekindle-web-manifest-v2\0", else: "rekindle-native-manifest-v2\0"
 
     :crypto.hash(:sha256, domain <> CanonicalValue.encode!(base))
     |> Base.encode16(case: :lower)

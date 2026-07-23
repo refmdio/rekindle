@@ -11,6 +11,10 @@ defmodule Rekindle.Toolchain.InstallerTest do
 
     assert {:ok, path} = Installer.ensure(asset, options(root, fetcher: fn _ -> bytes end))
     assert File.read!(path) == bytes
+
+    assert Path.relative_to(path, root) ==
+             Path.join(["0.1.0", asset["target_triple"], asset["sha256"], "rekindle_toolchain"])
+
     assert {:ok, ^path} = Installer.ensure(asset, options(root, offline: true))
 
     File.write!(path, "corrupt")
@@ -132,6 +136,14 @@ defmodule Rekindle.Toolchain.InstallerTest do
     assert {:error, %{code: :unsupported_host}} = Installer.ensure(asset, options(root))
   end
 
+  test "rejects an asset with matching OS and architecture but a different target triple" do
+    root = temp_root()
+    asset = asset("bytes") |> Map.put("target_triple", "x86_64-unknown-linux-musl")
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:error, %{code: :unsupported_host}} = Installer.ensure(asset, options(root))
+  end
+
   test "preserves an XDG-style symlink ancestor and quarantines only the cached entry" do
     real_root = temp_root()
     linked_root = real_root <> "-link"
@@ -180,6 +192,7 @@ defmodule Rekindle.Toolchain.InstallerTest do
     %{
       "os" => host.os,
       "arch" => host.arch,
+      "target_triple" => host.target_triple,
       "url" => "https://example.invalid/rekindle_toolchain",
       "size" => byte_size(bytes),
       "sha256" => :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)

@@ -14,7 +14,7 @@ use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
 const MARKER: &str = ".rekindle-attempt";
-const MANIFEST: &str = "rekindle-web-manifest-v1.json";
+const MANIFEST: &str = "rekindle-web-manifest-v2.json";
 const MAX_PATH_BYTES: usize = 4_096;
 const MAX_MANIFEST_STRING_BYTES: usize = 4_096;
 const BOOTSTRAP_TEMPLATE: &str = r#"const BRIDGE_KEY = "__REKINDLE_RUNTIME_V1__";
@@ -1057,24 +1057,24 @@ fn package(request: &Value) -> OpResult<Value> {
         })
         .collect::<Vec<_>>();
     let identity = json!({
-        "v": 1,
+        "v": 2,
         "build_key": request["manifest_base"]["build"]["build_key"],
         "members": identity_members
     });
-    let artifact_id = domain_digest("rekindle-web-artifact-v1\0", &identity)?;
+    let artifact_id = domain_digest("rekindle-web-artifact-v2\0", &identity)?;
     let base = request["manifest_base"].as_object().unwrap();
     let mut manifest = Map::new();
     for (key, value) in base {
         manifest.insert(key.clone(), value.clone());
     }
-    manifest.insert("contract_version".into(), json!(1));
+    manifest.insert("contract_version".into(), json!(2));
     manifest.insert("target".into(), json!("web"));
     manifest.insert("artifact_id".into(), json!(artifact_id));
     manifest.insert("entry".into(), json!(bootstrap_path));
     manifest.insert("members".into(), Value::Array(members));
     manifest.insert("edges".into(), Value::Array(edges));
     let without_digest = Value::Object(manifest.clone());
-    let manifest_digest = domain_digest("rekindle-web-manifest-v1\0", &without_digest)?;
+    let manifest_digest = domain_digest("rekindle-web-manifest-v2\0", &without_digest)?;
     manifest.insert("manifest_digest".into(), json!(manifest_digest));
     let manifest_value = Value::Object(manifest);
     let manifest_bytes = serde_jcs::to_vec(&manifest_value)
@@ -1137,7 +1137,7 @@ fn verify(request: &Value) -> OpResult<Value> {
         ));
     }
     manifest.as_object_mut().unwrap().remove("manifest_digest");
-    let computed_digest = domain_digest("rekindle-web-manifest-v1\0", &manifest)?;
+    let computed_digest = domain_digest("rekindle-web-manifest-v2\0", &manifest)?;
     if computed_digest != expected_digest || computed_digest != recorded_digest {
         return Err(OpError::new("input_changed", "manifest digest mismatch"));
     }
@@ -1464,7 +1464,7 @@ fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usi
         "manifest_digest",
     ];
     if !frame::exact_keys(manifest, ROOT_KEYS)
-        || manifest["contract_version"] != 1
+        || manifest["contract_version"] != 2
         || !digest(manifest["artifact_id"].as_str())
         || !digest(manifest["manifest_digest"].as_str())
     {
@@ -1645,9 +1645,9 @@ fn validate_web_manifest(manifest: &Value, root: &Root) -> OpResult<(String, usi
         }
     }
     let identity = json!({
-        "v": 1, "build_key": manifest["build"]["build_key"], "members": identity_members
+        "v": 2, "build_key": manifest["build"]["build_key"], "members": identity_members
     });
-    let artifact_id = domain_digest("rekindle-web-artifact-v1\0", &identity)?;
+    let artifact_id = domain_digest("rekindle-web-artifact-v2\0", &identity)?;
     if manifest["artifact_id"] != artifact_id {
         return Err(OpError::new("input_changed", "artifact identity mismatch"));
     }

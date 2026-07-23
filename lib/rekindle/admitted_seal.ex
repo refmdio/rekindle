@@ -152,7 +152,7 @@ defmodule Rekindle.AdmittedSeal do
          }}
       end)
 
-    if descriptor_identity?(descriptor, generation, "rekindle-web-manifest-v1.json") and
+    if descriptor_identity?(descriptor, generation, "rekindle-web-manifest-v2.json") and
          Map.new(descriptor.members, &{&1.path, &1}) == expected,
        do: :ok,
        else: invalid()
@@ -170,7 +170,7 @@ defmodule Rekindle.AdmittedSeal do
       }
     }
 
-    if descriptor_identity?(descriptor, generation, "rekindle-native-manifest-v1.json") and
+    if descriptor_identity?(descriptor, generation, "rekindle-native-manifest-v2.json") and
          Map.new(descriptor.members, &{&1.path, &1}) == expected,
        do: :ok,
        else: invalid()

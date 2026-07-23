@@ -30,7 +30,7 @@ defmodule Rekindle.Toolchain.CompatibilityManifest do
       {:ok,
        %__MODULE__{
          rekindle_version: manifest["rekindle_version"],
-         helper_version: manifest["helper"]["version"],
+         helper_version: manifest["helper"]["protocol"]["helper_version"],
          assets: manifest["helper"]["assets"],
          digest: manifest["manifest_digest"],
          root: manifest
@@ -46,7 +46,9 @@ defmodule Rekindle.Toolchain.CompatibilityManifest do
   def host_asset(%__MODULE__{} = release) do
     host = Installer.host()
 
-    case Enum.find(release.assets, &(&1["os"] == host.os and &1["arch"] == host.arch)) do
+    coordinates = Map.new(host, fn {key, value} -> {Atom.to_string(key), value} end)
+
+    case Enum.find(release.assets, &(Map.take(&1, ~w[os arch target_triple]) == coordinates)) do
       nil -> {:error, failure(:unsupported_host, "this host has no qualified helper asset")}
       asset -> {:ok, asset}
     end
@@ -137,33 +139,47 @@ defmodule Rekindle.Toolchain.CompatibilityManifest do
   defp valid_browsers?(_), do: false
 
   defp valid_hosts?(hosts) when is_list(hosts) and hosts != [] do
-    Enum.all?(hosts, &valid_host?/1) and hosts == Enum.sort_by(hosts, &{&1["os"], &1["arch"]}) and
-      unique_by?(hosts, &{&1["os"], &1["arch"]})
+    Enum.all?(hosts, &valid_host?/1) and
+      hosts == Enum.sort_by(hosts, &{&1["os"], &1["arch"], &1["target_triple"]}) and
+      unique_by?(hosts, &{&1["os"], &1["arch"], &1["target_triple"]})
   end
 
   defp valid_hosts?(_), do: false
 
-  defp valid_host?(host),
-    do:
-      exact_keys?(host, ~w[os arch]) and valid_identifier?(host["os"]) and
-        valid_identifier?(host["arch"])
+  defp valid_host?(host) do
+    exact_keys?(host, ~w[os arch target_triple]) and
+      host in [
+        %{
+          "os" => "linux",
+          "arch" => "x86_64",
+          "target_triple" => "x86_64-unknown-linux-gnu"
+        },
+        %{
+          "os" => "macos",
+          "arch" => "aarch64",
+          "target_triple" => "aarch64-apple-darwin"
+        }
+      ]
+  end
 
   defp valid_helper?(helper) do
-    exact_keys?(helper, ~w[protocol version assets]) and helper["protocol"] == 1 and
-      helper["version"] == Helper.compatibility()["helper_version"] and
+    exact_keys?(helper, ~w[protocol protocol_digest assets]) and
+      helper["protocol"] == Helper.compatibility() and
+      helper["protocol_digest"] == Helper.protocol_digest() and
       valid_assets?(helper["assets"])
   end
 
   defp valid_assets?(assets) when is_list(assets) and assets != [] do
-    Enum.all?(assets, &valid_asset?/1) and assets == Enum.sort_by(assets, &{&1["os"], &1["arch"]}) and
-      unique_by?(assets, &{&1["os"], &1["arch"]})
+    Enum.all?(assets, &valid_asset?/1) and
+      assets == Enum.sort_by(assets, &{&1["os"], &1["arch"], &1["target_triple"]}) and
+      unique_by?(assets, &{&1["os"], &1["arch"], &1["target_triple"]})
   end
 
   defp valid_assets?(_), do: false
 
   defp valid_asset?(asset) do
-    exact_keys?(asset, ~w[os arch url size sha256]) and valid_identifier?(asset["os"]) and
-      valid_identifier?(asset["arch"]) and is_binary(asset["url"]) and
+    exact_keys?(asset, ~w[os arch target_triple url size sha256]) and
+      valid_host?(Map.take(asset, ~w[os arch target_triple])) and is_binary(asset["url"]) and
       String.starts_with?(asset["url"], "https://") and is_integer(asset["size"]) and
       asset["size"] > 0 and sha256?(asset["sha256"])
   end
@@ -244,15 +260,14 @@ defmodule Rekindle.Toolchain.CompatibilityManifest do
   end
 
   defp valid_tuple_helper?(helper, declared) do
-    exact_keys?(helper, ~w[protocol version asset_sha256]) and
-      helper["protocol"] == declared["protocol"] and
-      helper["version"] == declared["version"] and
+    exact_keys?(helper, ~w[protocol_digest asset_sha256]) and
+      helper["protocol_digest"] == declared["protocol_digest"] and
       Enum.any?(declared["assets"], &(&1["sha256"] == helper["asset_sha256"]))
   end
 
   defp tuple_asset_matches_host?(tuple, helper) do
     Enum.any?(helper["assets"], fn asset ->
-      tuple["host"] == Map.take(asset, ~w[os arch]) and
+      tuple["host"] == Map.take(asset, ~w[os arch target_triple]) and
         tuple["helper"]["asset_sha256"] == asset["sha256"]
     end)
   end
@@ -294,7 +309,7 @@ defmodule Rekindle.Toolchain.CompatibilityManifest do
       end) and
       Enum.all?(manifest["helper"]["assets"], fn asset ->
         Enum.any?(tuples, fn tuple ->
-          tuple["host"] == Map.take(asset, ~w[os arch]) and
+          tuple["host"] == Map.take(asset, ~w[os arch target_triple]) and
             tuple["helper"]["asset_sha256"] == asset["sha256"]
         end)
       end) and

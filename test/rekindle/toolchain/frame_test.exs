@@ -32,7 +32,13 @@ defmodule Rekindle.Toolchain.FrameTest do
 
   test "hello admission binds nonce, mode, host, and every compatibility value" do
     actual = actual()
-    host = %{"os" => "linux", "arch" => "x86_64"}
+
+    host = %{
+      "os" => "linux",
+      "arch" => "x86_64",
+      "target_triple" => "x86_64-unknown-linux-gnu"
+    }
+
     hello = Handshake.hello("exec-v1", actual, host)
 
     assert :ok = Handshake.validate_hello(hello, "exec-v1", actual, host)
@@ -54,13 +60,14 @@ defmodule Rekindle.Toolchain.FrameTest do
 
   defp actual do
     %{
+      "v" => 1,
       "helper_version" => "0.1.0",
       "toolframe" => 1,
       "exec_protocol" => 1,
       "web_protocol" => 1,
       "wasm_bindgen_schema" => "0.2.121",
-      "web_manifest" => 1,
-      "native_manifest" => 1
+      "web_manifest" => 2,
+      "native_manifest" => 2
     }
   end
 end

@@ -11,6 +11,7 @@ const WASM_BINDGEN_SCHEMA: &str = "0.2.121";
 
 #[derive(Serialize)]
 struct Compatibility<'a> {
+    v: u32,
     helper_version: &'a str,
     toolframe: u32,
     exec_protocol: u32,
@@ -22,13 +23,14 @@ struct Compatibility<'a> {
 
 fn compatibility() -> Compatibility<'static> {
     Compatibility {
+        v: 1,
         helper_version: env!("CARGO_PKG_VERSION"),
         toolframe: 1,
         exec_protocol: 1,
         web_protocol: 1,
         wasm_bindgen_schema: WASM_BINDGEN_SCHEMA,
-        web_manifest: 1,
-        native_manifest: 1,
+        web_manifest: 2,
+        native_manifest: 2,
     }
 }
 
@@ -37,7 +39,21 @@ fn compatibility_value() -> Value {
 }
 
 fn host() -> Value {
-    json!({"os": std::env::consts::OS, "arch": std::env::consts::ARCH})
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let target_triple = "x86_64-unknown-linux-gnu";
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let target_triple = "aarch64-apple-darwin";
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    )))]
+    let target_triple = "unsupported";
+
+    json!({
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "target_triple": target_triple
+    })
 }
 
 fn main() {
@@ -166,6 +182,7 @@ fn echoable_hello(header: &Value) -> Option<EchoableHello<'_>> {
 
 fn valid_compatibility(value: &Value) -> bool {
     const KEYS: &[&str] = &[
+        "v",
         "helper_version",
         "toolframe",
         "exec_protocol",
@@ -176,6 +193,7 @@ fn valid_compatibility(value: &Value) -> bool {
     ];
 
     frame::exact_keys(value, KEYS)
+        && value["v"] == 1
         && value["helper_version"].is_string()
         && value["toolframe"].as_u64().is_some()
         && value["exec_protocol"].as_u64().is_some()
@@ -186,9 +204,12 @@ fn valid_compatibility(value: &Value) -> bool {
 }
 
 fn valid_host(value: &Value) -> bool {
-    const KEYS: &[&str] = &["os", "arch"];
+    const KEYS: &[&str] = &["os", "arch", "target_triple"];
 
-    frame::exact_keys(value, KEYS) && value["os"].is_string() && value["arch"].is_string()
+    frame::exact_keys(value, KEYS)
+        && value["os"].is_string()
+        && value["arch"].is_string()
+        && value["target_triple"].is_string()
 }
 
 fn hello_error<T>(hello: &EchoableHello<'_>, mode: &str, code: &str) -> Result<T, String> {

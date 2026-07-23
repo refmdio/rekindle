@@ -5,18 +5,32 @@ defmodule Rekindle.Toolchain.Helper do
   alias Rekindle.Toolchain.{Exec, Executable, Frame, Handshake, Installer, Web}
 
   @compatibility %{
+    "v" => 1,
     "helper_version" => "0.1.0",
     "toolframe" => 1,
     "exec_protocol" => 1,
     "web_protocol" => 1,
     "wasm_bindgen_schema" => "0.2.121",
-    "web_manifest" => 1,
-    "native_manifest" => 1
+    "web_manifest" => 2,
+    "native_manifest" => 2
   }
   @verification_executables ["/usr/bin/true", "/bin/true"]
 
   @spec compatibility() :: map()
   def compatibility, do: @compatibility
+
+  @spec protocol_digest() :: String.t()
+  def protocol_digest, do: protocol_digest(@compatibility)
+
+  @doc false
+  @spec protocol_digest(map()) :: String.t()
+  def protocol_digest(identity) when is_map(identity) do
+    :crypto.hash(
+      :sha256,
+      "rekindle-helper-protocol-v1\0" <> Rekindle.CanonicalValue.encode!(identity)
+    )
+    |> Base.encode16(case: :lower)
+  end
 
   @spec verify(Path.t(), keyword()) :: :ok | {:error, Failure.t()}
   def verify(executable, options \\ []) do
