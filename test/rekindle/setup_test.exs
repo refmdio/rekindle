@@ -98,7 +98,6 @@ defmodule Rekindle.SetupTest do
           ["web"],
           ["--unknown"],
           ["--json"],
-          ["--target", "mobile"],
           ["--no-source-build-helper"],
           ["--source-build-helper=false"],
           ["--source-build-helper=true"],
@@ -110,6 +109,27 @@ defmodule Rekindle.SetupTest do
         ] do
       outcome = Setup.run(argv, adapters)
       assert outcome.exit_status == 2
+      assert outcome.stdout == ""
+      assert outcome.stderr =~ "config_invalid"
+      refute_received :loaded
+    end
+  end
+
+  test "maps invalid and empty target values to typed exit 1 before project load" do
+    parent = self()
+
+    adapters = [
+      load_project: fn ->
+        send(parent, :loaded)
+        {:ok, project([:web])}
+      end,
+      ensure_target: fn _, _ -> {:ok, :present} end,
+      ensure_helper: fn _ -> {:ok, :present} end
+    ]
+
+    for argv <- [["--target", "mobile"], ["--target", ""], ["--target="]] do
+      outcome = Setup.run(argv, adapters)
+      assert outcome.exit_status == 1
       assert outcome.stdout == ""
       assert outcome.stderr =~ "config_invalid"
       refute_received :loaded

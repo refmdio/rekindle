@@ -33,7 +33,7 @@ defmodule Rekindle.Setup do
   defp selected_target("desktop"), do: {:ok, :desktop}
 
   defp selected_target(_value) do
-    {:error, :invocation,
+    {:error,
      Failure.new!(
        target: nil,
        stage: :configuration,
