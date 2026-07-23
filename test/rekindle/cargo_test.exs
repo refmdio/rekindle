@@ -324,7 +324,7 @@ defmodule Rekindle.Cargo.MessagesTest do
 end
 
 defmodule Rekindle.Cargo.ProcessTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Rekindle.Toolchain.Process
 
@@ -335,6 +335,27 @@ defmodule Rekindle.Cargo.ProcessTest do
     assert result.status == 0
     assert result.output == "1234"
     assert result.truncated?
+  end
+
+  test "does not launch when process group control is unavailable" do
+    root = tmp_dir()
+    bin = Path.join(root, "bin")
+    marker = Path.join(root, "started")
+    executable = Path.join(root, "mark-started")
+    previous_path = System.fetch_env!("PATH")
+
+    File.mkdir_p!(bin)
+    File.ln_s!(System.find_executable("setsid"), Path.join(bin, "setsid"))
+    File.ln_s!(System.find_executable("kill"), Path.join(bin, "kill"))
+    File.write!(executable, "#!/bin/sh\ntouch \"#{marker}\"\n")
+    File.chmod!(executable, 0o755)
+
+    on_exit(fn -> System.put_env("PATH", previous_path) end)
+    System.put_env("PATH", bin)
+
+    assert {:error, {:start, error}} = Process.run(executable, [], cd: root)
+    assert Exception.message(error) == "pkill executable was not found"
+    refute File.exists?(marker)
   end
 
   test "times out and reaps the child" do

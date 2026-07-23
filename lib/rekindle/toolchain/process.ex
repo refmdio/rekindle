@@ -21,26 +21,26 @@ defmodule Rekindle.Toolchain.Process do
     timeout = Keyword.get(options, :timeout, @default_timeout)
     output_limit = Keyword.get(options, :output_limit, @default_output_limit)
     cancel_ref = Keyword.get(options, :cancel_ref)
-    launcher = System.find_executable("setsid")
 
-    port_options =
-      [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        :use_stdio,
-        args: ["--wait", executable | arguments],
-        cd: Keyword.fetch!(options, :cd)
-      ] ++ environment(options)
+    with {:ok, tools} <- process_tools() do
+      port_options =
+        [
+          :binary,
+          :exit_status,
+          :stderr_to_stdout,
+          :use_stdio,
+          args: ["--wait", executable | arguments],
+          cd: Keyword.fetch!(options, :cd)
+        ] ++ environment(options)
 
-    if launcher do
       try do
-        {:spawn_executable, String.to_charlist(launcher)}
+        {:spawn_executable, String.to_charlist(tools.setsid)}
         |> Port.open(port_options)
         |> receive_output(
           System.monotonic_time(:millisecond) + timeout,
           output_limit,
           cancel_ref,
+          tools,
           [],
           0,
           false
@@ -48,18 +48,16 @@ defmodule Rekindle.Toolchain.Process do
       rescue
         error -> {:error, {:start, error}}
       end
-    else
-      {:error, {:start, RuntimeError.exception("setsid executable was not found")}}
     end
   end
 
-  defp receive_output(port, deadline, limit, cancel_ref, chunks, size, truncated?) do
+  defp receive_output(port, deadline, limit, cancel_ref, tools, chunks, size, truncated?) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^port, {:data, data}} ->
         {chunks, size, truncated?} = append(chunks, size, truncated?, data, limit)
-        receive_output(port, deadline, limit, cancel_ref, chunks, size, truncated?)
+        receive_output(port, deadline, limit, cancel_ref, tools, chunks, size, truncated?)
 
       {^port, {:exit_status, status}} ->
         {:ok,
@@ -70,11 +68,11 @@ defmodule Rekindle.Toolchain.Process do
          }}
 
       {:rekindle_cancel, ^cancel_ref} when not is_nil(cancel_ref) ->
-        stop(port)
+        stop(port, tools)
         {:error, :cancelled}
     after
       remaining ->
-        stop(port)
+        stop(port, tools)
         {:error, :timeout}
     end
   end
@@ -86,7 +84,7 @@ defmodule Rekindle.Toolchain.Process do
 
   defp append(chunks, size, _truncated?, _data, _limit), do: {chunks, size, true}
 
-  defp stop(port) do
+  defp stop(port, tools) do
     os_pid =
       case Port.info(port, :os_pid) do
         {:os_pid, pid} -> pid
@@ -95,14 +93,14 @@ defmodule Rekindle.Toolchain.Process do
 
     if os_pid do
       group_pid = session_group_pid(os_pid)
-      signal(group_pid, "TERM")
+      signal(group_pid, "TERM", tools)
       await_exit(port, @termination_grace)
-      signal(group_pid, "KILL")
-      await_group_exit(group_pid, @termination_grace)
+      signal(group_pid, "KILL", tools)
+      await_group_exit(group_pid, @termination_grace, tools)
     end
 
     if Port.info(port) do
-      if os_pid, do: signal_process(os_pid, "KILL")
+      if os_pid, do: signal_process(os_pid, "KILL", tools)
       Port.close(port)
     end
   end
@@ -133,55 +131,39 @@ defmodule Rekindle.Toolchain.Process do
     end
   end
 
-  defp signal(os_pid, name) do
-    case System.find_executable("pkill") do
-      nil ->
-        :unavailable
+  defp signal(os_pid, name, tools) do
+    case System.cmd(tools.pkill, ["-#{name}", "-g", Integer.to_string(os_pid)],
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} ->
+        :ok
 
-      executable ->
-        case System.cmd(executable, ["-#{name}", "-g", Integer.to_string(os_pid)],
-               stderr_to_stdout: true
-             ) do
-          {_output, 0} ->
-            :ok
-
-          _ ->
-            signal_process(os_pid, name)
-            :ok
-        end
+      _ ->
+        signal_process(os_pid, name, tools)
+        :ok
     end
   end
 
-  defp signal_process(os_pid, name) do
-    executable = System.find_executable("kill")
-
-    if executable do
-      System.cmd(executable, ["-#{name}", Integer.to_string(os_pid)], stderr_to_stdout: true)
-    end
+  defp signal_process(os_pid, name, tools) do
+    System.cmd(tools.kill, ["-#{name}", Integer.to_string(os_pid)], stderr_to_stdout: true)
   end
 
-  defp await_group_exit(group_pid, timeout) do
+  defp await_group_exit(group_pid, timeout, tools) do
     deadline = System.monotonic_time(:millisecond) + timeout
-    await_group_exit_until(group_pid, deadline)
+    await_group_exit_until(group_pid, deadline, tools)
   end
 
-  defp await_group_exit_until(group_pid, deadline) do
-    case System.find_executable("pgrep") do
-      nil ->
-        :unavailable
+  defp await_group_exit_until(group_pid, deadline, tools) do
+    case System.cmd(tools.pgrep, ["-g", Integer.to_string(group_pid)], stderr_to_stdout: true) do
+      {_output, 1} ->
+        :ok
 
-      executable ->
-        case System.cmd(executable, ["-g", Integer.to_string(group_pid)], stderr_to_stdout: true) do
-          {_output, 1} ->
-            :ok
-
-          _ ->
-            if System.monotonic_time(:millisecond) >= deadline do
-              :timeout
-            else
-              Process.sleep(10)
-              await_group_exit_until(group_pid, deadline)
-            end
+      _ ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          :timeout
+        else
+          Process.sleep(10)
+          await_group_exit_until(group_pid, deadline, tools)
         end
     end
   end
@@ -203,5 +185,18 @@ defmodule Rekindle.Toolchain.Process do
       values ->
         [env: Enum.map(values, fn {key, value} -> {to_charlist(key), to_charlist(value)} end)]
     end
+  end
+
+  defp process_tools do
+    Enum.reduce_while([:setsid, :pkill, :pgrep, :kill], {:ok, %{}}, fn name, {:ok, tools} ->
+      case System.find_executable(Atom.to_string(name)) do
+        nil ->
+          error = RuntimeError.exception("#{name} executable was not found")
+          {:halt, {:error, {:start, error}}}
+
+        path ->
+          {:cont, {:ok, Map.put(tools, name, path)}}
+      end
+    end)
   end
 end
