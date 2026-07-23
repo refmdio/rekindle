@@ -35,7 +35,7 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp endpoint_required(endpoint) when is_atom(endpoint), do: :ok
+    defp endpoint_required(endpoint) when is_atom(endpoint) and not is_nil(endpoint), do: :ok
     defp endpoint_required(_endpoint), do: {:error, "Rekindle requires a Phoenix endpoint"}
 
     defp requested_selection(options) do
@@ -107,7 +107,8 @@ if Code.ensure_loaded?(Igniter) do
             {:ok,
              %{
                integration: integration,
-               targets: Enum.filter(@targets, &Keyword.has_key?(targets, &1))
+               targets: Enum.filter(@targets, &Keyword.has_key?(targets, &1)),
+               public_dir: Keyword.get(config, :public_dir, "priv/static")
              }}
           else
             _ -> {:error, "existing Rekindle configuration is not a valid static selection"}
@@ -126,7 +127,8 @@ if Code.ensure_loaded?(Igniter) do
       {:ok,
        %{
          integration: requested.integration || :gpui,
-         targets: requested.targets || @targets
+         targets: requested.targets || @targets,
+         public_dir: "priv/static"
        }, :generate}
     end
 
@@ -139,7 +141,7 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp select(requested, nil, true) do
-      {:ok, requested, :adopt}
+      {:ok, Map.put(requested, :public_dir, "priv/static"), :adopt}
     end
 
     defp select(requested, existing, true) do
@@ -209,7 +211,7 @@ if Code.ensure_loaded?(Igniter) do
       )
       |> TaskAliases.add_alias(:setup, "rekindle.setup", if_exists: :append)
       |> maybe_add_web_alias(selection.targets)
-      |> update_ignores(selection.targets, mode)
+      |> update_ignores(selection, mode)
     end
 
     defp maybe_generate_client(igniter, _selection, mode) when mode != :generate, do: igniter
@@ -257,12 +259,15 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp update_ignores(igniter, targets, mode) do
+    defp update_ignores(igniter, selection, mode) do
       entries =
         ["/.rekindle/"] ++
           if(mode == :generate, do: ["/client/target/"], else: []) ++
-          if(:web in targets, do: ["/priv/static/rekindle/"], else: []) ++
-          if(:desktop in targets, do: ["/dist/rekindle/"], else: [])
+          if(:web in selection.targets,
+            do: ["/#{Path.join(selection.public_dir, "rekindle")}/"],
+            else: []
+          ) ++
+          if(:desktop in selection.targets, do: ["/dist/rekindle/"], else: [])
 
       Igniter.create_or_update_file(igniter, ".gitignore", "", fn source ->
         content = Rewrite.Source.get(source, :content)

@@ -139,6 +139,28 @@ defmodule Rekindle.InstallTest do
     end
   end
 
+  test "requires a Phoenix endpoint before changing the project" do
+    original =
+      project()
+      |> then(fn igniter ->
+        %{
+          igniter
+          | rewrite: Rewrite.delete(igniter.rewrite, "lib/demo_web/endpoint.ex"),
+            assigns:
+              Map.update!(
+                igniter.assigns,
+                :test_files,
+                &Map.delete(&1, "lib/demo_web/endpoint.ex")
+              )
+        }
+      end)
+
+    rejected = install(original)
+
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "requires a Phoenix endpoint"))
+    assert changed_contents(rejected) == changed_contents(original)
+  end
+
   test "adopts every supported existing client without changing client files" do
     for integration <- [:gpui, :egui, :slint],
         targets <- [[:web], [:desktop], [:web, :desktop]] do
@@ -482,6 +504,27 @@ defmodule Rekindle.InstallTest do
     assert client_contents(adopted) == before
     assert "/custom-target/" in ignore_lines(adopted)
     refute "/client/target/" in ignore_lines(adopted)
+  end
+
+  test "uses the configured public directory for Web ignore policy" do
+    original =
+      existing_client(:egui, [:web])
+      |> update_content("config/config.exs", fn config ->
+        config <>
+          """
+
+          config :demo, Rekindle,
+            integration: :egui,
+            targets: [web: [features: ["web"]]],
+            public_dir: "web/static"
+          """
+      end)
+
+    installed = install(original)
+
+    assert installed.issues == []
+    assert "/web/static/rekindle/" in ignore_lines(installed)
+    refute "/priv/static/rekindle/" in ignore_lines(installed)
   end
 
   test "ignore additions preserve application-owned grouping and comments" do
