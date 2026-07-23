@@ -12,6 +12,7 @@ defmodule Rekindle.Build do
           | {:error,
              Error.t()
              | Rekindle.Cargo.Error.t()
+             | Rekindle.Desktop.Error.t()
              | Rekindle.Toolchain.Error.t()
              | Rekindle.Web.Error.t()}
   def run(%Config{} = project, target, options) do
@@ -65,36 +66,8 @@ defmodule Rekindle.Build do
   defp dispatch(project, %{name: :web} = target, profile, options),
     do: Rekindle.Web.Builder.build(project, target, profile, options)
 
-  defp dispatch(project, target, profile, options) do
-    cargo_options =
-      Keyword.take(options, [
-        :cargo,
-        :rustc,
-        :timeout,
-        :output_limit,
-        :cancel_ref,
-        :env
-      ])
-
-    case Rekindle.Cargo.build(project, target, profile, cargo_options) do
-      {:ok, result} ->
-        {:ok,
-         %Rekindle.Build.Result{
-           target: target.name,
-           profile: profile,
-           artifact: result.artifact,
-           metadata: %{
-             package: result.package,
-             binary: result.binary,
-             target_directory: result.target_directory,
-             diagnostics: result.diagnostics
-           }
-         }}
-
-      {:error, error} ->
-        {:error, error}
-    end
-  end
+  defp dispatch(project, target, profile, options),
+    do: Rekindle.Desktop.Builder.build(project, target, profile, options)
 
   defp error(kind, message), do: {:error, Error.new(kind, message)}
 end

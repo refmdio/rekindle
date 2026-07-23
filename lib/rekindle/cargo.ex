@@ -6,13 +6,14 @@ defmodule Rekindle.Cargo do
   alias Rekindle.Diagnostic
   alias Rekindle.Toolchain.Process
 
-  @enforce_keys [:artifact, :package, :binary, :target_directory, :diagnostics]
-  defstruct [:artifact, :package, :binary, :target_directory, :diagnostics, output: ""]
+  @enforce_keys [:artifact, :package, :binary, :target, :target_directory, :diagnostics]
+  defstruct [:artifact, :package, :binary, :target, :target_directory, :diagnostics, output: ""]
 
   @type t :: %__MODULE__{
           artifact: Path.t(),
           package: String.t(),
           binary: String.t(),
+          target: String.t(),
           target_directory: Path.t(),
           diagnostics: [Diagnostic.t()],
           output: String.t()
@@ -23,7 +24,8 @@ defmodule Rekindle.Cargo do
   def build(project, %Target{} = target, profile, options \\ []) do
     with {:ok, metadata} <- Metadata.load(project, options),
          {:ok, package, binary} <- resolve(metadata, project, target),
-         {:ok, process} <- execute(project, target, profile, package, binary, options),
+         {:ok, process, rust_target} <-
+           execute(project, target, profile, package, binary, options),
          {:ok, artifact, diagnostics, output} <-
            Messages.decode(process, package.id, binary, target.name) do
       {:ok,
@@ -31,6 +33,7 @@ defmodule Rekindle.Cargo do
          artifact: artifact,
          package: package.name,
          binary: binary,
+         target: rust_target,
          target_directory: metadata.target_directory,
          diagnostics: diagnostics,
          output: output
@@ -130,12 +133,13 @@ defmodule Rekindle.Cargo do
       env: Keyword.get(options, :env, [])
     ]
 
-    with {:ok, arguments} <- target_arguments(base_arguments, target.name, options) do
+    with {:ok, arguments, rust_target} <-
+           target_arguments(base_arguments, target.name, options) do
       arguments = feature_arguments(arguments, target.features)
 
       case Process.run(executable, arguments, process_options) do
         {:ok, result} ->
-          {:ok, result}
+          {:ok, result, rust_target}
 
         {:error, :timeout} ->
           error(:timeout, "cargo build timed out")
@@ -152,7 +156,7 @@ defmodule Rekindle.Cargo do
   defp target_arguments(arguments, target_name, options) do
     case Rekindle.Toolchain.target(target_name, options) do
       {:ok, target} ->
-        {:ok, arguments ++ ["--target", target]}
+        {:ok, arguments ++ ["--target", target], target}
 
       {:error, error} ->
         error(:host_target, Exception.message(error))

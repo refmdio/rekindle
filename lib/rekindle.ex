@@ -35,6 +35,7 @@ defmodule Rekindle do
              Config.Error.t()
              | Rekindle.Build.Error.t()
              | Rekindle.Cargo.Error.t()
+             | Rekindle.Desktop.Error.t()
              | Rekindle.Toolchain.Error.t()
              | Rekindle.Web.Error.t()}
   def build(target, options \\ []) do

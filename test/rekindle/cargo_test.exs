@@ -66,6 +66,7 @@ defmodule Rekindle.CargoTest do
     assert {:ok, result} = Cargo.build(project, target, :dev)
     assert result.package == "fixture_ui"
     assert result.binary == "desktop"
+    assert {:ok, result.target} == Rekindle.Toolchain.host_target()
     assert File.regular?(result.artifact)
     assert Path.basename(result.artifact) == "desktop"
   end
@@ -90,6 +91,7 @@ defmodule Rekindle.CargoTest do
              Cargo.build(project, target, :release, cargo: cargo, env: [{"RUSTC", rustc}])
 
     assert result.binary == "web"
+    assert result.target == "wasm32-unknown-unknown"
     assert String.ends_with?(result.artifact, ".wasm")
     assert File.regular?(result.artifact)
   end

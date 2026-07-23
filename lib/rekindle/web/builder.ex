@@ -37,6 +37,7 @@ defmodule Rekindle.Web.Builder do
              manifest: Path.join(generation, "manifest.json"),
              package: cargo.package,
              binary: cargo.binary,
+             rust_target: cargo.target,
              target_directory: cargo.target_directory,
              diagnostics: cargo.diagnostics
            }
