@@ -111,6 +111,56 @@ defmodule Rekindle.ToolingIntegrationTest do
     assert check.status == :error
   end
 
+  test "Doctor reports every missing prerequisite without changing the project", context do
+    missing_cargo =
+      Keyword.put(context.options, :cargo, Path.join(context.root, "missing-cargo"))
+
+    before = snapshot(context.root)
+    assert {:error, checks} = Doctor.run(:rekindle_tooling_test, missing_cargo)
+    assert error?(checks, :cargo)
+    assert error?(checks, :cargo_metadata)
+    assert check!(checks, :cargo).message =~ "executable was not found"
+    assert snapshot(context.root) == before
+
+    rustup = fake_rustup(context.root, [])
+    options = Keyword.put(context.options, :rustup, rustup)
+    before = snapshot(context.root)
+
+    assert {:error, checks} = Doctor.run(:rekindle_tooling_test, options)
+    assert error?(checks, :rust_web)
+    assert error?(checks, :rust_desktop)
+    assert error?(checks, :wasm_bindgen)
+    assert check!(checks, :rust_web).message =~ "mix rekindle.setup web"
+    assert check!(checks, :wasm_bindgen).message =~ "mix rekindle.setup web"
+    assert snapshot(context.root) == before
+  end
+
+  test "setup rejects commands that succeed without installing their result", context do
+    rustup = fake_rustup(context.root, ["x86_64-unknown-linux-gnu"], add?: false)
+    options = Keyword.put(context.options, :rustup, rustup)
+
+    assert {:error, checks} = Setup.run(:rekindle_tooling_test, :web, options)
+    assert error?(checks, :rust_web)
+    assert check!(checks, :rust_web).message =~ "still missing"
+
+    cargo = fake_cargo(context.root, :no_install)
+
+    rustup =
+      fake_rustup(context.root, [
+        "wasm32-unknown-unknown",
+        "x86_64-unknown-linux-gnu"
+      ])
+
+    options =
+      context.options
+      |> Keyword.put(:cargo, cargo)
+      |> Keyword.put(:rustup, rustup)
+
+    assert {:error, checks} = Setup.run(:rekindle_tooling_test, :web, options)
+    assert error?(checks, :wasm_bindgen)
+    assert check!(checks, :wasm_bindgen).message =~ "version check failed"
+  end
+
   test "Doctor rejects output paths that are not real writable directories", context do
     Application.put_env(:rekindle_tooling_test, Rekindle,
       integration: :gpui,
@@ -203,6 +253,8 @@ defmodule Rekindle.ToolingIntegrationTest do
   defp error?(checks, name),
     do: Enum.any?(checks, &(&1.name == name and &1.status == :error))
 
+  defp check!(checks, name), do: Enum.find(checks, &(&1.name == name))
+
   defp generate_lockfile(root) do
     {_output, 0} =
       System.cmd(
@@ -212,10 +264,11 @@ defmodule Rekindle.ToolingIntegrationTest do
       )
   end
 
-  defp fake_rustup(root, installed) do
+  defp fake_rustup(root, installed, options \\ []) do
     state = Path.join(root, "rust-targets")
     File.write!(state, Enum.join(installed, "\n") <> "\n")
     path = Path.join(root, "rustup")
+    add = if Keyword.get(options, :add?, true), do: "echo \"$3\" >> \"#{state}\"", else: ":"
 
     write_executable(
       path,
@@ -226,7 +279,7 @@ defmodule Rekindle.ToolingIntegrationTest do
         exit 0
       fi
       if [ "$1 $2" = "target add" ]; then
-        echo "$3" >> "#{state}"
+        #{add}
         exit 0
       fi
       exit 2
@@ -259,6 +312,9 @@ defmodule Rekindle.ToolingIntegrationTest do
 
         :fail_install ->
           "exit 17"
+
+        :no_install ->
+          "exit 0"
       end
 
     write_executable(
