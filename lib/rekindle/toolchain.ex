@@ -3,7 +3,7 @@ defmodule Rekindle.Toolchain do
 
   alias Rekindle.Toolchain.{Error, Process}
 
-  @wasm_bindgen_version "0.2.114"
+  @wasm_bindgen_version "0.2.126"
 
   @spec wasm_bindgen_version() :: String.t()
   def wasm_bindgen_version, do: @wasm_bindgen_version

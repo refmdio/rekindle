@@ -7,11 +7,11 @@ defmodule Rekindle.ToolchainTest do
     home = tmp_dir()
     environment = %{"XDG_CACHE_HOME" => Path.join(home, "cache"), "HOME" => home}
 
-    first = install_fixture("0.2.113", environment)
-    second = install_fixture("0.2.114", environment)
+    first = install_fixture("0.2.125", environment)
+    second = install_fixture("0.2.126", environment)
 
-    assert {:ok, ^first} = Toolchain.resolve_wasm_bindgen("0.2.113", env: environment)
-    assert {:ok, ^second} = Toolchain.resolve_wasm_bindgen("0.2.114", env: environment)
+    assert {:ok, ^first} = Toolchain.resolve_wasm_bindgen("0.2.125", env: environment)
+    assert {:ok, ^second} = Toolchain.resolve_wasm_bindgen("0.2.126", env: environment)
     assert first != second
   end
 
@@ -24,16 +24,16 @@ defmodule Rekindle.ToolchainTest do
     }
 
     assert {:error, %Toolchain.Error{kind: :missing_wasm_bindgen}} =
-             Toolchain.resolve_wasm_bindgen("0.2.114", env: environment)
+             Toolchain.resolve_wasm_bindgen("0.2.126", env: environment)
   end
 
   test "rejects a mismatched cached executable" do
     environment = %{"HOME" => tmp_dir()}
-    path = Toolchain.wasm_bindgen_path("0.2.114", environment)
-    write_executable(path, "#!/bin/sh\necho 'wasm-bindgen 0.2.113'\n")
+    path = Toolchain.wasm_bindgen_path("0.2.126", environment)
+    write_executable(path, "#!/bin/sh\necho 'wasm-bindgen 0.2.125'\n")
 
     assert {:error, %Toolchain.Error{kind: :version_mismatch}} =
-             Toolchain.resolve_wasm_bindgen("0.2.114", env: environment)
+             Toolchain.resolve_wasm_bindgen("0.2.126", env: environment)
   end
 
   test "installs through Cargo into the exact version root" do
@@ -42,15 +42,15 @@ defmodule Rekindle.ToolchainTest do
     cargo = fake_cargo(home, :success)
 
     assert {:ok, path} =
-             Toolchain.install_wasm_bindgen("0.2.114",
+             Toolchain.install_wasm_bindgen("0.2.126",
                env: environment,
                cargo: cargo,
                cd: home
              )
 
-    assert path == Toolchain.wasm_bindgen_path("0.2.114", environment)
+    assert path == Toolchain.wasm_bindgen_path("0.2.126", environment)
     assert File.regular?(path)
-    assert File.read!(Path.join(home, "cargo-arguments")) =~ "--version =0.2.114"
+    assert File.read!(Path.join(home, "cargo-arguments")) =~ "--version =0.2.126"
 
     assert File.read!(Path.join(home, "cargo-arguments")) =~
              "--root #{Path.dirname(Path.dirname(path))}"
@@ -61,13 +61,13 @@ defmodule Rekindle.ToolchainTest do
     environment = %{"HOME" => home}
 
     assert {:error, %Toolchain.Error{kind: :install_failed}} =
-             Toolchain.install_wasm_bindgen("0.2.114",
+             Toolchain.install_wasm_bindgen("0.2.126",
                env: environment,
                cargo: fake_cargo(home, :failure),
                cd: home
              )
 
-    refute File.exists?(Toolchain.wasm_bindgen_path("0.2.114", environment))
+    refute File.exists?(Toolchain.wasm_bindgen_path("0.2.126", environment))
   end
 
   defp install_fixture(version, environment) do
@@ -92,7 +92,7 @@ defmodule Rekindle.ToolchainTest do
             shift
           done
           mkdir -p "$install_root/bin"
-          printf '#!/bin/sh\\necho \"wasm-bindgen 0.2.114\"\\n' > "$install_root/bin/wasm-bindgen"
+          printf '#!/bin/sh\\necho \"wasm-bindgen 0.2.126\"\\n' > "$install_root/bin/wasm-bindgen"
           chmod +x "$install_root/bin/wasm-bindgen"
           """
 
