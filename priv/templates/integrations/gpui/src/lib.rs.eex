@@ -1,0 +1,41 @@
+use gpui::{
+    App, Bounds, Context, Render, SharedString, Window, WindowBounds, WindowOptions, div,
+    prelude::*, px, rgb, size,
+};
+
+pub struct RekindleApp {
+    title: SharedString,
+}
+
+impl Render for RekindleApp {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .bg(rgb(0x111827))
+            .text_color(rgb(0xf9fafb))
+            .text_xl()
+            .child(self.title.clone())
+    }
+}
+
+pub fn open(cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(960.0), px(640.0)), cx);
+
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            ..Default::default()
+        },
+        |_, cx| {
+            cx.new(|_| RekindleApp {
+                title: "Rekindle".into(),
+            })
+        },
+    )
+    .expect("failed to open the application window");
+
+    cx.activate(true);
+}

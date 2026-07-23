@@ -1,0 +1,7 @@
+fn main() -> eframe::Result {
+    eframe::run_native(
+        "Rekindle",
+        eframe::NativeOptions::default(),
+        Box::new(|_| Ok(Box::new(<%= @crate_name %>::RekindleApp))),
+    )
+}

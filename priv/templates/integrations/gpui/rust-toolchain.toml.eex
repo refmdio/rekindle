@@ -1,0 +1,4 @@
+[toolchain]
+channel = "nightly"
+targets = [<%= if :web in @targets, do: "\"wasm32-unknown-unknown\"", else: "" %>]
+components = ["rustfmt", "clippy"]

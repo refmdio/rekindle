@@ -1,0 +1,29 @@
+[package]
+name = "<%= @package_name %>"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+desktop = []
+web = []
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+slint = "1.16"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+slint = { version = "1.16", default-features = false, features = ["compat-1-2", "renderer-femtovg", "backend-winit", "std"] }
+wasm-bindgen = "=<%= @wasm_bindgen_version %>"
+
+<%= if :web in @targets do %>
+[[bin]]
+name = "web"
+path = "src/bin/web.rs"
+required-features = ["web"]
+<% end %>
+<%= if :desktop in @targets do %>
+[[bin]]
+name = "desktop"
+path = "src/bin/desktop.rs"
+required-features = ["desktop"]
+<% end %>

@@ -1,0 +1,35 @@
+[package]
+name = "<%= @package_name %>"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+desktop = []
+web = []
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "18f35ffac2da72ccdfb0e1bf756218fa1995162b" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "18f35ffac2da72ccdfb0e1bf756218fa1995162b" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=<%= @wasm_bindgen_version %>"
+
+<%= if :web in @targets do %>
+[[bin]]
+name = "web"
+path = "src/bin/web.rs"
+required-features = ["web"]
+<% end %>
+<%= if :desktop in @targets do %>
+[[bin]]
+name = "desktop"
+path = "src/bin/desktop.rs"
+required-features = ["desktop"]
+<% end %>
+
+[profile.dev]
+debug = "limited"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,24 @@
+slint::slint! {
+    export component RekindleApp inherits Window {
+        title: "Rekindle";
+        width: 960px;
+        height: 640px;
+
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: "Rekindle";
+                font-size: 28px;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "Edit client/src/lib.rs to build your application.";
+                horizontal-alignment: center;
+            }
+        }
+    }
+}
+
+pub fn run() -> Result<(), slint::PlatformError> {
+    RekindleApp::new()?.run()
+}

@@ -3,7 +3,7 @@ defmodule Rekindle.Config do
 
   alias Rekindle.Config.{Error, Target}
 
-  @integrations [:gpui, :egui, :slint]
+  @integrations Rekindle.Integration.names()
   @target_names [:web, :desktop]
   @config_keys [:integration, :targets, :public_dir]
   @target_keys [:package, :binary, :features, :profiles]
