@@ -246,7 +246,7 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     refute File.exists?(context.rustup_log)
   end
 
-  test "the public setup adapter closes malformed backend error lists before effects", context do
+  test "the public setup adapter preserves malformed backend contract failures", context do
     for shape <- ~w[improper_outer oversized_outer improper_path oversized_path] do
       Application.put_env(
         :rekindle,
@@ -255,9 +255,15 @@ defmodule Rekindle.SetupTaskIntegrationTest do
       )
 
       outcome = Mix.Tasks.Rekindle.Setup.run_outcome([])
-      assert outcome.exit_status == 1
+      assert outcome.exit_status == 3
+
+      assert {:error, %{stage: :internal, code: :contract_violation, diagnostics: []}} =
+               outcome.value
+
       assert outcome.stdout == ""
-      assert outcome.stderr =~ "config_invalid"
+      assert outcome.stderr =~ "contract_violation"
+      assert outcome.stderr =~ ~r/correlation=[0-9a-f]{32}/
+      refute outcome.stderr =~ "invalid backend configuration"
       refute outcome.stderr =~ "** ("
       refute File.exists?(context.rustup_log)
     end

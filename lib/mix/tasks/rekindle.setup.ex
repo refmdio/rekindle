@@ -26,6 +26,9 @@ defmodule Mix.Tasks.Rekindle.Setup do
 
   defp map_config_error({:ok, project}), do: {:ok, project}
 
+  defp map_config_error({:error, {:invalid_configuration_errors, %ConfigError{}} = invalid}),
+    do: {:error, invalid}
+
   defp map_config_error({:error, [%ConfigError{} = error | _errors]}),
     do: {:error, config_failure(error)}
 
