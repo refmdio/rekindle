@@ -21,6 +21,7 @@ defmodule Rekindle.Toolchain.Process do
     timeout = Keyword.get(options, :timeout, @default_timeout)
     output_limit = Keyword.get(options, :output_limit, @default_output_limit)
     cancel_ref = Keyword.get(options, :cancel_ref)
+    launcher = System.find_executable("setsid")
 
     port_options =
       [
@@ -28,23 +29,27 @@ defmodule Rekindle.Toolchain.Process do
         :exit_status,
         :stderr_to_stdout,
         :use_stdio,
-        args: arguments,
+        args: ["--wait", executable | arguments],
         cd: Keyword.fetch!(options, :cd)
       ] ++ environment(options)
 
-    try do
-      {:spawn_executable, String.to_charlist(executable)}
-      |> Port.open(port_options)
-      |> receive_output(
-        System.monotonic_time(:millisecond) + timeout,
-        output_limit,
-        cancel_ref,
-        [],
-        0,
-        false
-      )
-    rescue
-      error -> {:error, {:start, error}}
+    if launcher do
+      try do
+        {:spawn_executable, String.to_charlist(launcher)}
+        |> Port.open(port_options)
+        |> receive_output(
+          System.monotonic_time(:millisecond) + timeout,
+          output_limit,
+          cancel_ref,
+          [],
+          0,
+          false
+        )
+      rescue
+        error -> {:error, {:start, error}}
+      end
+    else
+      {:error, {:start, RuntimeError.exception("setsid executable was not found")}}
     end
   end
 
@@ -89,39 +94,73 @@ defmodule Rekindle.Toolchain.Process do
       end
 
     if os_pid do
-      signal(os_pid, "TERM")
+      signal(session_group_pid(os_pid), "TERM")
       await_exit(port, @termination_grace)
     end
 
     if Port.info(port) do
       if os_pid do
-        signal(os_pid, "KILL")
+        signal(session_group_pid(os_pid), "KILL")
         await_exit(port, @termination_grace)
       end
     end
 
     if Port.info(port) do
+      if os_pid, do: signal_process(os_pid, "KILL")
       Port.close(port)
     end
   end
 
+  defp session_group_pid(os_pid) do
+    case File.read_link("/proc/#{os_pid}/exe") do
+      {:ok, executable} ->
+        if Path.basename(executable) == "setsid" do
+          session_child_pid(os_pid)
+        else
+          os_pid
+        end
+
+      {:error, _reason} ->
+        os_pid
+    end
+  end
+
+  defp session_child_pid(os_pid) do
+    children = "/proc/#{os_pid}/task/#{os_pid}/children"
+
+    with {:ok, contents} <- File.read(children),
+         [child | _] <- String.split(contents, ~r/\s+/, trim: true),
+         {pid, ""} <- Integer.parse(child) do
+      pid
+    else
+      _ -> os_pid
+    end
+  end
+
   defp signal(os_pid, name) do
-    case System.find_executable("kill") do
+    case System.find_executable("pkill") do
       nil ->
         :unavailable
 
       executable ->
-        case System.cmd(executable, ["-#{name}", "--", "-#{os_pid}"], stderr_to_stdout: true) do
+        case System.cmd(executable, ["-#{name}", "-g", Integer.to_string(os_pid)],
+               stderr_to_stdout: true
+             ) do
           {_output, 0} ->
             :ok
 
           _ ->
-            System.cmd(executable, ["-#{name}", Integer.to_string(os_pid)],
-              stderr_to_stdout: true
-            )
-
+            signal_process(os_pid, name)
             :ok
         end
+    end
+  end
+
+  defp signal_process(os_pid, name) do
+    executable = System.find_executable("kill")
+
+    if executable do
+      System.cmd(executable, ["-#{name}", Integer.to_string(os_pid)], stderr_to_stdout: true)
     end
   end
 

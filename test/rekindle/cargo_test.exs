@@ -149,19 +149,24 @@ defmodule Rekindle.Cargo.ProcessTest do
 
   test "times out and reaps the child" do
     root = tmp_dir()
-    pid_file = Path.join(root, "pid")
+    parent_pid_file = Path.join(root, "parent-pid")
+    child_pid_file = Path.join(root, "child-pid")
     executable = wait_executable(root)
 
     assert {:error, :timeout} =
-             Process.run(executable, [pid_file], cd: File.cwd!(), timeout: 100)
+             Process.run(executable, [parent_pid_file, child_pid_file],
+               cd: File.cwd!(),
+               timeout: 100
+             )
 
-    pid = pid_file |> File.read!() |> String.trim()
-    refute File.exists?("/proc/#{pid}")
+    refute_process(parent_pid_file)
+    refute_process(child_pid_file)
   end
 
   test "cancels and closes the child" do
     root = tmp_dir()
-    pid_file = Path.join(root, "pid")
+    parent_pid_file = Path.join(root, "parent-pid")
+    child_pid_file = Path.join(root, "child-pid")
     executable = wait_executable(root)
     cancel_ref = make_ref()
     parent = self()
@@ -170,26 +175,47 @@ defmodule Rekindle.Cargo.ProcessTest do
       Task.async(fn ->
         send(parent, {:runner, self()})
 
-        Process.run(executable, [pid_file],
+        Process.run(executable, [parent_pid_file, child_pid_file],
           cd: File.cwd!(),
           cancel_ref: cancel_ref
         )
       end)
 
     assert_receive {:runner, runner}
-    assert wait_for_file(pid_file, 50)
+    assert wait_for_file(child_pid_file, 50)
     send(runner, {:rekindle_cancel, cancel_ref})
     assert Task.await(task) == {:error, :cancelled}
 
-    pid = pid_file |> File.read!() |> String.trim()
-    refute File.exists?("/proc/#{pid}")
+    refute_process(parent_pid_file)
+    refute_process(child_pid_file)
   end
 
   defp wait_executable(root) do
     executable = Path.join(root, "wait")
-    File.write!(executable, "#!/bin/sh\necho $$ > \"$1\"\nexec /usr/bin/sleep 30\n")
+
+    File.write!(
+      executable,
+      "#!/bin/sh\necho $$ > \"$1\"\n/usr/bin/sleep 30 &\necho $! > \"$2\"\nwait\n"
+    )
+
     File.chmod!(executable, 0o755)
     executable
+  end
+
+  defp refute_process(pid_file) do
+    pid = pid_file |> File.read!() |> String.trim()
+    refute wait_for_process_exit(pid, 50), "process #{pid} survived"
+  end
+
+  defp wait_for_process_exit(_pid, 0), do: true
+
+  defp wait_for_process_exit(pid, attempts) do
+    if File.exists?("/proc/#{pid}") do
+      :timer.sleep(10)
+      wait_for_process_exit(pid, attempts - 1)
+    else
+      false
+    end
   end
 
   defp wait_for_file(_path, 0), do: false
