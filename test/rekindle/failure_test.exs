@@ -5,7 +5,7 @@ defmodule Rekindle.FailureTest do
 
   @groups %{
     configuration:
-      ~w[config_missing config_invalid target_undeclared path_invalid path_overlap install_conflict]a,
+      ~w[config_missing config_invalid target_undeclared unsupported_integration path_invalid path_overlap install_conflict]a,
     compatibility:
       ~w[tool_missing tool_version_mismatch helper_missing helper_checksum_mismatch helper_protocol_mismatch unsupported_host unqualified_tuple]a,
     project_model:
@@ -39,7 +39,7 @@ defmodule Rekindle.FailureTest do
 
   test "enforces the exact retryable classification" do
     expected =
-      ~w[spawn_failed io_failed build_timeout cancelled browser_disconnected native_not_ready projection_busy]a
+      ~w[io_failed build_timeout cancelled artifact_missing artifact_changed seal_failed cache_corrupt generation_limit browser_disconnected native_not_ready native_exited handoff_failed projection_busy release_not_ready]a
 
     for code <- Failure.codes() do
       assert Failure.retryable?(code) == code in expected
@@ -238,13 +238,13 @@ defmodule Rekindle.FailureTest do
         target: :web,
         stage: :execution,
         code: :cargo_failed,
-        message: String.duplicate("界", 3_000),
+        message: String.duplicate("界", 1_000),
         diagnostics: [mutated]
       )
 
     encoded = Jason.encode!(Failure.to_map(failure))
     assert String.valid?(failure.message)
-    assert byte_size(failure.message) <= 8_192
+    assert byte_size(failure.message) <= 4_096
     refute encoded =~ "sink-secret"
     refute encoded =~ "/home/user"
 
@@ -266,5 +266,68 @@ defmodule Rekindle.FailureTest do
                "message" => "unsafe diagnostic payload"
              } = Diagnostic.to_map(unsafe)
     end
+  end
+
+  test "bounds messages and applies the sole diagnostic overflow projection" do
+    assert {:ok, _failure} =
+             Failure.new(
+               target: nil,
+               stage: :internal,
+               code: :internal,
+               message: String.duplicate("x", 4_096)
+             )
+
+    assert {:error, _error} =
+             Failure.new(
+               target: nil,
+               stage: :internal,
+               code: :internal,
+               message: String.duplicate("x", 4_097)
+             )
+
+    diagnostics =
+      for index <- 1..257 do
+        {:ok, diagnostic} =
+          Diagnostic.new(
+            target: :web,
+            stage: :execution,
+            severity: :info,
+            code: :cargo_message,
+            message: "message #{index}"
+          )
+
+        diagnostic
+      end
+
+    assert {:ok, failure} =
+             Failure.new(
+               target: :web,
+               stage: :execution,
+               code: :cargo_failed,
+               message: "Cargo failed",
+               diagnostics: diagnostics
+             )
+
+    assert length(failure.diagnostics) == 256
+    assert Enum.at(failure.diagnostics, 126).message == "message 127"
+
+    assert %{
+             code: :diagnostics_truncated,
+             message: "diagnostics omitted",
+             rendered: "discarded=2"
+           } =
+             Enum.at(failure.diagnostics, 127)
+
+    assert Enum.at(failure.diagnostics, 128).message == "message 130"
+    assert List.last(failure.diagnostics).message == "message 257"
+
+    assert {:error, _error} =
+             Failure.new(
+               target: :desktop,
+               stage: :execution,
+               code: :cargo_failed,
+               message: "Cargo failed",
+               diagnostics: [hd(diagnostics)]
+             )
   end
 end

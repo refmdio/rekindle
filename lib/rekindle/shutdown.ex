@@ -230,6 +230,7 @@ defmodule Rekindle.Shutdown do
   defp emit_stopping_sync(event_bus, reason) do
     attributes = %{
       target: nil,
+      support_level: nil,
       source_revision: nil,
       generation_id: nil,
       type: :session_stopping,

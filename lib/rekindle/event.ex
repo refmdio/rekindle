@@ -7,6 +7,7 @@ defmodule Rekindle.Event do
     :project_session,
     :sequence,
     :target,
+    :support_level,
     :source_revision,
     :generation_id,
     :type,
@@ -15,7 +16,7 @@ defmodule Rekindle.Event do
   @enforce_keys @fields
   defstruct [contract_version: 1] ++ @fields
 
-  @types ~w[configuration_rejected session_ready watcher_state build_started stage_started stage_progress stage_finished build_succeeded build_failed build_cancelled generation_published browser_state desktop_state projection_finished cleanup_required doctor_finished session_stopping]a
+  @types ~w[session_ready watcher_state build_started stage_started stage_progress stage_finished build_succeeded build_failed build_cancelled generation_published browser_state desktop_state projection_finished cleanup_required doctor_finished session_stopping]a
   @terminal ~w[build_succeeded build_failed build_cancelled]a
 
   @type t :: %__MODULE__{}
@@ -52,6 +53,7 @@ defmodule Rekindle.Event do
       "project_session" => event.project_session,
       "sequence" => event.sequence,
       "target" => encode(event.target),
+      "support_level" => encode(event.support_level),
       "source_revision" => event.source_revision,
       "generation_id" => event.generation_id,
       "type" => Atom.to_string(event.type),
@@ -59,14 +61,32 @@ defmodule Rekindle.Event do
     }
   end
 
-  defp roots(%{type: type, target: nil, source_revision: nil, generation_id: nil})
-       when type in [:configuration_rejected, :session_ready, :doctor_finished, :session_stopping],
+  defp roots(%{
+         type: type,
+         target: nil,
+         support_level: nil,
+         source_revision: nil,
+         generation_id: nil
+       })
+       when type in [:session_ready, :doctor_finished, :session_stopping],
        do: :ok
 
-  defp roots(%{type: :watcher_state, target: nil, source_revision: revision, generation_id: nil}),
-    do: if(is_nil(revision) or uint?(revision), do: :ok, else: :error)
+  defp roots(%{
+         type: :watcher_state,
+         target: nil,
+         support_level: nil,
+         source_revision: revision,
+         generation_id: nil
+       }),
+       do: if(is_nil(revision) or uint?(revision), do: :ok, else: :error)
 
-  defp roots(%{type: type, target: target, source_revision: revision, generation_id: nil})
+  defp roots(%{
+         type: type,
+         target: target,
+         support_level: support_level,
+         source_revision: revision,
+         generation_id: nil
+       })
        when type in [
               :build_started,
               :stage_started,
@@ -76,50 +96,76 @@ defmodule Rekindle.Event do
               :build_cancelled
             ] and
               target in [:web, :desktop],
-       do: if(uint?(revision), do: :ok, else: :error)
+       do: if(uint?(revision) and support_level?(support_level), do: :ok, else: :error)
 
-  defp roots(%{type: type, target: target, source_revision: revision, generation_id: generation})
+  defp roots(%{
+         type: type,
+         target: target,
+         support_level: support_level,
+         source_revision: revision,
+         generation_id: generation
+       })
        when type in [:build_succeeded, :generation_published, :projection_finished] and
               target in [:web, :desktop],
-       do: if(uint?(revision) and id?(generation), do: :ok, else: :error)
+       do:
+         if(uint?(revision) and id?(generation) and support_level?(support_level),
+           do: :ok,
+           else: :error
+         )
 
   defp roots(%{
          type: :browser_state,
          target: :web,
+         support_level: support_level,
          source_revision: revision,
          generation_id: generation
        }),
-       do: if(optional_uint?(revision) and optional_id?(generation), do: :ok, else: :error)
+       do:
+         if(
+           optional_uint?(revision) and optional_id?(generation) and support_level?(support_level),
+           do: :ok,
+           else: :error
+         )
 
   defp roots(%{
          type: :desktop_state,
          target: :desktop,
+         support_level: support_level,
          source_revision: revision,
          generation_id: generation
        }),
-       do: if(optional_uint?(revision) and optional_id?(generation), do: :ok, else: :error)
+       do:
+         if(
+           optional_uint?(revision) and optional_id?(generation) and support_level?(support_level),
+           do: :ok,
+           else: :error
+         )
 
   defp roots(%{
          type: :cleanup_required,
          target: target,
+         support_level: support_level,
          source_revision: nil,
          generation_id: nil
        }),
-       do: if(target in [nil, :web, :desktop], do: :ok, else: :error)
+       do:
+         if(
+           (is_nil(target) and is_nil(support_level)) or
+             (target in [:web, :desktop] and support_level?(support_level)),
+           do: :ok,
+           else: :error
+         )
 
   defp roots(_attributes), do: :error
 
-  defp payload(:configuration_rejected, value),
-    do:
-      fields(value, [:failure_code, :diagnostic_count], fn ->
-        config_code?(value.failure_code) and uint?(value.diagnostic_count)
-      end)
-
   defp payload(:session_ready, value),
     do:
-      fields(value, [:selected_targets, :tuple_id], fn ->
+      fields(value, [:selected_targets, :support_levels, :tuple_ids], fn ->
         value.selected_targets in [[:web], [:desktop], [:web, :desktop]] and
-          optional_text?(value.tuple_id)
+          target_map?(value.support_levels, value.selected_targets, &support_level?/1) and
+          target_map?(value.tuple_ids, value.selected_targets, &optional_text?/1,
+            selected?: false
+          )
       end)
 
   defp payload(:watcher_state, value),
@@ -224,13 +270,23 @@ defmodule Rekindle.Event do
 
   defp payload(:doctor_finished, value),
     do:
-      fields(value, [:overall, :required_findings, :unavailable, :stale, :unknown], fn ->
-        value.overall in [:supported, :unavailable, :stale, :unknown] and
-          Enum.all?(
-            [value.required_findings, value.unavailable, value.stale, value.unknown],
-            &uint?/1
-          )
-      end)
+      fields(
+        value,
+        [:overall, :required_findings, :experimental, :unavailable, :stale, :unknown],
+        fn ->
+          value.overall in [:supported, :experimental, :unavailable, :stale, :unknown] and
+            Enum.all?(
+              [
+                value.required_findings,
+                value.experimental,
+                value.unavailable,
+                value.stale,
+                value.unknown
+              ],
+              &uint?/1
+            )
+        end
+      )
 
   defp payload(:session_stopping, value),
     do:
@@ -258,10 +314,6 @@ defmodule Rekindle.Event do
 
   defp graph_nodes?(_values), do: false
 
-  defp config_code?(value),
-    do:
-      value in ~w[config_missing config_invalid target_undeclared path_invalid path_overlap install_conflict]a
-
   defp failure_code?(value), do: value in Failure.codes()
   defp optional_failure_code?(nil), do: true
   defp optional_failure_code?(value), do: failure_code?(value)
@@ -275,7 +327,27 @@ defmodule Rekindle.Event do
   defp optional_text?(nil), do: true
 
   defp optional_text?(value),
-    do: is_binary(value) and byte_size(value) in 1..256 and String.valid?(value)
+    do:
+      is_binary(value) and byte_size(value) in 1..256 and String.valid?(value) and
+        String.normalize(value, :nfc) == value and
+        not Regex.match?(~r/[\x00-\x1F\x7F]/, value)
+
+  defp support_level?(value), do: value in [:qualified, :experimental, :not_applicable]
+
+  defp target_map?(value, selected_targets, validator, options \\ []) do
+    selected? = Keyword.get(options, :selected?, true)
+
+    is_map(value) and Map.keys(value) |> Enum.sort() == [:desktop, :web] and
+      Enum.all?([:web, :desktop], fn target ->
+        item = Map.get(value, target)
+
+        if target in selected_targets do
+          if selected?, do: validator.(item), else: optional_text?(item)
+        else
+          is_nil(item)
+        end
+      end)
+  end
 
   defp encode(value) when is_atom(value) and not is_nil(value), do: Atom.to_string(value)
   defp encode(value) when is_list(value), do: Enum.map(value, &encode/1)

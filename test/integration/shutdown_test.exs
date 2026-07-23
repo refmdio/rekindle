@@ -77,7 +77,8 @@ defmodule Rekindle.ShutdownIntegrationTest do
 
     shutdown = Task.async(fn -> Shutdown.shutdown(coordinator) end)
 
-    assert_receive {:rekindle_event, ^subscription, %{type: :session_stopping}}
+    assert_receive {:rekindle, ^subscription, {:event, %{type: :session_stopping}}}
+    assert_receive {:rekindle, ^subscription, {:closed, :session_stopped}}
     assert_receive {:process_cancelled, %{"reason" => "shutdown"}}
     assert {:error, %{code: :cancelled}} = ProcessRunner.run(runner, request())
 

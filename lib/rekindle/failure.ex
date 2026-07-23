@@ -5,7 +5,7 @@ defmodule Rekindle.Failure do
 
   @groups %{
     configuration:
-      ~w[config_missing config_invalid target_undeclared path_invalid path_overlap install_conflict]a,
+      ~w[config_missing config_invalid target_undeclared unsupported_integration path_invalid path_overlap install_conflict]a,
     compatibility:
       ~w[tool_missing tool_version_mismatch helper_missing helper_checksum_mismatch helper_protocol_mismatch unsupported_host unqualified_tuple]a,
     project_model:
@@ -23,7 +23,7 @@ defmodule Rekindle.Failure do
     internal: ~w[contract_violation unexpected_state internal]a
   }
 
-  @retryable_codes ~w[spawn_failed io_failed build_timeout cancelled browser_disconnected native_not_ready projection_busy]a
+  @retryable_codes ~w[io_failed build_timeout cancelled artifact_missing artifact_changed seal_failed cache_corrupt generation_limit browser_disconnected native_not_ready native_exited handoff_failed projection_busy release_not_ready]a
 
   @enforce_keys [:target, :stage, :code, :message, :diagnostics, :retryable?]
   defstruct contract_version: 1,
@@ -48,6 +48,7 @@ defmodule Rekindle.Failure do
           :config_missing
           | :config_invalid
           | :target_undeclared
+          | :unsupported_integration
           | :path_invalid
           | :path_overlap
           | :install_conflict
@@ -137,7 +138,12 @@ defmodule Rekindle.Failure do
          {:ok, expected_stage} <- fetch_stage(code),
          {:ok, attributes} <- sanitize_attributes(attributes),
          :ok <- validate_fields(attributes, expected_stage),
-         {:ok, diagnostics} <- sanitize_diagnostics(Map.get(attributes, :diagnostics, [])) do
+         {:ok, diagnostics} <-
+           sanitize_diagnostics(
+             Map.get(attributes, :diagnostics, []),
+             Map.get(attributes, :target),
+             Map.get(attributes, :stage)
+           ) do
       {:ok,
        struct!(
          __MODULE__,
@@ -213,37 +219,29 @@ defmodule Rekindle.Failure do
     end
   end
 
-  defp sanitize_diagnostics(diagnostics) when is_list(diagnostics) do
-    Enum.reduce_while(diagnostics, {:ok, []}, fn
-      %Diagnostic{} = diagnostic, {:ok, sanitized} ->
-        case Diagnostic.sanitize(diagnostic) do
-          {:ok, value} -> {:cont, {:ok, [value | sanitized]}}
-          {:error, _} -> {:halt, error(:config_invalid, "failure diagnostic is unsafe")}
-        end
+  defp sanitize_diagnostics(diagnostics, target, stage) when is_list(diagnostics),
+    do: Diagnostic.collect(diagnostics, target, stage)
 
-      _diagnostic, _acc ->
-        {:halt, error(:config_invalid, "failure diagnostics must use Rekindle.Diagnostic")}
-    end)
-    |> case do
-      {:ok, sanitized} -> {:ok, Enum.reverse(sanitized)}
-      {:error, _} = failure -> failure
-    end
-  end
-
-  defp sanitize_diagnostics(_diagnostics) do
+  defp sanitize_diagnostics(_diagnostics, _target, _stage) do
     error(:config_invalid, "failure diagnostics must be a list")
   end
 
   defp sanitize_attributes(attributes) do
-    case Rekindle.Redactor.sanitize(Map.get(attributes, :message)) do
+    case Rekindle.Redactor.sanitize_bounded(Map.get(attributes, :message), 4_096) do
       {:ok, message} -> {:ok, Map.put(attributes, :message, message)}
       {:error, _} = error -> error
     end
   end
 
-  defp safe_message?(message) when is_binary(message), do: byte_size(message) <= 8_192
+  defp safe_message?(message) when is_binary(message),
+    do: safe_text?(message) and byte_size(message) <= 4_096
 
   defp safe_message?(_message), do: false
+
+  defp safe_text?(value),
+    do:
+      String.valid?(value) and String.normalize(value, :nfc) == value and
+        not Regex.match?(~r/[\x00-\x09\x0B-\x1F\x7F]/, value)
 
   defp encode_atom(value) when is_atom(value) and not is_nil(value), do: Atom.to_string(value)
   defp encode_atom(value), do: value

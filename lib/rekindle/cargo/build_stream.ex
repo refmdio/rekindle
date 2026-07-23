@@ -207,8 +207,8 @@ defmodule Rekindle.Cargo.BuildStream do
                stage: :execution,
                severity: severity(level),
                code: :cargo_compiler,
-               message: bounded_text(message),
-               rendered: bounded_optional(Map.get(body, "rendered"))
+               message: bounded_text(message, 4_096),
+               rendered: bounded_optional(Map.get(body, "rendered"), 16_384)
              ] ++ location(state, Map.get(body, "spans", []))
            ) do
       {:ok, diagnostic}
@@ -415,7 +415,7 @@ defmodule Rekindle.Cargo.BuildStream do
         stage: :execution,
         severity: :info,
         code: code,
-        message: bounded_text(message)
+        message: bounded_text(message, 4_096)
       )
 
     add_diagnostic(state, diagnostic)
@@ -427,14 +427,14 @@ defmodule Rekindle.Cargo.BuildStream do
       else: state
   end
 
-  defp bounded_optional(nil), do: nil
-  defp bounded_optional(value), do: bounded_text(value)
+  defp bounded_optional(nil, _limit), do: nil
+  defp bounded_optional(value, limit), do: bounded_text(value, limit)
 
-  defp bounded_text(value) when is_binary(value) do
-    if byte_size(value) <= 8_192 do
+  defp bounded_text(value, limit) when is_binary(value) do
+    if byte_size(value) <= limit do
       value
     else
-      truncate_utf8(value, 8_189) <> "..."
+      truncate_utf8(value, limit - 3) <> "..."
     end
   end
 
@@ -450,12 +450,17 @@ defmodule Rekindle.Cargo.BuildStream do
     do: failure(state.target, :cargo_protocol, "Malformed Cargo #{reason} message", state)
 
   defp failure(target, code, message, state \\ nil) do
-    diagnostics = if state, do: Enum.reverse(state.diagnostics), else: []
+    stage = elem(Failure.stage_for(code), 1)
+
+    diagnostics =
+      if state,
+        do: Enum.map(Enum.reverse(state.diagnostics), &%{&1 | stage: stage}),
+        else: []
 
     {:error,
      Failure.new!(
        target: normalize_target(target),
-       stage: elem(Failure.stage_for(code), 1),
+       stage: stage,
        code: code,
        message: message,
        diagnostics: diagnostics

@@ -72,6 +72,41 @@ defmodule Rekindle.Redactor do
     end
   end
 
+  @doc false
+  @spec sanitize_bounded(term(), pos_integer(), [binary()]) ::
+          {:ok, String.t()} | {:error, ConfigError.t()}
+  def sanitize_bounded(value, limit, values \\ [])
+
+  def sanitize_bounded(value, limit, values)
+      when is_binary(value) and is_integer(limit) and limit > 0 do
+    cond do
+      not String.valid?(value) ->
+        error("public text is not valid UTF-8")
+
+      value == "" or String.contains?(value, <<0>>) ->
+        error("public text is empty or contains NUL")
+
+      Enum.any?(@stack_markers, &String.contains?(value, &1)) or
+          Regex.match?(~r/\n\s+at\s/, value) ->
+        error("public text contains stack-like content")
+
+      true ->
+        with {:ok, redacted} <- redact_bytes(value, values) do
+          sanitized =
+            redacted
+            |> String.replace(@windows_path, "<redacted-path>")
+            |> String.replace(@unix_path, "<redacted-path>")
+
+          if byte_size(sanitized) <= limit,
+            do: {:ok, sanitized},
+            else: error("public text exceeds its byte bound")
+        end
+    end
+  end
+
+  def sanitize_bounded(_value, _limit, _values),
+    do: error("public text and byte bound are invalid")
+
   defp redact(value, values) do
     with {:ok, redacted} <- redact_bytes(value, values) do
       sanitized =

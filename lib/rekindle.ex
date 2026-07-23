@@ -38,25 +38,27 @@ defmodule Rekindle do
     }
   end
 
-  @spec subscribe(otp_app()) :: {:ok, reference()} | {:error, Rekindle.Failure.t()}
-  def subscribe(otp_app) when is_atom(otp_app) do
+  @spec subscribe(otp_app()) :: {:ok, reference()} | {:error, :not_running}
+  def subscribe(otp_app) when is_atom(otp_app) and otp_app not in [nil, true, false] do
     case Registry.lookup(Rekindle.RuntimeRegistry, {:events, otp_app}) do
       [{pid, _value}] -> Rekindle.EventBus.subscribe(pid)
       [] -> event_bus_unavailable()
     end
   end
 
-  def subscribe(_otp_app), do: event_bus_unavailable()
+  def subscribe(_otp_app), do: raise(ArgumentError, "otp_app must be an application atom")
 
-  @spec unsubscribe(otp_app(), reference()) :: :ok
-  def unsubscribe(otp_app, reference) when is_atom(otp_app) and is_reference(reference) do
+  @spec unsubscribe(otp_app(), reference()) :: :ok | {:error, :not_owner}
+  def unsubscribe(otp_app, reference)
+      when is_atom(otp_app) and otp_app not in [nil, true, false] and is_reference(reference) do
     case Registry.lookup(Rekindle.RuntimeRegistry, {:events, otp_app}) do
       [{pid, _value}] -> Rekindle.EventBus.unsubscribe(pid, self(), reference)
       [] -> :ok
     end
   end
 
-  def unsubscribe(_otp_app, _reference), do: :ok
+  def unsubscribe(_otp_app, _reference),
+    do: raise(ArgumentError, "otp_app and subscription reference are invalid")
 
   @spec build(otp_app(), target(), mode: build_mode()) ::
           {:ok, Rekindle.BuildResult.t()} | {:error, Rekindle.Failure.t()}
@@ -74,13 +76,7 @@ defmodule Rekindle do
   def current(otp_app, target), do: Rekindle.BuildFacade.current(otp_app, target)
 
   defp event_bus_unavailable do
-    {:error,
-     Rekindle.Failure.new!(
-       target: nil,
-       stage: :internal,
-       code: :unexpected_state,
-       message: "Rekindle project event stream is unavailable"
-     )}
+    {:error, :not_running}
   end
 
   defp invalid_build_request do

@@ -20,6 +20,7 @@ defmodule Rekindle.EventBus do
     :project_session,
     :watermark,
     sequence: 0,
+    status: :running,
     subscribers: %{},
     monitors: %{},
     ordering: %{}
@@ -32,11 +33,11 @@ defmodule Rekindle.EventBus do
     GenServer.start_link(__MODULE__, options, name: name)
   end
 
-  @spec subscribe(GenServer.server(), pid()) :: {:ok, reference()}
+  @spec subscribe(GenServer.server(), pid()) :: {:ok, reference()} | {:error, :not_running}
   def subscribe(server, subscriber \\ self()),
     do: GenServer.call(server, {:subscribe, subscriber})
 
-  @spec unsubscribe(GenServer.server(), pid(), reference()) :: :ok
+  @spec unsubscribe(GenServer.server(), pid(), reference()) :: :ok | {:error, :not_owner}
   def unsubscribe(server, subscriber \\ self(), reference),
     do: GenServer.call(server, {:unsubscribe, subscriber, reference})
 
@@ -65,24 +66,32 @@ defmodule Rekindle.EventBus do
 
   @impl true
   def handle_call({:subscribe, subscriber}, _from, state) when is_pid(subscriber) do
-    reference = make_ref()
-    monitor = Process.monitor(subscriber)
-    entry = %{pid: subscriber, monitor: monitor}
+    if state.status == :running do
+      reference = make_ref()
+      monitor = Process.monitor(subscriber)
+      entry = %{pid: subscriber, monitor: monitor}
 
-    {:reply, {:ok, reference},
-     %{
-       state
-       | subscribers: Map.put(state.subscribers, reference, entry),
-         monitors: Map.put(state.monitors, monitor, reference)
-     }}
+      {:reply, {:ok, reference},
+       %{
+         state
+         | subscribers: Map.put(state.subscribers, reference, entry),
+           monitors: Map.put(state.monitors, monitor, reference)
+       }}
+    else
+      {:reply, {:error, :not_running}, state}
+    end
   end
 
   def handle_call({:unsubscribe, subscriber, reference}, _from, state) do
     case Map.get(state.subscribers, reference) do
       %{pid: ^subscriber} -> {:reply, :ok, drop_subscriber(state, reference)}
-      _ -> {:reply, :ok, state}
+      %{pid: _owner} -> {:reply, {:error, :not_owner}, state}
+      nil -> {:reply, :ok, state}
     end
   end
+
+  def handle_call({:emit, _attributes}, _from, %{status: :stopped} = state),
+    do: {:reply, unexpected(), state}
 
   def handle_call({:emit, attributes}, _from, state) do
     attributes =
@@ -94,7 +103,9 @@ defmodule Rekindle.EventBus do
          :ok <- validate_order(state, event) do
       state = record_event(state, event)
       emit_telemetry(event)
-      {:reply, {:ok, event}, publish(state, event)}
+      state = publish(state, event)
+      state = if event.type == :session_stopping, do: %{state | status: :stopped}, else: state
+      {:reply, {:ok, event}, state}
     else
       {:error, %Failure{} = failure} -> {:reply, {:error, failure}, state}
       :error -> {:reply, unexpected(), state}
@@ -113,23 +124,19 @@ defmodule Rekindle.EventBus do
        when not is_nil(target) and not is_nil(revision) and event.type in @ordered_types do
     case Map.get(state.ordering, target) do
       nil ->
-        :ok
+        if event.type == :build_started, do: :ok, else: :error
 
       %{revision: current} when revision < current ->
         :error
 
       %{revision: current} when revision > current ->
-        :ok
+        if event.type == :build_started, do: :ok, else: :error
 
       %{terminal?: true} ->
         :error
 
-      %{progress: progress} when event.type == :stage_progress ->
-        prior = Map.get(progress, event.payload.stage, -1)
-        if event.payload.completed >= prior, do: :ok, else: :error
-
-      _current ->
-        :ok
+      current ->
+        validate_current(current, event)
     end
   end
 
@@ -143,19 +150,46 @@ defmodule Rekindle.EventBus do
   defp record_order(ordering, %Event{type: type} = event) when type in @ordered_types do
     current =
       case Map.get(ordering, event.target) do
-        %{revision: revision} = current when revision == event.source_revision -> current
-        _other -> %{revision: event.source_revision, terminal?: false, progress: %{}}
+        %{revision: revision} = current when revision == event.source_revision ->
+          current
+
+        _other ->
+          %{
+            revision: event.source_revision,
+            terminal?: false,
+            stages: event.payload.stages,
+            stage_index: 0,
+            active_stage: nil,
+            progress: nil,
+            stages_succeeded?: true
+          }
       end
 
     current =
       cond do
         Event.terminal?(event) ->
-          %{current | terminal?: true, progress: %{}}
+          %{current | terminal?: true, active_stage: nil, progress: nil}
+
+        event.type == :stage_started ->
+          %{current | active_stage: event.payload.stage, progress: nil}
 
         event.type == :stage_progress ->
           %{
             current
-            | progress: Map.put(current.progress, event.payload.stage, event.payload.completed)
+            | progress: %{
+                completed: event.payload.completed,
+                total: event.payload.total,
+                unit: event.payload.unit
+              }
+          }
+
+        event.type == :stage_finished ->
+          %{
+            current
+            | stage_index: current.stage_index + 1,
+              active_stage: nil,
+              progress: nil,
+              stages_succeeded?: current.stages_succeeded? and event.payload.result == :ok
           }
 
         true ->
@@ -167,6 +201,44 @@ defmodule Rekindle.EventBus do
 
   defp record_order(ordering, _event), do: ordering
 
+  defp validate_current(_current, %Event{type: :build_started}), do: :error
+
+  defp validate_current(%{active_stage: nil} = current, %Event{type: :stage_started} = event) do
+    if Enum.at(current.stages, current.stage_index) == event.payload.stage, do: :ok, else: :error
+  end
+
+  defp validate_current(%{active_stage: stage, progress: progress}, %Event{
+         type: :stage_progress,
+         payload: %{stage: stage} = payload
+       }) do
+    cond do
+      is_nil(progress) -> :ok
+      payload.completed < progress.completed -> :error
+      payload.total != progress.total -> :error
+      payload.unit != progress.unit -> :error
+      true -> :ok
+    end
+  end
+
+  defp validate_current(%{active_stage: stage}, %Event{
+         type: :stage_finished,
+         payload: %{stage: stage}
+       }),
+       do: :ok
+
+  defp validate_current(current, %Event{type: :build_succeeded}) do
+    if current.stages_succeeded? and is_nil(current.active_stage) and
+         current.stage_index == length(current.stages),
+       do: :ok,
+       else: :error
+  end
+
+  defp validate_current(_current, %Event{type: type})
+       when type in [:build_failed, :build_cancelled],
+       do: :ok
+
+  defp validate_current(_current, _event), do: :error
+
   defp publish(state, event) do
     Enum.reduce(Map.keys(state.subscribers), state, fn reference, acc ->
       case Map.get(acc.subscribers, reference) do
@@ -176,14 +248,29 @@ defmodule Rekindle.EventBus do
         %{pid: pid} ->
           case Process.info(pid, :message_queue_len) do
             {:message_queue_len, count} when count < acc.watermark ->
-              send(pid, {:rekindle_event, reference, event})
-              acc
+              send(pid, {:rekindle, reference, {:event, event}})
+
+              if event.type == :session_stopping,
+                do: close_subscriber(acc, reference, :session_stopped),
+                else: acc
 
             _ ->
-              drop_subscriber(acc, reference)
+              close_subscriber(acc, reference, :overflow)
           end
       end
     end)
+  end
+
+  defp close_subscriber(state, reference, reason) do
+    case Map.get(state.subscribers, reference) do
+      %{pid: pid} ->
+        state = drop_subscriber(state, reference)
+        send(pid, {:rekindle, reference, {:closed, reason}})
+        state
+
+      nil ->
+        state
+    end
   end
 
   defp drop_subscriber(state, reference) do
@@ -198,18 +285,105 @@ defmodule Rekindle.EventBus do
   end
 
   defp emit_telemetry(event) do
-    :telemetry.execute(
-      [:rekindle, :event, event.type],
-      %{sequence: event.sequence},
-      %{
-        project_session: event.project_session,
-        target: event.target,
-        source_revision: event.source_revision,
-        generation_id: event.generation_id,
-        type: event.type
-      }
-    )
+    case telemetry(event) do
+      nil ->
+        :ok
+
+      {name, measurements, event_metadata} ->
+        metadata =
+          %{
+            project_session_digest: session_digest(event.project_session),
+            target: event.target,
+            stage: nil,
+            profile: nil,
+            source_revision: event.source_revision,
+            result_code: nil,
+            compatibility_tuple_id: nil
+          }
+          |> Map.merge(event_metadata)
+
+        :telemetry.execute(name, measurements, metadata)
+    end
   end
+
+  defp telemetry(%Event{type: :build_started, payload: payload}),
+    do:
+      {[:rekindle, :build, :start], %{monotonic_time: System.monotonic_time()},
+       %{profile: payload.profile}}
+
+  defp telemetry(%Event{type: type, payload: payload})
+       when type in [:build_failed, :build_cancelled] do
+    code = if type == :build_failed, do: payload.failure_code, else: payload.reason
+    count = if type == :build_failed, do: payload.diagnostic_count, else: 0
+
+    {[:rekindle, :build, :stop],
+     %{monotonic_time: System.monotonic_time(), diagnostics_count: count}, %{result_code: code}}
+  end
+
+  defp telemetry(%Event{type: :build_succeeded}),
+    do:
+      {[:rekindle, :build, :stop],
+       %{monotonic_time: System.monotonic_time(), diagnostics_count: 0}, %{result_code: :ok}}
+
+  defp telemetry(%Event{type: :stage_started, payload: payload}),
+    do:
+      {[:rekindle, :stage, :start],
+       %{monotonic_time: System.monotonic_time(), input_bytes: payload.input_bytes || 0},
+       %{stage: payload.stage}}
+
+  defp telemetry(%Event{type: :stage_finished, payload: payload}),
+    do:
+      {[:rekindle, :stage, :stop],
+       %{
+         duration_ms: payload.duration_ms,
+         input_bytes: payload.input_bytes,
+         output_bytes: payload.output_bytes
+       }, %{stage: payload.stage, result_code: payload.result}}
+
+  defp telemetry(%Event{type: :generation_published}),
+    do: {[:rekindle, :generation, :published], %{}, %{result_code: :ok}}
+
+  defp telemetry(%Event{type: :browser_state, payload: %{state: state}} = event) do
+    suffix =
+      case state do
+        :joined -> :connected
+        :applied -> :applied
+        :failed -> :failed
+        _ -> nil
+      end
+
+    if suffix,
+      do: {[:rekindle, :browser, suffix], %{}, %{result_code: event.payload.failure_code || :ok}},
+      else: nil
+  end
+
+  defp telemetry(%Event{type: :desktop_state, payload: %{state: state}} = event) do
+    suffix =
+      case state do
+        :spawning -> :started
+        :ready -> :ready
+        value when value in [:stopping, :exited] -> :stopped
+        :failed -> :failed
+        _ -> nil
+      end
+
+    if suffix,
+      do: {[:rekindle, :desktop, suffix], %{}, %{result_code: result_code(event)}},
+      else: nil
+  end
+
+  defp telemetry(%Event{type: :projection_finished, payload: payload}),
+    do:
+      {[:rekindle, :projection, :stop], %{},
+       %{result_code: if(payload.result == :succeeded, do: :ok, else: :failed)}}
+
+  defp telemetry(_event), do: nil
+
+  defp result_code(%Event{payload: %{state: :failed}}), do: :failed
+  defp result_code(_event), do: :ok
+
+  defp session_digest(session),
+    do: :crypto.hash(:sha256, session) |> Base.encode16(case: :lower)
 
   defp unexpected do
     {:error,
