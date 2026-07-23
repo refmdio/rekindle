@@ -8,14 +8,31 @@ defmodule Rekindle do
   alias Rekindle.Config
 
   @doc false
-  @spec start_link(keyword()) :: Supervisor.on_start()
+  @spec start_link(keyword()) :: Supervisor.on_start() | :ignore
   def start_link(options) do
     otp_app = Keyword.fetch!(options, :otp_app)
-    Supervisor.start_link(__MODULE__, otp_app)
+
+    if code_reloading?(otp_app) do
+      Supervisor.start_link(__MODULE__, otp_app)
+    else
+      :ignore
+    end
   end
 
   @impl Supervisor
   def init(_otp_app), do: Supervisor.init([], strategy: :one_for_one)
+
+  defp code_reloading?(otp_app) do
+    otp_app
+    |> Application.get_all_env()
+    |> Enum.any?(fn
+      {module, options} when is_atom(module) and is_list(options) ->
+        Keyword.get(options, :code_reloader, false) == true
+
+      _entry ->
+        false
+    end)
+  end
 
   @doc """
   Builds artifacts for an enabled target.

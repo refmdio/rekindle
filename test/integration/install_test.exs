@@ -190,7 +190,7 @@ defmodule Rekindle.InstallTest do
     cases = [
       {gpui, [integration: "slint", targets: ["web"]], "does not match"},
       {ambiguous, [integration: "gpui", targets: ["web"]], "ambiguous"},
-      {malformed, [integration: "gpui", targets: ["web"]], "is invalid"},
+      {malformed, [integration: "gpui", targets: ["web"]], "cargo metadata failed"},
       {incomplete, [integration: "gpui", targets: ["web"]], "is required"}
     ]
 
@@ -204,7 +204,7 @@ defmodule Rekindle.InstallTest do
   end
 
   test "validates target-specific dependencies for each selected target" do
-    original =
+    native_only =
       existing_client(:egui, [:web])
       |> update_content("client/Cargo.toml", fn manifest ->
         String.replace(
@@ -214,10 +214,34 @@ defmodule Rekindle.InstallTest do
         )
       end)
 
-    rejected = install(original, integration: "egui", targets: ["web"])
+    impossible_web =
+      existing_client(:egui, [:web])
+      |> update_content("client/Cargo.toml", fn manifest ->
+        String.replace(
+          manifest,
+          "cfg(target_arch = \"wasm32\")",
+          "cfg(all(target_arch = \"wasm32\", target_os = \"windows\"))"
+        )
+      end)
 
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "dependency for web"))
-    assert changed_contents(rejected) == changed_contents(original)
+    for original <- [native_only, impossible_web] do
+      rejected = install(original, integration: "egui", targets: ["web"])
+
+      assert Enum.any?(rejected.issues, &String.contains?(&1, "dependency for web"))
+      assert changed_contents(rejected) == changed_contents(original)
+    end
+
+    host_specific =
+      existing_client(:egui, [:desktop])
+      |> update_content("client/Cargo.toml", fn manifest ->
+        String.replace(
+          manifest,
+          "'cfg(not(target_arch = \"wasm32\"))'",
+          "'x86_64-unknown-linux-gnu'"
+        )
+      end)
+
+    assert install(host_specific, integration: "egui", targets: ["desktop"]).issues == []
   end
 
   test "rejects malformed Cargo target tables without raising" do
@@ -236,7 +260,7 @@ defmodule Rekindle.InstallTest do
 
     rejected = install(original, integration: "gpui", targets: ["web"])
 
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "target section"))
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "cargo metadata failed"))
     assert changed_contents(rejected) == changed_contents(original)
   end
 
@@ -250,7 +274,7 @@ defmodule Rekindle.InstallTest do
       end)
 
     rejected = install(disabled, integration: "slint", targets: ["web"])
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "does not define the web binary"))
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "has no binary"))
 
     explicit =
       update_content(disabled, "client/Cargo.toml", fn manifest ->
@@ -264,6 +288,56 @@ defmodule Rekindle.InstallTest do
       end)
 
     assert install(explicit, integration: "slint", targets: ["web"]).issues == []
+  end
+
+  test "adopts Cargo-resolved package, binary name, and required features" do
+    original =
+      existing_client(:egui, [:web])
+      |> update_content("client/Cargo.toml", fn manifest ->
+        String.replace(
+          manifest,
+          """
+          name = "web"
+          path = "src/bin/web.rs"
+          required-features = ["web"]
+          """,
+          """
+          name = "browser"
+          path = "src/bin/web.rs"
+          required-features = ["web", "canvas"]
+          """
+        )
+        |> String.replace("web = []", "web = []\ncanvas = []")
+      end)
+
+    adopted = install(original, integration: "egui", targets: ["web"])
+
+    assert adopted.issues == []
+    config = content(adopted, "config/config.exs")
+    assert config =~ ~s(package: "rekindle_client")
+    assert config =~ ~s(binary: "browser")
+    assert config =~ ~s(features: ["web", "canvas"])
+  end
+
+  test "adopts the resolved root package from a multi-package workspace" do
+    original =
+      existing_client(:gpui, [:web], %{
+        "client/member/Cargo.toml" => """
+        [package]
+        name = "member"
+        version = "0.1.0"
+        edition = "2024"
+        """,
+        "client/member/src/lib.rs" => "pub struct Member;\n"
+      })
+      |> update_content("client/Cargo.toml", fn manifest ->
+        manifest <> "\n[workspace]\nmembers = [\"member\"]\n"
+      end)
+
+    adopted = install(original, integration: "gpui", targets: ["web"])
+
+    assert adopted.issues == []
+    assert content(adopted, "config/config.exs") =~ ~s(package: "rekindle_client")
   end
 
   test "rejects invalid existing configuration before staging changes" do
@@ -292,6 +366,24 @@ defmodule Rekindle.InstallTest do
       assert Enum.any?(rejected.issues, &String.contains?(&1, "not a valid static selection"))
       assert changed_contents(rejected) == changed_contents(invalid)
     end
+  end
+
+  test "rejects an existing public directory that leaves the project" do
+    installed = install(project(), integration: "egui", targets: ["web"])
+
+    invalid =
+      update_content(installed, "config/config.exs", fn config ->
+        String.replace(
+          config,
+          "integration: :egui",
+          ~s(integration: :egui, public_dir: "../outside")
+        )
+      end)
+
+    rejected = install(invalid)
+
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "not a valid static selection"))
+    assert changed_contents(rejected) == changed_contents(invalid)
   end
 
   test "adoption preserves custom Cargo target configuration and ignore policy" do

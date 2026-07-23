@@ -6,6 +6,7 @@ if Code.ensure_loaded?(Igniter) do
     alias Igniter.Project.{Application, TaskAliases}
     alias Igniter.Project.Config, as: ProjectConfig
     alias Rekindle.{Config, Integration}
+    alias Rekindle.Install.Cargo, as: InstallCargo
 
     @targets [:web, :desktop]
 
@@ -17,7 +18,7 @@ if Code.ensure_loaded?(Igniter) do
            {:ok, existing} <- existing_selection(igniter, app),
            {:ok, selection, mode} <-
              select(requested, existing, Igniter.exists?(igniter, "client/Cargo.toml")),
-           :ok <- validate_client(igniter, selection, mode) do
+           {:ok, selection} <- validate_client(igniter, selection, mode) do
         install(igniter, app, selection, mode)
       else
         {:error, message} -> Igniter.add_issue(igniter, message)
@@ -157,170 +158,19 @@ if Code.ensure_loaded?(Igniter) do
       |> Enum.uniq()
       |> Enum.find(&Igniter.exists?(igniter, Path.join("client", &1)))
       |> case do
-        nil -> :ok
+        nil -> {:ok, selection}
         path -> {:error, "client/#{path} already exists; Rekindle will not overwrite it"}
       end
     end
 
-    defp validate_client(_igniter, _selection, :existing), do: :ok
+    defp validate_client(_igniter, selection, :existing), do: {:ok, selection}
 
     defp validate_client(igniter, selection, :adopt) do
-      with {:ok, manifest} <- read_manifest(igniter),
-           :ok <- package(manifest),
-           :ok <- direct_dependencies(manifest, selection.integration, selection.targets),
-           :ok <- cargo_targets(manifest, selection.targets),
-           :ok <- target_entries(igniter, selection.targets) do
-        :ok
+      with :ok <- target_entries(igniter, selection.targets),
+           {:ok, target_options} <-
+             InstallCargo.validate(igniter, selection.integration, selection.targets) do
+        {:ok, Map.put(selection, :target_options, target_options)}
       end
-    end
-
-    defp read_manifest(igniter) do
-      igniter = Igniter.include_existing_file(igniter, "client/Cargo.toml", required?: true)
-      contents = igniter.rewrite.sources["client/Cargo.toml"] |> Rewrite.Source.get(:content)
-
-      case TomlElixir.decode(contents) do
-        {:ok, %{"package" => package} = manifest} when is_map(package) ->
-          {:ok, manifest}
-
-        {:ok, _manifest} ->
-          {:error, "client/Cargo.toml must describe a Cargo package"}
-
-        {:error, error} ->
-          {:error, "client/Cargo.toml is invalid: #{Exception.message(error)}"}
-      end
-    end
-
-    defp package(%{"package" => %{"name" => name}}) when is_binary(name) and name != "", do: :ok
-    defp package(_manifest), do: {:error, "client/Cargo.toml package requires a non-empty name"}
-
-    defp direct_dependencies(manifest, selected, targets) do
-      with :ok <- target_table(manifest) do
-        Enum.reduce_while(targets, :ok, fn target, :ok ->
-          case direct_dependency(manifest, selected, target) do
-            :ok -> {:cont, :ok}
-            {:error, message} -> {:halt, {:error, message}}
-          end
-        end)
-      end
-    end
-
-    defp direct_dependency(manifest, selected, target) do
-      integrations =
-        manifest
-        |> dependency_tables(target)
-        |> Enum.flat_map(fn dependencies ->
-          Enum.flat_map(dependencies, fn {name, requirement} ->
-            package =
-              if is_map(requirement), do: Map.get(requirement, "package", name), else: name
-
-            case package do
-              "gpui" -> [:gpui]
-              "eframe" -> [:egui]
-              "slint" -> [:slint]
-              _ -> []
-            end
-          end)
-        end)
-        |> Enum.uniq()
-
-      case integrations do
-        [^selected] ->
-          :ok
-
-        [] ->
-          {:error,
-           "client/Cargo.toml has no direct #{Integration.dependency(selected)} dependency for #{target}"}
-
-        [found] ->
-          {:error,
-           "client/Cargo.toml dependency #{found} does not match the selected #{selected} integration"}
-
-        found ->
-          {:error,
-           "client/Cargo.toml has ambiguous UI framework dependencies: #{Enum.join(found, ", ")}"}
-      end
-    end
-
-    defp target_table(%{"target" => target}) when not is_map(target),
-      do: {:error, "client/Cargo.toml target section must contain target tables"}
-
-    defp target_table(_manifest), do: :ok
-
-    defp dependency_tables(manifest, target) do
-      root =
-        case manifest["dependencies"] do
-          dependencies when is_map(dependencies) -> [dependencies]
-          _ -> []
-        end
-
-      target =
-        manifest
-        |> Map.get("target", %{})
-        |> Enum.flat_map(fn
-          {selector, %{"dependencies" => dependencies}}
-          when is_map(dependencies) and is_binary(selector) ->
-            if selector_applies?(selector, target), do: [dependencies], else: []
-
-          {_selector, %{"dependencies" => _dependencies}} ->
-            []
-
-          {_selector, _table} ->
-            []
-        end)
-
-      root ++ target
-    end
-
-    defp selector_applies?("wasm32-unknown-unknown", :web), do: true
-    defp selector_applies?("wasm32-unknown-unknown", :desktop), do: false
-
-    defp selector_applies?(selector, target) do
-      compact = String.replace(selector, ~r/\s+/, "")
-
-      wasm =
-        String.contains?(compact, ~s(target_arch="wasm32")) or
-          String.contains?(compact, ~s(target_family="wasm"))
-
-      negated = String.starts_with?(compact, "cfg(not(")
-
-      case {target, wasm, negated} do
-        {:web, true, false} -> true
-        {:desktop, true, true} -> true
-        _ -> false
-      end
-    end
-
-    defp cargo_targets(manifest, targets) do
-      package = Map.fetch!(manifest, "package")
-
-      case Map.get(package, "autobins", true) do
-        value when is_boolean(value) ->
-          Enum.reduce_while(targets, :ok, fn target, :ok ->
-            if value or explicit_bin?(manifest, target) do
-              {:cont, :ok}
-            else
-              {:halt,
-               {:error,
-                "client/Cargo.toml does not define the #{target} binary while package.autobins is false"}}
-            end
-          end)
-
-        _value ->
-          {:error, "client/Cargo.toml package.autobins must be a boolean"}
-      end
-    end
-
-    defp explicit_bin?(manifest, target) do
-      expected_name = Atom.to_string(target)
-      expected_path = "src/bin/#{target}.rs"
-
-      manifest
-      |> Map.get("bin", [])
-      |> List.wrap()
-      |> Enum.any?(fn
-        %{"name" => ^expected_name, "path" => ^expected_path} -> true
-        _bin -> false
-      end)
     end
 
     defp target_entries(igniter, targets) do
@@ -361,7 +211,12 @@ if Code.ensure_loaded?(Igniter) do
     defp configure(igniter, app, selection) do
       targets =
         Enum.map(selection.targets, fn target ->
-          {target, [features: [Atom.to_string(target)]]}
+          options =
+            selection
+            |> Map.get(:target_options, %{})
+            |> Map.get(target, features: [Atom.to_string(target)])
+
+          {target, options}
         end)
 
       ProjectConfig.configure_new(

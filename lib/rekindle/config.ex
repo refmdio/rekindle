@@ -65,9 +65,17 @@ defmodule Rekindle.Config do
   defp public_dir(config) do
     case Keyword.get(config, :public_dir, "priv/static") do
       value when is_binary(value) ->
-        if Path.type(value) == :relative,
-          do: {:ok, value},
-          else: error(:invalid_path, "path must be project-relative: #{inspect(value)}")
+        root = "/rekindle-project"
+        expanded = Path.expand(value, root)
+
+        if Path.type(value) == :relative and
+             (expanded == root or String.starts_with?(expanded, root <> "/")),
+           do: {:ok, value},
+           else:
+             error(
+               :invalid_path,
+               "path must be a project-contained relative path: #{inspect(value)}"
+             )
 
       value ->
         error(
