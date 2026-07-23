@@ -60,6 +60,17 @@ defmodule Rekindle.ArtifactStoreTest do
     assert pointer["generation_id"] == generation2.generation_id
   end
 
+  test "rejects a support level that disagrees with the sealed manifest" do
+    root = state_root()
+    {:ok, store} = start_store(root)
+    {staging, descriptor} = stage_web(store, "support-level")
+
+    assert descriptor.support_level == :experimental
+
+    assert {:error, %{code: :manifest_invalid}} =
+             ArtifactStore.seal(staging, %{descriptor | support_level: :qualified})
+  end
+
   test "activation errors preserve both prior pointers and a retry preserves the true fallback" do
     root = state_root()
     {:ok, store} = start_store(root)
@@ -1825,6 +1836,7 @@ defmodule Rekindle.ArtifactStoreTest do
       generation(staging, descriptor)
       |> pointer_record(descriptor.source_revision)
       |> Map.put("profile", descriptor.profile)
+      |> Map.put("support_level", Atom.to_string(descriptor.support_level))
       |> Map.put("published_at_unix_ms", System.system_time(:millisecond))
 
     {path, record}
@@ -1835,6 +1847,7 @@ defmodule Rekindle.ArtifactStoreTest do
       "artifact_id" => descriptor.artifact_id,
       "manifest_path" => descriptor.manifest_path,
       "manifest_digest" => descriptor.manifest_digest,
+      "support_level" => Atom.to_string(descriptor.support_level),
       "profile" => descriptor.profile,
       "source_revision" => descriptor.source_revision,
       "members" =>
@@ -2026,6 +2039,7 @@ defmodule Rekindle.ArtifactStoreTest do
       artifact_id: artifact_id,
       manifest_path: "rekindle-web-manifest-v2.json",
       manifest_digest: manifest_digest,
+      support_level: :experimental,
       profile: "dev",
       source_revision: source_revision,
       members:
@@ -2117,6 +2131,7 @@ defmodule Rekindle.ArtifactStoreTest do
       artifact_id: artifact_id,
       manifest_path: "rekindle-native-manifest-v2.json",
       manifest_digest: manifest_digest,
+      support_level: :qualified,
       profile: "release",
       source_revision: marker,
       members: [
@@ -2135,6 +2150,7 @@ defmodule Rekindle.ArtifactStoreTest do
   defp generation(staging, descriptor) do
     %GenerationRef{
       target: staging.target,
+      support_level: descriptor.support_level,
       generation_id: staging.generation_id,
       artifact_id: descriptor.artifact_id,
       profile: descriptor.profile,

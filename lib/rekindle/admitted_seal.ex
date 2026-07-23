@@ -181,6 +181,7 @@ defmodule Rekindle.AdmittedSeal do
   defp descriptor_identity?(descriptor, generation, manifest_path) do
     descriptor.artifact_id == generation.artifact_id and
       descriptor.manifest_digest == generation.manifest_digest and
+      descriptor.support_level == generation.support_level and
       descriptor.profile == generation.profile and descriptor.manifest_path == manifest_path
   end
 

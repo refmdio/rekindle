@@ -17,6 +17,7 @@ defmodule Rekindle.ArtifactStore.Descriptor do
     :artifact_id,
     :manifest_path,
     :manifest_digest,
+    :support_level,
     :profile,
     :source_revision,
     :members
@@ -27,6 +28,7 @@ defmodule Rekindle.ArtifactStore.Descriptor do
           artifact_id: String.t(),
           manifest_path: String.t(),
           manifest_digest: String.t(),
+          support_level: Rekindle.support_level(),
           profile: String.t(),
           source_revision: non_neg_integer(),
           members: [Rekindle.ArtifactStore.Member.t()]

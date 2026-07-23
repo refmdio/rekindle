@@ -113,6 +113,15 @@ defmodule Rekindle.BuildFacadeTest do
                load_project: loader([:web])
              )
 
+    valid = build_result(:web, :dev)
+    Application.put_env(@otp_app, :build_result, {:ok, %{valid | support_level: :experimental}})
+
+    assert {:error, %{code: :contract_violation, stage: :internal}} =
+             BuildFacade.build(@otp_app, :web, :dev,
+               handlers: %{web: Handler},
+               load_project: loader([:web])
+             )
+
     for operation <- [:build, :current] do
       result =
         case operation do
@@ -206,6 +215,7 @@ defmodule Rekindle.BuildFacadeTest do
     {:ok, result} =
       BuildResult.new(
         target: target,
+        support_level: :qualified,
         mode: mode,
         source_revision: 1,
         build_key: @digest,
@@ -221,6 +231,7 @@ defmodule Rekindle.BuildFacadeTest do
     {:ok, generation} =
       GenerationRef.new(
         target: target,
+        support_level: :qualified,
         generation_id: @generation,
         artifact_id: @digest,
         profile: "dev",

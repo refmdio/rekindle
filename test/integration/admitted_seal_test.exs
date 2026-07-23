@@ -529,6 +529,7 @@ defmodule Rekindle.AdmittedSealTest do
       artifact_id: artifact_id,
       manifest_path: manifest_path,
       manifest_digest: manifest_digest,
+      support_level: support_level(producer),
       profile: profile,
       source_revision: source_revision,
       members: Enum.map(members, & &1.descriptor)
@@ -565,6 +566,7 @@ defmodule Rekindle.AdmittedSealTest do
       artifact_id: artifact_id,
       manifest_path: manifest_path,
       manifest_digest: manifest_digest,
+      support_level: support_level(producer),
       profile: profile,
       source_revision: source_revision,
       members: Enum.map(members, & &1.descriptor)
@@ -741,6 +743,11 @@ defmodule Rekindle.AdmittedSealTest do
       "backend_version" => "1.0.0",
       "options_digest" => String.duplicate("d", 64)
     }
+  end
+
+  defp support_level(producer) do
+    {:ok, support_level} = Rekindle.SupportLevel.from_producer(producer)
+    support_level
   end
 
   defp expected_producer(:web, :canonical), do: :canonical_web

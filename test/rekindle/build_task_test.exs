@@ -104,6 +104,7 @@ defmodule Rekindle.BuildTaskTest do
     {:ok, generation} =
       GenerationRef.new(
         target: target,
+        support_level: :qualified,
         generation_id: @generation,
         artifact_id: @digest,
         profile: Atom.to_string(mode),
@@ -113,6 +114,7 @@ defmodule Rekindle.BuildTaskTest do
     {:ok, result} =
       BuildResult.new(
         target: target,
+        support_level: :qualified,
         mode: mode,
         source_revision: 1,
         build_key: @digest,

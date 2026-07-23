@@ -11,6 +11,7 @@ defmodule Rekindle.EventTest do
     assert {:ok, generation} =
              GenerationRef.new(
                target: :web,
+               support_level: :qualified,
                generation_id: @generation,
                artifact_id: @digest,
                profile: "dev",
@@ -29,6 +30,7 @@ defmodule Rekindle.EventTest do
     assert {:ok, result} =
              BuildResult.new(
                target: :web,
+               support_level: :qualified,
                mode: :dev,
                source_revision: 4,
                build_key: @digest,
@@ -40,6 +42,7 @@ defmodule Rekindle.EventTest do
     assert BuildResult.to_map(result) == %{
              "contract_version" => 1,
              "target" => "web",
+             "support_level" => "qualified",
              "mode" => "dev",
              "source_revision" => 4,
              "build_key" => @digest,
@@ -51,12 +54,35 @@ defmodule Rekindle.EventTest do
     assert {:error, %{code: :contract_violation}} =
              BuildResult.new(
                target: :desktop,
+               support_level: :qualified,
                mode: :dev,
                source_revision: 4,
                build_key: @digest,
                generation: generation,
                duration_ms: 25,
                diagnostics: []
+             )
+
+    assert {:error, %{code: :contract_violation}} =
+             BuildResult.new(
+               target: :web,
+               support_level: :experimental,
+               mode: :dev,
+               source_revision: 4,
+               build_key: @digest,
+               generation: generation,
+               duration_ms: 25,
+               diagnostics: []
+             )
+
+    assert {:error, %{code: :contract_violation}} =
+             GenerationRef.new(
+               target: :web,
+               support_level: :unknown,
+               generation_id: @generation,
+               artifact_id: @digest,
+               profile: "dev",
+               manifest_digest: @digest
              )
   end
 
@@ -466,6 +492,7 @@ defmodule Rekindle.EventTest do
     {:ok, generation} =
       GenerationRef.new(
         target: :web,
+        support_level: :qualified,
         generation_id: @generation,
         artifact_id: @digest,
         profile: "dev",
@@ -475,6 +502,7 @@ defmodule Rekindle.EventTest do
     {:ok, result} =
       BuildResult.new(
         target: :web,
+        support_level: :qualified,
         mode: :dev,
         source_revision: 4,
         build_key: @digest,
@@ -500,6 +528,7 @@ defmodule Rekindle.EventTest do
     {:ok, generation} =
       GenerationRef.new(
         target: :web,
+        support_level: :qualified,
         generation_id: @generation,
         artifact_id: @digest,
         profile: "dev",
@@ -509,6 +538,7 @@ defmodule Rekindle.EventTest do
     assert {:error, %{code: :contract_violation}} =
              BuildResult.new(
                target: :web,
+               support_level: :qualified,
                mode: :dev,
                source_revision: 4,
                build_key: @digest,

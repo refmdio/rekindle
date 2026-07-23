@@ -607,6 +607,7 @@ defmodule Rekindle.ArtifactStore do
 
     with true <- digest?(descriptor.artifact_id),
          true <- digest?(descriptor.manifest_digest),
+         true <- Rekindle.SupportLevel.valid?(descriptor.support_level),
          true <- safe_profile?(descriptor.profile),
          true <- uint?(descriptor.source_revision),
          true <- safe_path?(descriptor.manifest_path),
@@ -734,6 +735,8 @@ defmodule Rekindle.ArtifactStore do
          true <- value["contract_version"] == 2,
          true <- value["target"] == Atom.to_string(target),
          :ok <- validate_manifest_schema(target, value),
+         {:ok, support_level} <- Rekindle.SupportLevel.from_producer(value["producer"]),
+         true <- support_level == descriptor.support_level,
          {:ok, artifact_id} <- Identity.derive(target, value),
          true <- artifact_id == value["artifact_id"],
          true <- value["artifact_id"] == descriptor.artifact_id,
@@ -882,6 +885,7 @@ defmodule Rekindle.ArtifactStore do
   defp write_reference(state, staging, descriptor, options) do
     generation = %GenerationRef{
       target: staging.target,
+      support_level: descriptor.support_level,
       generation_id: staging.generation_id,
       artifact_id: descriptor.artifact_id,
       profile: descriptor.profile,
@@ -918,6 +922,7 @@ defmodule Rekindle.ArtifactStore do
          true <- reference_matches?(record, generation),
          {:ok, descriptor} <- load_descriptor(state, generation.target, generation.artifact_id),
          true <- descriptor.manifest_digest == generation.manifest_digest,
+         true <- descriptor.support_level == generation.support_level,
          true <- descriptor.profile == generation.profile,
          :ok <-
            validate_tree(
@@ -2636,6 +2641,7 @@ defmodule Rekindle.ArtifactStore do
   defp recover_reference(root, target, generation_id, descriptor) do
     generation = %GenerationRef{
       target: target,
+      support_level: descriptor.support_level,
       generation_id: generation_id,
       artifact_id: descriptor.artifact_id,
       profile: descriptor.profile,
@@ -2936,6 +2942,7 @@ defmodule Rekindle.ArtifactStore do
       "artifact_id" => descriptor.artifact_id,
       "manifest_path" => descriptor.manifest_path,
       "manifest_digest" => descriptor.manifest_digest,
+      "support_level" => Atom.to_string(descriptor.support_level),
       "profile" => descriptor.profile,
       "source_revision" => descriptor.source_revision,
       "members" =>
@@ -2953,14 +2960,16 @@ defmodule Rekindle.ArtifactStore do
   defp descriptor_from_record(value) when is_map(value) do
     with true <-
            Map.keys(value) |> Enum.sort() ==
-             ~w[artifact_id manifest_digest manifest_path members profile source_revision]
+             ~w[artifact_id manifest_digest manifest_path members profile source_revision support_level]
              |> Enum.sort(),
          members when is_list(members) <- value["members"],
+         {:ok, support_level} <- Rekindle.SupportLevel.from_string(value["support_level"]),
          {:ok, members} <- members_from_records(members) do
       descriptor = %Descriptor{
         artifact_id: value["artifact_id"],
         manifest_path: value["manifest_path"],
         manifest_digest: value["manifest_digest"],
+        support_level: support_level,
         profile: value["profile"],
         source_revision: value["source_revision"],
         members: members
@@ -3017,6 +3026,7 @@ defmodule Rekindle.ArtifactStore do
       "generation_id" => generation.generation_id,
       "artifact_id" => generation.artifact_id,
       "manifest_digest" => generation.manifest_digest,
+      "support_level" => Atom.to_string(generation.support_level),
       "profile" => generation.profile,
       "source_revision" => source_revision,
       "published_at_unix_ms" => System.system_time(:millisecond)
@@ -3026,15 +3036,17 @@ defmodule Rekindle.ArtifactStore do
   defp generation_from_reference(record) when is_map(record) do
     with true <-
            Map.keys(record) |> Enum.sort() ==
-             ~w[artifact_id generation_id manifest_digest profile published_at_unix_ms source_revision target v]
+             ~w[artifact_id generation_id manifest_digest profile published_at_unix_ms source_revision support_level target v]
              |> Enum.sort(),
          true <- record["v"] == 1,
          {:ok, target} <- target(record["target"]),
+         {:ok, support_level} <- Rekindle.SupportLevel.from_string(record["support_level"]),
          true <- uint?(record["source_revision"]),
          true <- uint?(record["published_at_unix_ms"]),
          {:ok, generation} <-
            GenerationRef.new(
              target: target,
+             support_level: support_level,
              generation_id: record["generation_id"],
              artifact_id: record["artifact_id"],
              profile: record["profile"],

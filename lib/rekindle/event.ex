@@ -1,7 +1,7 @@
 defmodule Rekindle.Event do
   @moduledoc "A closed, ordered project runtime event."
 
-  alias Rekindle.{BuildGraph, Failure}
+  alias Rekindle.{BuildGraph, Failure, SupportLevel}
 
   @fields [
     :project_session,
@@ -332,7 +332,7 @@ defmodule Rekindle.Event do
         String.normalize(value, :nfc) == value and
         not Regex.match?(~r/[\x00-\x1F\x7F]/, value)
 
-  defp support_level?(value), do: value in [:qualified, :experimental, :not_applicable]
+  defp support_level?(value), do: SupportLevel.valid?(value)
 
   defp target_map?(value, selected_targets, validator, options \\ []) do
     selected? = Keyword.get(options, :selected?, true)

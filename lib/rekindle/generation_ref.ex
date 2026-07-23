@@ -1,13 +1,14 @@
 defmodule Rekindle.GenerationRef do
   @moduledoc "A read-only reference to one sealed generation."
 
-  @fields [:target, :generation_id, :artifact_id, :profile, :manifest_digest]
+  @fields [:target, :support_level, :generation_id, :artifact_id, :profile, :manifest_digest]
   @enforce_keys @fields
   defstruct [contract_version: 1] ++ @fields
 
   @type t :: %__MODULE__{
           contract_version: 1,
           target: Rekindle.target(),
+          support_level: Rekindle.support_level(),
           generation_id: String.t(),
           artifact_id: String.t(),
           profile: String.t(),
@@ -21,7 +22,8 @@ defmodule Rekindle.GenerationRef do
     attributes = Map.delete(attributes, :contract_version)
 
     if version == 1 and Map.keys(attributes) |> Enum.sort() == Enum.sort(@fields) and
-         attributes.target in [:web, :desktop] and id?(attributes.generation_id) and
+         attributes.target in [:web, :desktop] and
+         Rekindle.SupportLevel.valid?(attributes.support_level) and id?(attributes.generation_id) and
          digest?(attributes.artifact_id) and safe_profile?(attributes.profile) and
          digest?(attributes.manifest_digest) do
       {:ok, struct!(__MODULE__, attributes)}
@@ -37,6 +39,7 @@ defmodule Rekindle.GenerationRef do
     %{
       "contract_version" => 1,
       "target" => Atom.to_string(value.target),
+      "support_level" => Atom.to_string(value.support_level),
       "generation_id" => value.generation_id,
       "artifact_id" => value.artifact_id,
       "profile" => value.profile,

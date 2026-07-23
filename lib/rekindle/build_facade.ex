@@ -107,8 +107,17 @@ defmodule Rekindle.BuildFacade do
 
   defp validate_build_result({:ok, %BuildResult{} = result}, target, mode) do
     case BuildResult.new(Map.from_struct(result)) do
-      {:ok, %BuildResult{target: ^target, mode: ^mode} = result} -> {:ok, result}
-      _ -> {:error, contract_failure("Target handler returned an invalid build result")}
+      {:ok,
+       %BuildResult{
+         target: ^target,
+         mode: ^mode,
+         support_level: support_level,
+         generation: %GenerationRef{support_level: support_level}
+       } = result} ->
+        {:ok, result}
+
+      _ ->
+        {:error, contract_failure("Target handler returned an invalid build result")}
     end
   end
 

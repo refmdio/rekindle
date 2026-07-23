@@ -10,6 +10,7 @@ defmodule Rekindle do
   @type target :: :web | :desktop
 
   @type build_mode :: :dev | :release
+  @type support_level :: Rekindle.SupportLevel.t()
   @type otp_app :: atom()
 
   @spec child_spec(otp_app: otp_app(), name: GenServer.name()) :: Supervisor.child_spec()

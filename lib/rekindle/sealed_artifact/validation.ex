@@ -19,6 +19,8 @@ defmodule Rekindle.SealedArtifact.Validation do
          true <- manifest["artifact_id"] == generation.artifact_id,
          true <- manifest["manifest_digest"] == generation.manifest_digest,
          true <- manifest["build"]["profile"] == generation.profile,
+         {:ok, support_level} <- Rekindle.SupportLevel.from_producer(manifest["producer"]),
+         true <- support_level == generation.support_level,
          {:ok, producer} <- Producer.new(manifest["producer"], target),
          true <- manifest_digest(target, manifest) == generation.manifest_digest do
       {:ok, producer}

@@ -3,13 +3,23 @@ defmodule Rekindle.BuildResult do
 
   alias Rekindle.{Diagnostic, Failure, GenerationRef}
 
-  @fields [:target, :mode, :source_revision, :build_key, :generation, :duration_ms, :diagnostics]
+  @fields [
+    :target,
+    :support_level,
+    :mode,
+    :source_revision,
+    :build_key,
+    :generation,
+    :duration_ms,
+    :diagnostics
+  ]
   @enforce_keys @fields
   defstruct [contract_version: 1] ++ @fields
 
   @type t :: %__MODULE__{
           contract_version: 1,
           target: Rekindle.target(),
+          support_level: Rekindle.support_level(),
           mode: Rekindle.build_mode(),
           source_revision: non_neg_integer(),
           build_key: String.t(),
@@ -27,12 +37,14 @@ defmodule Rekindle.BuildResult do
     with true <- version == 1,
          true <- Map.keys(attributes) |> Enum.sort() == Enum.sort(@fields),
          true <- attributes.target in [:web, :desktop],
+         true <- Rekindle.SupportLevel.valid?(attributes.support_level),
          true <- attributes.mode in [:dev, :release],
          true <- uint?(attributes.source_revision),
          true <- digest?(attributes.build_key),
          {:ok, %GenerationRef{target: target} = generation} <-
            GenerationRef.new(Map.from_struct(attributes.generation)),
          true <- target == attributes.target,
+         true <- generation.support_level == attributes.support_level,
          true <- uint?(attributes.duration_ms),
          {:ok, diagnostics} <- diagnostics(attributes.diagnostics) do
       {:ok, struct!(__MODULE__, %{attributes | generation: generation, diagnostics: diagnostics})}
@@ -48,6 +60,7 @@ defmodule Rekindle.BuildResult do
     %{
       "contract_version" => 1,
       "target" => Atom.to_string(value.target),
+      "support_level" => Atom.to_string(value.support_level),
       "mode" => Atom.to_string(value.mode),
       "source_revision" => value.source_revision,
       "build_key" => value.build_key,
