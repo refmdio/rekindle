@@ -32,6 +32,34 @@ defmodule Rekindle.CargoTest do
     assert metadata.target_directory == Path.join(project.client_root, "target")
   end
 
+  test "returns a typed error for malformed Cargo metadata", %{project: project} do
+    valid = metadata_value(project)
+
+    malformed = [
+      Map.delete(valid, "packages"),
+      %{valid | "packages" => %{}},
+      %{valid | "packages" => [%{}]},
+      put_in(valid, ["packages", Access.at(0), "id"], nil),
+      put_in(valid, ["packages", Access.at(0), "name"], 1),
+      put_in(valid, ["packages", Access.at(0), "manifest_path"], ""),
+      put_in(valid, ["packages", Access.at(0), "dependencies"], nil),
+      put_in(valid, ["packages", Access.at(0), "dependencies"], [%{"name" => 1}]),
+      put_in(valid, ["packages", Access.at(0), "targets"], "desktop"),
+      put_in(valid, ["packages", Access.at(0), "targets", Access.at(0), "name"], nil),
+      put_in(valid, ["packages", Access.at(0), "targets", Access.at(0), "kind"], "bin"),
+      put_in(valid, ["packages", Access.at(0), "targets", Access.at(0), "src_path"], nil),
+      %{valid | "workspace_members" => [1]},
+      %{valid | "target_directory" => nil}
+    ]
+
+    Enum.each(malformed, fn value ->
+      cargo = metadata_cargo(project, value)
+
+      assert {:error, %Cargo.Error{kind: :invalid_metadata}} =
+               Cargo.Metadata.load(project, cargo: cargo)
+    end)
+  end
+
   test "discovers the native executable from Cargo messages", %{project: project} do
     target = target(:desktop)
 
@@ -258,6 +286,40 @@ defmodule Rekindle.CargoTest do
 
     File.chmod!(path, 0o755)
     {path, arguments_file, started_file, metadata_cwd_file, build_cwd_file}
+  end
+
+  defp metadata_cargo(project, value) do
+    path =
+      Path.join(
+        project.root,
+        "metadata-cargo-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.write!(
+      path,
+      "#!/bin/sh\nprintf '%s\\n' '#{Jason.encode!(value)}'\n"
+    )
+
+    File.chmod!(path, 0o755)
+    path
+  end
+
+  defp metadata_value(project) do
+    package = cargo_package(project, "fixture_ui", "fixture_ui 0.1.0")
+
+    %{
+      "packages" => [
+        %{
+          "id" => package.id,
+          "name" => package.name,
+          "manifest_path" => package.manifest_path,
+          "targets" => package.targets,
+          "dependencies" => [%{"name" => "gpui"}]
+        }
+      ],
+      "workspace_members" => [package.id],
+      "target_directory" => Path.join(project.client_root, "target")
+    }
   end
 
   defp cargo_package(project, name, id) do

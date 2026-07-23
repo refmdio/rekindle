@@ -66,32 +66,90 @@ defmodule Rekindle.Cargo.Metadata do
       end)
 
     with %{} <- value,
-         %{
-           "packages" => packages,
-           "workspace_members" => workspace_members,
-           "target_directory" => target_directory
-         } <- value do
+         {:ok, packages} <- packages(value["packages"]),
+         workspace_members when is_list(workspace_members) <- value["workspace_members"],
+         true <- Enum.all?(workspace_members, &non_empty_string?/1),
+         target_directory when is_binary(target_directory) and target_directory != "" <-
+           value["target_directory"] do
       {:ok,
        %__MODULE__{
-         packages: Enum.map(packages, &package/1),
+         packages: packages,
          workspace_members: MapSet.new(workspace_members),
          target_directory: target_directory
        }}
     else
-      _ ->
-        {:error,
-         Error.new(:invalid_metadata, "cargo metadata returned invalid JSON", output: output)}
+      _ -> invalid_metadata(output)
     end
   end
 
+  defp packages(values) when is_list(values) do
+    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, packages} ->
+      case package(value) do
+        {:ok, package} -> {:cont, {:ok, [package | packages]}}
+        :error -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, packages} -> {:ok, Enum.reverse(packages)}
+      :error -> :error
+    end
+  end
+
+  defp packages(_values), do: :error
+
   defp package(value) do
-    %{
-      id: value["id"],
-      name: value["name"],
-      manifest_path: value["manifest_path"],
-      targets: value["targets"],
-      dependencies: Enum.map(value["dependencies"], & &1["name"])
-    }
+    with %{} <- value,
+         id when is_binary(id) and id != "" <- value["id"],
+         name when is_binary(name) and name != "" <- value["name"],
+         manifest_path when is_binary(manifest_path) and manifest_path != "" <-
+           value["manifest_path"],
+         {:ok, targets} <- targets(value["targets"]),
+         {:ok, dependencies} <- dependencies(value["dependencies"]) do
+      {:ok,
+       %{
+         id: id,
+         name: name,
+         manifest_path: manifest_path,
+         targets: targets,
+         dependencies: dependencies
+       }}
+    else
+      _ -> :error
+    end
+  end
+
+  defp targets(values) when is_list(values) do
+    if Enum.all?(values, &target?/1), do: {:ok, values}, else: :error
+  end
+
+  defp targets(_values), do: :error
+
+  defp target?(value) when is_map(value) do
+    non_empty_string?(value["name"]) and
+      non_empty_string?(value["src_path"]) and
+      is_list(value["kind"]) and
+      Enum.all?(value["kind"], &is_binary/1)
+  end
+
+  defp target?(_value), do: false
+
+  defp dependencies(values) when is_list(values) do
+    if Enum.all?(values, &dependency?/1) do
+      {:ok, Enum.map(values, & &1["name"])}
+    else
+      :error
+    end
+  end
+
+  defp dependencies(_values), do: :error
+
+  defp dependency?(value) when is_map(value), do: non_empty_string?(value["name"])
+  defp dependency?(_value), do: false
+
+  defp non_empty_string?(value), do: is_binary(value) and value != ""
+
+  defp invalid_metadata(output) do
+    {:error, Error.new(:invalid_metadata, "cargo metadata returned invalid JSON", output: output)}
   end
 
   defp process_options(project, options) do

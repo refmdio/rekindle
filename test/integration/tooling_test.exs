@@ -232,6 +232,35 @@ defmodule Rekindle.ToolingIntegrationTest do
     assert snapshot(context.root) == before
   end
 
+  test "Doctor reports malformed Cargo metadata without raising or mutating", context do
+    cargo = Path.join(context.root, "malformed-metadata-cargo")
+
+    write_executable(
+      cargo,
+      """
+      #!/bin/sh
+      if [ "$1" = "--version" ]; then
+        echo "cargo 1.88.0"
+        exit 0
+      fi
+      if [ "$1" = "metadata" ]; then
+        echo '{"packages":[{}],"workspace_members":[],"target_directory":"target"}'
+        exit 0
+      fi
+      exit 2
+      """
+    )
+
+    before = snapshot(context.root)
+
+    assert {:error, checks} =
+             Doctor.run(:rekindle_tooling_test, Keyword.put(context.options, :cargo, cargo))
+
+    assert error?(checks, :cargo_metadata)
+    assert check!(checks, :cargo_metadata).message =~ "invalid JSON"
+    assert snapshot(context.root) == before
+  end
+
   test "Doctor reports malformed configuration and missing prerequisites", context do
     Application.put_env(:rekindle_tooling_test, Rekindle,
       integration: :unknown,
