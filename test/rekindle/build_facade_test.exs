@@ -171,6 +171,13 @@ defmodule Rekindle.BuildFacadeTest do
     for {otp_app, target} <- [{nil, :web}, {@otp_app, :other}, {"app", :desktop}] do
       assert_raise ArgumentError, fn -> Rekindle.current(otp_app, target) end
     end
+
+    valid_app = :rekindle_unconfigured_public_api_test
+
+    assert {:error, %Failure{stage: :configuration}} =
+             Rekindle.build(valid_app, :web, mode: :dev)
+
+    assert :none = Rekindle.current(valid_app, :web)
   end
 
   defp loader(targets) do
