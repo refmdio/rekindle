@@ -729,6 +729,52 @@ defmodule Rekindle.ToolchainHelperIntegrationTest do
     refute_receive {^port, {:data, _bytes}}, 50
   end
 
+  test "partial frame prefixes fail at hello, operation, and cancellation boundaries", %{
+    helper: helper
+  } do
+    root = temp_root("partial-prefix")
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    host = Installer.host() |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+    {:ok, web_hello} = Frame.encode(Handshake.hello("web-v1", Helper.compatibility(), host))
+    {:ok, exec_hello} = Frame.encode(Handshake.hello("exec-v1", Helper.compatibility(), host))
+
+    assert {:ok, spawn, _state} =
+             Exec.spawn_request(
+               request_id: @request,
+               executable: System.find_executable("sleep") |> Path.expand(),
+               argv: ["30"],
+               cwd: System.tmp_dir!(),
+               terminate_grace_ms: 0,
+               kill_grace_ms: 500
+             )
+
+    {:ok, spawn_frame} = Frame.encode(spawn)
+
+    boundaries = [
+      {:hello, "exec-v1", <<>>},
+      {:operation, "web-v1", web_hello},
+      {:cancellation, "exec-v1", exec_hello <> spawn_frame}
+    ]
+
+    for {boundary, mode, admitted} <- boundaries, prefix_size <- 1..3 do
+      path = Path.join(root, "#{boundary}-#{prefix_size}.input")
+      prefix = binary_part(<<0, 0, 0, 1>>, 0, prefix_size)
+      File.write!(path, admitted <> prefix)
+
+      assert {output, 2} =
+               System.cmd(
+                 "sh",
+                 ["-c", ~S[exec "$1" "$2" < "$3"], "sh", helper, mode, path],
+                 stderr_to_stdout: true
+               )
+
+      assert output =~ "frame length read failed: truncated prefix",
+             "#{boundary} prefix size #{prefix_size}"
+    end
+  end
+
   test "web-v1 applies every debug and source-map policy combination", %{helper: helper} do
     root = temp_root("web-source-maps")
     input = Path.join(root, "input")

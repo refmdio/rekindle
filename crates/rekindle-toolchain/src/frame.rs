@@ -13,10 +13,16 @@ pub struct Frame {
 
 pub fn read<R: Read>(reader: &mut R) -> Result<Option<Frame>, String> {
     let mut length = [0_u8; 4];
-    match reader.read_exact(&mut length) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(error) => return Err(format!("frame length read failed: {error}")),
+    let mut length_read = 0;
+
+    while length_read < length.len() {
+        match reader.read(&mut length[length_read..]) {
+            Ok(0) if length_read == 0 => return Ok(None),
+            Ok(0) => return Err("frame length read failed: truncated prefix".into()),
+            Ok(count) => length_read += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(format!("frame length read failed: {error}")),
+        }
     }
 
     let header_len = u32::from_be_bytes(length) as usize;
@@ -94,4 +100,23 @@ pub fn is_request_id(value: Option<&Value>) -> bool {
                 .bytes()
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read;
+    use std::io::Cursor;
+
+    #[test]
+    fn distinguishes_clean_eof_from_every_truncated_length_prefix() {
+        assert!(read(&mut Cursor::new([])).unwrap().is_none());
+
+        for length in 1..=3 {
+            let prefix = [0_u8, 0, 0, 1];
+            let Err(error) = read(&mut Cursor::new(&prefix[..length])) else {
+                panic!("partial frame prefix was accepted");
+            };
+            assert_eq!(error, "frame length read failed: truncated prefix");
+        }
+    }
 }
