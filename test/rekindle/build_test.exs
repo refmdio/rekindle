@@ -83,16 +83,19 @@ defmodule Rekindle.BuildTest do
 
   test "Mix build renders bounded Rust diagnostics", %{root: root} do
     File.cp_r!("test/fixtures/cargo_project", Path.join(root, "client"))
-    oversized = String.duplicate("界", 30_000)
-
-    File.write!(
-      Path.join(root, "client/src/bin/desktop.rs"),
-      "compile_error!(#{inspect(oversized)});"
-    )
+    marker = "\n[diagnostics truncated]"
+    prefix_size = 64_000 - byte_size(marker)
+    alignment = rem(prefix_size - 1, 4)
+    assert rem(prefix_size - alignment, 4) == 1
+    oversized = String.duplicate("a", alignment) <> String.duplicate("💥", 30_000)
+    fake_bin = fake_diagnostic_cargo(root, oversized)
+    previous_path = System.fetch_env!("PATH")
 
     previous = Application.get_env(:rekindle, Rekindle)
 
     on_exit(fn ->
+      System.put_env("PATH", previous_path)
+
       if previous do
         Application.put_env(:rekindle, Rekindle, previous)
       else
@@ -105,20 +108,78 @@ defmodule Rekindle.BuildTest do
       targets: [desktop: []]
     )
 
+    System.put_env("PATH", fake_bin <> ":" <> previous_path)
+
     output =
       File.cd!(root, fn ->
         Mix.Task.reenable("rekindle.build")
 
         capture_io(:stderr, fn ->
-          assert_raise Mix.Error, "cargo build failed with status 101", fn ->
+          assert_raise Mix.Error, "cargo build failed with status 1", fn ->
             Mix.Tasks.Rekindle.Build.run(["desktop"])
           end
         end)
       end)
 
-    assert output =~ "界"
+    assert output =~ "💥"
     assert output =~ "[diagnostics truncated]"
     assert String.valid?(output)
-    assert byte_size(output) <= 64_001
+    assert byte_size(output) == 64_000
+  end
+
+  defp fake_diagnostic_cargo(root, rendered) do
+    bin = Path.join(root, "fake-bin")
+    path = Path.join(bin, "cargo")
+    package_id = "fixture_ui 0.1.0"
+
+    metadata =
+      Jason.encode!(%{
+        "packages" => [
+          %{
+            "id" => package_id,
+            "name" => "fixture_ui",
+            "manifest_path" => Path.join(root, "client/Cargo.toml"),
+            "targets" => [
+              %{
+                "name" => "desktop",
+                "kind" => ["bin"],
+                "src_path" => Path.join(root, "client/src/bin/desktop.rs")
+              }
+            ],
+            "dependencies" => [%{"name" => "gpui"}]
+          }
+        ],
+        "workspace_members" => [package_id],
+        "target_directory" => Path.join(root, "client/target")
+      })
+
+    diagnostic =
+      Jason.encode!(%{
+        "reason" => "compiler-message",
+        "message" => %{
+          "level" => "error",
+          "message" => "oversized diagnostic",
+          "rendered" => rendered,
+          "spans" => []
+        }
+      })
+
+    File.mkdir_p!(bin)
+
+    File.write!(
+      path,
+      """
+      #!/bin/sh
+      if [ "$1" = "metadata" ]; then
+        printf '%s\\n' '#{metadata}'
+        exit 0
+      fi
+      printf '%s\\n' '#{diagnostic}'
+      exit 1
+      """
+    )
+
+    File.chmod!(path, 0o755)
+    bin
   end
 end
