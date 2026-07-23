@@ -106,6 +106,7 @@ defmodule Rekindle.DevelopmentTest do
     assert_receive {Builder, :web, {:ok, %Result{metadata: %{generation: "2"}}}}
   end
 
+  @tag capture_log: true
   test "retains the last successful result when a later build fails", %{root: root} do
     counter = start_supervised!({Agent, fn -> 0 end})
 
@@ -150,6 +151,30 @@ defmodule Rekindle.DevelopmentTest do
     refute Process.alive?(builder)
   end
 
+  @tag capture_log: true
+  test "reports a Web build failure and clears it after recovery", %{root: root} do
+    publish_web(root, "export default 'previous';")
+    counter = start_supervised!({Agent, fn -> 0 end})
+
+    build = fn target, _options ->
+      case Agent.get_and_update(counter, &{&1, &1 + 1}) do
+        0 -> {:error, :compile_failed}
+        1 -> {:ok, result(root, target, "recovered")}
+      end
+    end
+
+    builder = start_builder(root, build)
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+
+    Builder.rebuild(builder, :web)
+    assert_receive {Builder, :web, {:error, :compile_failed}}
+    assert request("/__rekindle/current", options).status == 409
+
+    Builder.rebuild(builder, :web)
+    assert_receive {Builder, :web, {:ok, %Result{}}}
+    assert request("/__rekindle/current", options).status == 200
+  end
+
   test "serves the current generation and checks GPUI capability before import", %{root: root} do
     generation = publish_web(root, "export default 'ready';")
     options = Development.init(otp_app: :rekindle_development_test, project_root: root)
@@ -175,6 +200,17 @@ defmodule Rekindle.DevelopmentTest do
     assert runtime.resp_body =~ "const module = await import(current.entry);"
     assert runtime.resp_body =~ "await module.default();"
     refute runtime.resp_body =~ ~s|getContext("webgl2")|
+
+    {:ok, project} =
+      Rekindle.Config.load(:rekindle_development_test, project_root: root)
+
+    assert :ok = Development.put_error(project, "Rust compilation failed")
+    failure = request("/__rekindle/current", options)
+    assert failure.status == 409
+    assert Jason.decode!(failure.resp_body) == %{"error" => "Rust compilation failed"}
+
+    assert :ok = Development.clear_error(project)
+    assert request("/__rekindle/current", options).status == 200
   end
 
   test "uses WebGL2 diagnostics for egui without requiring WebGPU", %{root: root} do
@@ -191,6 +227,103 @@ defmodule Rekindle.DevelopmentTest do
     assert page.resp_body =~ ~s(<canvas id="rekindle-canvas"></canvas>)
     assert runtime.resp_body =~ ~s|getContext("webgl2")|
     refute runtime.resp_body =~ "navigator.gpu"
+  end
+
+  @tag timeout: 60_000
+  test "initializes Web output and reloads a changed generation in Chromium", %{root: root} do
+    browser = System.find_executable("chromium") || flunk("Chromium is required")
+    host_root = Path.join(root, "browser-runtime")
+    profile = Path.join(root, "chromium-profile")
+    first = String.duplicate("a", 64)
+    second = String.duplicate("b", 64)
+    File.mkdir_p!(Path.join(host_root, "__rekindle/web/#{first}"))
+    File.mkdir_p!(Path.join(host_root, "__rekindle/web/#{second}"))
+
+    Application.put_env(:rekindle_development_test, Rekindle,
+      integration: :egui,
+      targets: [web: []]
+    )
+
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+    page = request("/__rekindle", options).resp_body
+    runtime = request("/__rekindle/runtime.js", options).resp_body
+
+    selector_override =
+      """
+      <script>
+        HTMLCanvasElement.prototype.getContext = () => ({});
+        const fetchFromServer = window.fetch.bind(window);
+        window.fetch = (input, options) => {
+          const url = new URL(input, window.location.href);
+          if (url.pathname === "/__rekindle/current") {
+            const polls = Number(sessionStorage.getItem("rekindle-polls") || "0") + 1;
+            sessionStorage.setItem("rekindle-polls", String(polls));
+            const generation = polls === 1 ? "#{first}" : "#{second}";
+            return Promise.resolve(new Response(JSON.stringify({
+              generation,
+              entry: `/__rekindle/web/${generation}/app.js`
+            }), {status: 200, headers: {"content-type": "application/json"}}));
+          }
+          return fetchFromServer(input, options);
+        };
+      </script>
+      """
+
+    page =
+      String.replace(
+        page,
+        ~s(<script type="module" src="/__rekindle/runtime.js"></script>),
+        selector_override <> ~s(<script type="module" src="/__rekindle/runtime.js"></script>)
+      )
+
+    File.write!(Path.join(host_root, "index.html"), page)
+    File.mkdir_p!(Path.join(host_root, "__rekindle"))
+    File.write!(Path.join(host_root, "__rekindle/runtime.js"), runtime)
+    File.write!(Path.join(host_root, "__rekindle/web/#{first}/app.js"), browser_module(first))
+    File.write!(Path.join(host_root, "__rekindle/web/#{second}/app.js"), browser_module(second))
+
+    {:ok, server} =
+      :inets.start(:httpd,
+        bind_address: ~c"127.0.0.1",
+        port: 0,
+        server_name: ~c"rekindle-development-test",
+        server_root: String.to_charlist(host_root),
+        document_root: String.to_charlist(host_root),
+        modules: [:mod_alias, :mod_dir, :mod_get, :mod_head],
+        directory_index: [~c"index.html"],
+        mime_types: [
+          {~c"html", ~c"text/html"},
+          {~c"js", ~c"text/javascript"}
+        ]
+      )
+
+    port = :httpd.info(server) |> Keyword.fetch!(:port)
+
+    try do
+      arguments = [
+        "--headless=new",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-dev-shm-usage",
+        "--user-data-dir=#{profile}",
+        "--virtual-time-budget=3000",
+        "--dump-dom",
+        "http://127.0.0.1:#{port}/"
+      ]
+
+      assert {:ok, %{status: 0, output: output}} =
+               Rekindle.Toolchain.Process.run(browser, arguments,
+                 cd: host_root,
+                 timeout: 30_000,
+                 output_limit: 1_000_000
+               )
+
+      assert output =~ ~s(data-rekindle-status="ready")
+      assert output =~ ~s(data-rekindle-generation="#{second}")
+      assert output =~ ~s(data-rekindle-loads="2")
+    after
+      :inets.stop(:httpd, server)
+    end
   end
 
   test "does not expose unselected or malformed Web paths", %{root: root} do
@@ -296,6 +429,47 @@ defmodule Rekindle.DevelopmentTest do
     assert Rekindle.Development.Watcher.targets(client, Path.join(root, "outside.rs")) == []
   end
 
+  @tag capture_log: true
+  test "rebuilds the affected target from an actual file-system event", %{root: root} do
+    test = self()
+
+    build = fn target, _options ->
+      send(test, {:file_system_build, target})
+      {:ok, result(root, target, "file-system-#{target}")}
+    end
+
+    builder = start_builder(root, build)
+
+    source =
+      start_supervised!(%{
+        id: :development_file_system,
+        start:
+          {FileSystem, :start_link,
+           [
+             [
+               backend: :fs_poll,
+               dirs: [Path.join(root, "client")],
+               interval: 20
+             ]
+           ]}
+      })
+
+    start_supervised!(
+      {Rekindle.Development.Watcher,
+       source: source, builder: builder, root: Path.join(root, "client")}
+    )
+
+    assert_receive {:file_system_build, :web}, 1_000
+    assert_receive {:file_system_build, :desktop}, 1_000
+    Process.sleep(50)
+
+    File.mkdir_p!(Path.join(root, "client/public"))
+    File.write!(Path.join(root, "client/public/icon.svg"), "<svg/>")
+
+    assert_receive {:file_system_build, :web}, 1_000
+    refute_receive {:file_system_build, :desktop}, 150
+  end
+
   test "removes only superseded development generations", %{root: root} do
     web_root = Path.join([root, ".rekindle", "dev", "web"])
     release_root = Path.join([root, ".rekindle", "release", "web"])
@@ -372,6 +546,18 @@ defmodule Rekindle.DevelopmentTest do
   end
 
   defp get_resp_header(conn, name), do: Plug.Conn.get_resp_header(conn, name)
+
+  defp browser_module(generation) do
+    """
+    export default async function initialize() {
+      const loads = Number(sessionStorage.getItem("rekindle-loads") || "0") + 1;
+      sessionStorage.setItem("rekindle-loads", String(loads));
+      document.documentElement.dataset.rekindleStatus = "ready";
+      document.documentElement.dataset.rekindleGeneration = "#{generation}";
+      document.documentElement.dataset.rekindleLoads = String(loads);
+    }
+    """
+  end
 
   defp start_launcher(root, supervisor) do
     start_supervised!(

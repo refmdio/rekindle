@@ -3,6 +3,8 @@ defmodule Rekindle.Development.Builder do
 
   use GenServer
 
+  require Logger
+
   alias Rekindle.Build.Result
   alias Rekindle.Config
 
@@ -117,7 +119,11 @@ defmodule Rekindle.Development.Builder do
             state
           end
 
-        if result != :stale, do: notify(state.notify, target, result)
+        if result != :stale do
+          report(state.project, target, result)
+          notify(state.notify, target, result)
+        end
+
         {:noreply, state}
     end
   end
@@ -133,7 +139,11 @@ defmodule Rekindle.Development.Builder do
         target_state = %{target_state | running: nil}
         state = put_target(state, target, target_state)
 
-        if current?, do: notify(state.notify, target, result)
+        if current? do
+          report(state.project, target, result)
+          notify(state.notify, target, result)
+        end
+
         {:noreply, maybe_start_pending(state, target)}
     end
   end
@@ -277,4 +287,23 @@ defmodule Rekindle.Development.Builder do
 
   defp notify(destination, target, result),
     do: send(destination, {__MODULE__, target, result})
+
+  defp report(project, :web, {:ok, _result}) do
+    Rekindle.Web.Development.clear_error(project)
+  end
+
+  defp report(project, :web, {:error, error}) do
+    Logger.error("Rekindle Web build failed: #{error_message(error)}")
+    Rekindle.Web.Development.put_error(project, error_message(error))
+  end
+
+  defp report(_project, :desktop, {:error, error}) do
+    Logger.error("Rekindle desktop build failed: #{error_message(error)}")
+  end
+
+  defp report(_project, :desktop, {:ok, _result}), do: :ok
+
+  defp error_message(error) do
+    if is_exception(error), do: Exception.message(error), else: inspect(error)
+  end
 end

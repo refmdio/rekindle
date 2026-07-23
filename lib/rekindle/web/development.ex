@@ -6,7 +6,6 @@ defmodule Rekindle.Web.Development do
   import Plug.Conn
 
   alias Rekindle.Config
-  alias Rekindle.Web.Manifest
 
   @prefix ["__rekindle"]
   @generation ~r/\A[0-9a-f]{64}\z/
@@ -45,19 +44,23 @@ defmodule Rekindle.Web.Development do
   end
 
   def call(%Plug.Conn{method: "GET", path_info: @prefix ++ ["current"]} = conn, options) do
-    with {:ok, project} <- project(options),
-         {:ok, selection} <- current(project) do
-      body =
-        Jason.encode!(%{
-          "generation" => selection.generation,
-          "entry" => path(selection.generation, selection.entry)
-        })
+    with {:ok, project} <- project(options) do
+      case build_error(project) do
+        {:ok, message} ->
+          json(conn, 409, %{"error" => message})
 
-      conn
-      |> no_store()
-      |> put_resp_content_type("application/json")
-      |> send_resp(200, body)
-      |> halt()
+        :none ->
+          case current(project) do
+            {:ok, selection} ->
+              json(conn, 200, %{
+                "generation" => selection.generation,
+                "entry" => path(selection.generation, selection.entry)
+              })
+
+            _error ->
+              unavailable(conn)
+          end
+      end
     else
       _error -> unavailable(conn)
     end
@@ -73,6 +76,7 @@ defmodule Rekindle.Web.Development do
     requested = Enum.join(member, "/")
 
     with true <- Regex.match?(@generation, generation),
+         true <- safe_member?(requested),
          {:ok, project} <- project(options),
          {:ok, manifest} <- manifest(project, generation),
          true <- Enum.any?(manifest["members"], &(&1["path"] == requested)) do
@@ -89,6 +93,33 @@ defmodule Rekindle.Web.Development do
   end
 
   def call(conn, _options), do: conn
+
+  @doc false
+  @spec put_error(Config.t(), String.t()) :: :ok
+  def put_error(project, message) do
+    path = error_path(project)
+    temporary = path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(temporary, Jason.encode!(%{"error" => message})),
+         :ok <- File.rename(temporary, path) do
+      :ok
+    else
+      {:error, _reason} ->
+        File.rm(temporary)
+        :ok
+    end
+  end
+
+  @doc false
+  @spec clear_error(Config.t()) :: :ok
+  def clear_error(project) do
+    case File.rm(error_path(project)) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, _reason} -> :ok
+    end
+  end
 
   defp project(options) do
     Config.load(
@@ -113,12 +144,40 @@ defmodule Rekindle.Web.Development do
     path = Path.join(root, "manifest.json")
 
     with {:ok, contents} <- File.read(path),
-         {:ok, manifest} <- Jason.decode(contents),
-         true <- manifest["generation"] == generation,
-         :ok <- Manifest.validate(root, manifest) do
+         {:ok,
+          %{
+            "generation" => ^generation,
+            "entry" => entry,
+            "members" => members
+          } = manifest} <- Jason.decode(contents),
+         true <- safe_member?(entry),
+         true <- is_list(members),
+         true <- Enum.any?(members, &(&1["path"] == entry)) do
       {:ok, manifest}
     end
   end
+
+  defp safe_member?(member) when is_binary(member) and member != "" do
+    root = "/generation"
+    expanded = Path.expand(member, root)
+
+    Path.type(member) == :relative and expanded != root and
+      String.starts_with?(expanded, root <> "/") and
+      Path.relative_to(expanded, root) == member
+  end
+
+  defp safe_member?(_member), do: false
+
+  defp build_error(project) do
+    with {:ok, contents} <- File.read(error_path(project)),
+         {:ok, %{"error" => message}} when is_binary(message) <- Jason.decode(contents) do
+      {:ok, message}
+    else
+      _error -> :none
+    end
+  end
+
+  defp error_path(project), do: Path.join([project.root, ".rekindle", "dev", "web-error.json"])
 
   defp path(generation, entry), do: "/__rekindle/web/#{generation}/#{entry}"
 
@@ -168,6 +227,11 @@ defmodule Rekindle.Web.Development do
 
       try {
         const response = await fetch(currentUrl, {cache: "no-store"});
+        if (response.status === 409) {
+          const failure = await response.json();
+          report(new Error(failure.error));
+          return;
+        }
         if (!response.ok) return;
         const current = await response.json();
 
@@ -185,8 +249,8 @@ defmodule Rekindle.Web.Development do
           }
           await module.default();
           activeGeneration = current.generation;
-          errorView.hidden = true;
         }
+        errorView.hidden = true;
       } catch (error) {
         report(error);
       } finally {
@@ -224,6 +288,14 @@ defmodule Rekindle.Web.Development do
   end
 
   defp no_store(conn), do: put_resp_header(conn, "cache-control", "no-store")
+
+  defp json(conn, status, body) do
+    conn
+    |> no_store()
+    |> put_resp_content_type("application/json")
+    |> send_resp(status, Jason.encode!(body))
+    |> halt()
+  end
 
   defp unavailable(conn) do
     conn
