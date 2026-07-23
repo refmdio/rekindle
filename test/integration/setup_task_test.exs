@@ -278,7 +278,7 @@ defmodule Rekindle.SetupTaskIntegrationTest do
         stderr_to_stdout: true
       )
 
-    assert invalid_status == 2
+    assert invalid_status == 1
     assert invalid_output =~ "config_invalid"
     refute invalid_output =~ "** (Mix)"
 
