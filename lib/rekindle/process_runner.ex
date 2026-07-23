@@ -62,6 +62,7 @@ defmodule Rekindle.ProcessRunner do
         cleanup_timeout_ms: admitted.cleanup_timeout_ms,
         port: nil,
         exec_state: exec_state,
+        redact_values: admitted.redact_values,
         cancel_reason: nil,
         cancel_worker: nil
       }
@@ -244,6 +245,7 @@ defmodule Rekindle.ProcessRunner do
     helper = Keyword.get(request, :helper)
     timeout = Keyword.get(request, :build_timeout_ms, 900_000)
     cleanup = Keyword.get(request, :cleanup_timeout_ms, 5_000)
+    redact_values = Keyword.get(request, :redact_values, [])
 
     spawn =
       Keyword.take(request, [
@@ -258,9 +260,13 @@ defmodule Rekindle.ProcessRunner do
         :output_bytes_per_stream
       ])
 
-    if target in [:web, :desktop] and sha256?(build_key) and normalized_absolute?(helper) and
-         is_integer(timeout) and timeout in 1_000..3_600_000 and is_integer(cleanup) and
-         cleanup in 100..30_000 do
+    valid? =
+      target in [:web, :desktop] and sha256?(build_key) and normalized_absolute?(helper) and
+        is_integer(timeout) and timeout in 1_000..3_600_000 and is_integer(cleanup) and
+        cleanup in 100..30_000 and valid_redact_values?(redact_values)
+
+    with true <- valid?,
+         {:ok, redact_values} <- Redactor.redaction_values(redact_values) do
       {:ok,
        %{
          target: target,
@@ -268,10 +274,11 @@ defmodule Rekindle.ProcessRunner do
          helper: helper,
          build_timeout_ms: timeout,
          cleanup_timeout_ms: cleanup,
+         redact_values: redact_values,
          spawn: spawn
        }}
     else
-      failure(:spawn_failed, target, "Process request is invalid")
+      _ -> failure(:spawn_failed, target, "Process request is invalid")
     end
   end
 
@@ -311,6 +318,8 @@ defmodule Rekindle.ProcessRunner do
 
   defp map_result(job, {:ok, terminal, stdout, stderr}) do
     duration = max(System.monotonic_time(:millisecond) - job.started_at, 0)
+    stdout = redact_bytes(stdout, job.redact_values)
+    stderr = redact_bytes(stderr, job.redact_values)
 
     execution = %ExecutionResult{
       build_key: job.build_key,
@@ -419,6 +428,13 @@ defmodule Rekindle.ProcessRunner do
     end
   end
 
+  defp redact_bytes(bytes, values) do
+    case Redactor.redact_bytes(bytes, values) do
+      {:ok, redacted} -> redacted
+      {:error, _error} -> "<redacted>"
+    end
+  end
+
   defp put_job(state, reference, job) do
     monitors =
       state.monitors
@@ -447,6 +463,21 @@ defmodule Rekindle.ProcessRunner do
     do: monitors |> Map.delete(job.caller_monitor) |> Map.delete(job.worker_monitor)
 
   defp sha256?(value), do: is_binary(value) and Regex.match?(~r/\A[0-9a-f]{64}\z/, value)
+
+  defp valid_redact_values?(values) when is_list(values) do
+    proper_redact_values?(values, 0, 0)
+  end
+
+  defp valid_redact_values?(_values), do: false
+
+  defp proper_redact_values?([], count, bytes), do: count <= 256 and bytes <= 262_144
+
+  defp proper_redact_values?([value | rest], count, bytes)
+       when is_binary(value) and value != "" and byte_size(value) <= 65_536 and count < 256 and
+              bytes + byte_size(value) <= 262_144,
+       do: proper_redact_values?(rest, count + 1, bytes + byte_size(value))
+
+  defp proper_redact_values?(_values, _count, _bytes), do: false
 
   defp normalized_absolute?(value),
     do: is_binary(value) and Path.type(value) == :absolute and Path.expand(value) == value

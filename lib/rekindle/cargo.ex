@@ -288,6 +288,7 @@ defmodule Rekindle.Cargo do
          executable: executable.path,
          argv: argv,
          environment: environment,
+         redact_values: redaction_values(config.environment, environment),
          process: Keyword.get(options, :process)
        }}
     else
@@ -615,12 +616,23 @@ defmodule Rekindle.Cargo do
       env_mode: :replace,
       env_set: job.environment,
       env_unset: [],
+      redact_values: job.redact_values,
       terminate_grace_ms: process.terminate_grace_ms,
       kill_grace_ms: process.kill_grace_ms,
       output_bytes_per_stream: process.output_bytes_per_stream,
       build_timeout_ms: process.build_timeout_ms,
       cleanup_timeout_ms: process.kill_grace_ms
     ]
+  end
+
+  defp redaction_values(policy, environment) do
+    names = MapSet.new(policy.redact)
+
+    environment
+    |> Enum.flat_map(fn {name, value} ->
+      if MapSet.member?(names, name), do: [value], else: []
+    end)
+    |> Enum.uniq()
   end
 
   defp map_result(_job, {:error, %Failure{} = failure}), do: {:error, failure}

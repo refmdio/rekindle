@@ -151,6 +151,13 @@ defmodule Rekindle.Toolchain.ExecTest do
                cwd: "/tmp",
                argv: ["ok" | :improper]
              )
+
+    assert {:error, :invalid_spawn} =
+             Exec.spawn_request(
+               executable: "/bin/echo",
+               cwd: "/tmp",
+               argv: [String.duplicate("x", 65_536)]
+             )
   end
 
   test "admits independently sequenced bounded byte streams and terminal exit" do

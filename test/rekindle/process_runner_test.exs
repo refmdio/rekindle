@@ -242,7 +242,7 @@ defmodule Rekindle.ProcessRunnerTest do
     assert_receive {:rekindle_process, ^reference, {:ok, _result}}
   end
 
-  test "public tails are redacted while bounded internal bytes remain exact", %{runner: runner} do
+  test "configured values are redacted from raw bytes before result delivery", %{runner: runner} do
     previous = Application.get_env(:rekindle, :redact_values)
     Application.put_env(:rekindle, :redact_values, ["private"])
 
@@ -256,10 +256,45 @@ defmodule Rekindle.ProcessRunnerTest do
     assert_receive {:fake_spawn, worker, _spawn, _state, _options}
     send(worker, {:finish, terminal(), "private-json", <<255, 0, 1>>})
     assert_receive {:rekindle_process, ^reference, {:ok, result}}
-    assert result.stdout == "private-json"
+    assert result.stdout == "<redacted>-json"
     assert result.stderr == <<255, 0, 1>>
     assert result.execution.stdout_tail == "<redacted>-json"
     refute result.execution.stderr_tail == result.stderr
+  end
+
+  test "each job carries independent redaction values", %{runner: runner} do
+    first = Keyword.put(request(), :redact_values, ["first-private"])
+    second = Keyword.put(request(), :redact_values, ["second-private"])
+
+    assert {:ok, first_reference} = ProcessRunner.run(runner, first)
+    assert_receive {:fake_spawn, first_worker, _spawn, _state, _options}
+    assert {:ok, second_reference} = ProcessRunner.run(runner, second)
+    assert_receive {:fake_spawn, second_worker, _spawn, _state, _options}
+
+    send(first_worker, {:finish, terminal(), "first-private second-private", ""})
+    send(second_worker, {:finish, terminal(), "first-private second-private", ""})
+
+    assert_receive {:rekindle_process, ^first_reference, {:ok, first_result}}
+    assert_receive {:rekindle_process, ^second_reference, {:ok, second_result}}
+    assert first_result.stdout == "<redacted> second-private"
+    assert second_result.stdout == "first-private <redacted>"
+  end
+
+  test "rejects malformed or unbounded redaction values before spawning", %{runner: runner} do
+    values = [
+      [""],
+      [1],
+      ["value" | :improper],
+      List.duplicate("value", 257),
+      [String.duplicate("x", 65_537)]
+    ]
+
+    for value <- values do
+      assert {:error, %{code: :spawn_failed}} =
+               ProcessRunner.run(runner, Keyword.put(request(), :redact_values, value))
+
+      refute_receive {:fake_spawn, _worker, _spawn, _state, _options}
+    end
   end
 
   test "shutdown rejects admission, cancels every job, and is idempotent", %{runner: runner} do

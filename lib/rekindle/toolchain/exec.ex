@@ -60,7 +60,14 @@ defmodule Rekindle.Toolchain.Exec do
         "kill_grace_ms" => kill_grace
       }
 
-      {:ok, header, %__MODULE__{request_id: request_id, output_bytes_per_stream: output_bytes}}
+      case Frame.encode(header) do
+        {:ok, _encoded} ->
+          {:ok, header,
+           %__MODULE__{request_id: request_id, output_bytes_per_stream: output_bytes}}
+
+        {:error, _reason} ->
+          {:error, :invalid_spawn}
+      end
     else
       _ -> {:error, :invalid_spawn}
     end

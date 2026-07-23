@@ -152,6 +152,31 @@ defmodule Rekindle.CargoTest do
     assert {:ok, _metadata} = Cargo.result(context.cargo, reference, options[:authority])
   end
 
+  test "passes configured secret environment values through process redaction", context do
+    secret = "cargo-private-value"
+
+    environment = %EnvironmentPolicy{
+      inherit: :none,
+      set: [],
+      unset: [],
+      build_inputs: ["TOKEN"],
+      redact: ["TOKEN"],
+      resolved: [{"TOKEN", secret}]
+    }
+
+    options =
+      Keyword.put(base_options(context), :config, %{web_config() | environment: environment})
+
+    assert {:ok, reference} = Cargo.metadata(context.cargo, options)
+    assert_receive {:cargo_spawn, worker, spawn, _state}
+    assert ["TOKEN", secret] in spawn["env_set"]
+
+    send(worker, {:finish, Adapter.terminal(), Jason.encode!(metadata_map(context)), secret})
+    assert_receive {:rekindle_cargo_ready, ^reference}
+    assert {:ok, result} = Cargo.result(context.cargo, reference, options[:authority])
+    assert result.execution.stderr_tail == "<redacted>"
+  end
+
   test "completed results retain exactly the configured execution capacity", context do
     first_options = base_options(context)
     second_directory = Path.join(context.root, "target-second")

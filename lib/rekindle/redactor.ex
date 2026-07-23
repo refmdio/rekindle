@@ -9,8 +9,10 @@ defmodule Rekindle.Redactor do
   @windows_path ~r/(?i)(?<![A-Za-z0-9_])[A-Z]:\\(?:[^\s\x00\\]+\\)*[^\s\x00\\:]+/
   @stack_markers ["** (", "stacktrace:", "Stack:"]
 
-  @spec sanitize(term()) :: {:ok, String.t()} | {:error, ConfigError.t()}
-  def sanitize(value) when is_binary(value) do
+  @spec sanitize(term(), [binary()]) :: {:ok, String.t()} | {:error, ConfigError.t()}
+  def sanitize(value, values \\ [])
+
+  def sanitize(value, values) when is_binary(value) do
     cond do
       not String.valid?(value) ->
         error("public text is not valid UTF-8")
@@ -26,11 +28,41 @@ defmodule Rekindle.Redactor do
         error("public text contains stack-like content")
 
       true ->
-        redact(value)
+        redact(value, values)
     end
   end
 
-  def sanitize(_value), do: error("public text must be a UTF-8 string")
+  def sanitize(_value, _values), do: error("public text must be a UTF-8 string")
+
+  @spec redact_bytes(binary(), [binary()]) :: {:ok, binary()} | {:error, ConfigError.t()}
+  def redact_bytes(value, values \\ [])
+
+  def redact_bytes(value, values) when is_binary(value) and is_list(values) do
+    with {:ok, patterns} <- redaction_values(values) do
+      {:ok, replace_bytes(value, patterns, [])}
+    end
+  end
+
+  def redact_bytes(_value, _values),
+    do: error("redaction input must be bytes and values must be a list")
+
+  @doc false
+  @spec redaction_values([binary()]) :: {:ok, [binary()]} | {:error, ConfigError.t()}
+  def redaction_values(values) when is_list(values) do
+    if proper_list?(values) and Enum.all?(values, &is_binary/1) do
+      patterns =
+        (configured_values() ++ values)
+        |> Enum.filter(&(is_binary(&1) and &1 != ""))
+        |> Enum.uniq()
+        |> Enum.sort_by(&byte_size/1, :desc)
+
+      {:ok, patterns}
+    else
+      error("redaction values must be a list of byte strings")
+    end
+  end
+
+  def redaction_values(_values), do: error("redaction values must be a list of byte strings")
 
   @spec sanitize!(String.t()) :: String.t()
   def sanitize!(value) do
@@ -40,21 +72,52 @@ defmodule Rekindle.Redactor do
     end
   end
 
-  defp redact(value) do
-    sanitized =
-      configured_values()
-      |> Enum.filter(&(is_binary(&1) and &1 != ""))
-      |> Enum.sort_by(&byte_size/1, :desc)
-      |> Enum.reduce(value, &String.replace(&2, &1, "<redacted>"))
-      |> String.replace(@windows_path, "<redacted-path>")
-      |> String.replace(@unix_path, "<redacted-path>")
+  defp redact(value, values) do
+    with {:ok, redacted} <- redact_bytes(value, values) do
+      sanitized =
+        redacted
+        |> String.replace(@windows_path, "<redacted-path>")
+        |> String.replace(@unix_path, "<redacted-path>")
 
-    if byte_size(sanitized) <= @max_public do
-      {:ok, sanitized}
-    else
-      suffix = "…<truncated>"
-      {:ok, utf8_prefix(sanitized, @max_public - byte_size(suffix)) <> suffix}
+      if byte_size(sanitized) <= @max_public do
+        {:ok, sanitized}
+      else
+        suffix = "…<truncated>"
+        {:ok, utf8_prefix(sanitized, @max_public - byte_size(suffix)) <> suffix}
+      end
     end
+  end
+
+  defp replace_bytes(value, [], _acc), do: value
+
+  defp replace_bytes(value, patterns, acc) do
+    case first_match(value, patterns) do
+      nil ->
+        IO.iodata_to_binary(Enum.reverse([value | acc]))
+
+      {position, length} ->
+        prefix = binary_part(value, 0, position)
+        remaining = binary_part(value, position + length, byte_size(value) - position - length)
+        replace_bytes(remaining, patterns, ["<redacted>", prefix | acc])
+    end
+  end
+
+  defp first_match(value, patterns) do
+    Enum.reduce(patterns, nil, fn pattern, selected ->
+      case :binary.match(value, pattern) do
+        :nomatch -> selected
+        match -> earlier_or_longer(match, selected)
+      end
+    end)
+  end
+
+  defp earlier_or_longer(match, nil), do: match
+
+  defp earlier_or_longer({position, length} = match, {selected_position, selected_length}) do
+    if position < selected_position or
+         (position == selected_position and length > selected_length),
+       do: match,
+       else: {selected_position, selected_length}
   end
 
   defp configured_values do
