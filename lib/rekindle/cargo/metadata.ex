@@ -1,7 +1,8 @@
 defmodule Rekindle.Cargo.Metadata do
   @moduledoc false
 
-  alias Rekindle.Cargo.{Error, Process}
+  alias Rekindle.Cargo.Error
+  alias Rekindle.Toolchain.Process
 
   @enforce_keys [:packages, :workspace_members, :target_directory]
   defstruct [:packages, :workspace_members, :target_directory]

@@ -4,7 +4,7 @@ defmodule Rekindle.Cargo.Messages do
   alias Rekindle.Cargo.Error
   alias Rekindle.Diagnostic
 
-  @spec decode(Rekindle.Cargo.Process.t(), String.t(), String.t(), :web | :desktop) ::
+  @spec decode(Rekindle.Toolchain.Process.t(), String.t(), String.t(), :web | :desktop) ::
           {:ok, Path.t(), [Diagnostic.t()], String.t()} | {:error, Error.t()}
   def decode(process, package_id, binary, target) do
     {artifact, diagnostics, output} =

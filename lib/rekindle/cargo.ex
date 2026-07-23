@@ -1,9 +1,10 @@
 defmodule Rekindle.Cargo do
   @moduledoc false
 
-  alias Rekindle.Cargo.{Error, Messages, Metadata, Process}
+  alias Rekindle.Cargo.{Error, Messages, Metadata}
   alias Rekindle.Config.Target
   alias Rekindle.Diagnostic
+  alias Rekindle.Toolchain.Process
 
   @web_target "wasm32-unknown-unknown"
 

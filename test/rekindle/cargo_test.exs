@@ -91,7 +91,8 @@ end
 defmodule Rekindle.Cargo.MessagesTest do
   use ExUnit.Case, async: true
 
-  alias Rekindle.Cargo.{Messages, Process}
+  alias Rekindle.Cargo.Messages
+  alias Rekindle.Toolchain.Process
 
   test "decodes compiler diagnostics and the matching artifact" do
     diagnostic =
@@ -135,7 +136,7 @@ end
 defmodule Rekindle.Cargo.ProcessTest do
   use ExUnit.Case, async: true
 
-  alias Rekindle.Cargo.Process
+  alias Rekindle.Toolchain.Process
 
   test "bounds captured output" do
     assert {:ok, result} =

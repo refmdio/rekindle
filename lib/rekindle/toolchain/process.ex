@@ -1,4 +1,4 @@
-defmodule Rekindle.Cargo.Process do
+defmodule Rekindle.Toolchain.Process do
   @moduledoc false
 
   @default_timeout 120_000
