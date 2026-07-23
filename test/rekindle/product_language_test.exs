@@ -82,17 +82,58 @@ defmodule Rekindle.ProductLanguageTest do
     assert {:error, [%{rule: "language.requirement_id"}]} = ProductLanguage.scan([owned])
   end
 
-  test "scans selected paths and applies exact repository exclusions" do
+  test "scans every explicitly selected path regardless of repository exclusions" do
     root = temporary_root()
     on_exit(fn -> File.rm_rf!(root) end)
+    git!(root, ["init", "-q"])
+
+    paths = [
+      Path.join(private_dir(), "notes.md"),
+      ".git/copied.txt",
+      "_build/copied.txt",
+      "deps/copied.txt",
+      "target/copied.txt",
+      "crates/example/target/copied.txt",
+      "client/.rekindle/target/copied.txt"
+    ]
+
+    Enum.each(paths, fn path ->
+      absolute = Path.join(root, path)
+      File.mkdir_p!(Path.dirname(absolute))
+      File.write!(absolute, List.to_string([82, 69, 81, 45, 49]))
+    end)
+
+    assert {:error, issues} = ProductLanguage.scan_paths(root, paths, :generated)
+
+    assert Enum.map(issues, & &1.location.path) == Enum.sort(paths)
+    assert Enum.all?(issues, &(&1.rule == "language.requirement_id"))
+  end
+
+  test "applies repository exclusions only while traversing tracked files" do
+    root = temporary_root()
+    on_exit(fn -> File.rm_rf!(root) end)
+    git!(root, ["init", "-q"])
 
     File.mkdir_p!(Path.join(root, "lib"))
     File.write!(Path.join(root, "lib/clean.ex"), "safe")
-    excluded = Path.join(private_dir(), "notes.md")
-    File.mkdir_p!(Path.dirname(Path.join(root, excluded)))
-    File.write!(Path.join(root, excluded), List.to_string([82, 69, 81, 45, 49]))
 
-    assert :ok = ProductLanguage.scan_paths(root, ["lib/clean.ex", excluded], :generated)
+    paths = [
+      Path.join(private_dir(), "notes.md"),
+      "_build/copied.txt",
+      "deps/copied.txt",
+      "target/copied.txt",
+      "crates/example/target/copied.txt",
+      "client/.rekindle/target/copied.txt"
+    ]
+
+    Enum.each(paths, fn path ->
+      absolute = Path.join(root, path)
+      File.mkdir_p!(Path.dirname(absolute))
+      File.write!(absolute, List.to_string([82, 69, 81, 45, 49]))
+    end)
+
+    git!(root, ["add", "-f", "lib/clean.ex" | paths])
+    assert :ok = ProductLanguage.scan_tracked(root)
   end
 
   test "scans an inclusive commit interval" do

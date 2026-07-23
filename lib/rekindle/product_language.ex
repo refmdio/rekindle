@@ -202,9 +202,6 @@ defmodule Rekindle.ProductLanguage do
         not safe_path?(path) ->
           {:halt, {:error, surface_issue(kind, "<path>", "language.path")}}
 
-        excluded?(path) ->
-          {:cont, {:ok, surfaces}}
-
         true ->
           case File.read(Path.join(root, path)) do
             {:ok, bytes} ->
