@@ -5,6 +5,9 @@ use core::fmt;
 #[cfg(feature = "state-handoff")]
 mod handoff;
 
+#[doc(hidden)]
+pub mod adapter_v1;
+
 #[cfg(all(feature = "web", not(target_arch = "wasm32")))]
 compile_error!("feature `web` is supported only for target_arch = wasm32");
 
@@ -64,21 +67,27 @@ pub trait StateHandoff: Send + Sync {
 pub enum ClientError {
     IncompatibleRuntime,
     PlatformInit,
+    AdapterGraphics,
+    Application,
     WindowOpen,
     Protocol,
     Io,
     Deadline,
+    Shutdown,
 }
 
 impl fmt::Display for ClientError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::IncompatibleRuntime => "incompatible Rekindle runtime",
-            Self::PlatformInit => "GPUI platform initialization failed",
-            Self::WindowOpen => "GPUI window open failed",
+            Self::PlatformInit => "platform initialization failed",
+            Self::AdapterGraphics => "adapter graphics initialization failed",
+            Self::Application => "application startup failed",
+            Self::WindowOpen => "application window open failed",
             Self::Protocol => "Rekindle runtime protocol failed",
             Self::Io => "Rekindle runtime I/O failed",
             Self::Deadline => "Rekindle runtime deadline elapsed",
+            Self::Shutdown => "Rekindle runtime requested shutdown",
         })
     }
 }
@@ -108,38 +117,6 @@ impl fmt::Display for HandoffError {
 }
 
 impl std::error::Error for HandoffError {}
-
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
-pub mod web {
-    use crate::{ClientError, ClientOptions};
-
-    /// Starts the GPUI Web application through the Rekindle runtime adapter.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ClientError::PlatformInit`] when the browser GPUI platform
-    /// cannot be initialized.
-    pub fn run(build: fn(&mut gpui::App), options: ClientOptions) -> Result<(), ClientError> {
-        let _ = (build, options);
-        Err(ClientError::PlatformInit)
-    }
-}
-
-#[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
-pub mod desktop {
-    use crate::{ClientError, ClientOptions};
-
-    /// Starts the native GPUI application through the Rekindle runtime adapter.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ClientError::PlatformInit`] when the native GPUI platform
-    /// cannot be initialized.
-    pub fn run(build: fn(&mut gpui::App), options: ClientOptions) -> Result<(), ClientError> {
-        let _ = (build, options);
-        Err(ClientError::PlatformInit)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -178,6 +155,10 @@ mod tests {
         assert_eq!(
             ClientError::Protocol.to_string(),
             "Rekindle runtime protocol failed"
+        );
+        assert_eq!(
+            ClientError::AdapterGraphics.to_string(),
+            "adapter graphics initialization failed"
         );
         assert_eq!(
             HandoffError::TooLarge.to_string(),

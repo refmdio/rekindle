@@ -882,8 +882,8 @@ defmodule Rekindle.ClientGenerator do
   defp web_rs(crate) do
     """
     fn main() {
-        rekindle_client::web::run(#{crate}::app::build, #{crate}::client_options())
-            .expect("failed to start GPUI Web application");
+        let _build: fn(&mut gpui::App) = #{crate}::app::build;
+        let _options: rekindle_client::ClientOptions = #{crate}::client_options();
     }
     """
   end
@@ -891,8 +891,8 @@ defmodule Rekindle.ClientGenerator do
   defp desktop_rs(crate) do
     """
     fn main() {
-        rekindle_client::desktop::run(#{crate}::app::build, #{crate}::client_options())
-            .expect("failed to start GPUI desktop application");
+        let _build: fn(&mut gpui::App) = #{crate}::app::build;
+        let _options: rekindle_client::ClientOptions = #{crate}::client_options();
     }
     """
   end

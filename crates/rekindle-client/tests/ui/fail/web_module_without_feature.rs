@@ -1,3 +1,3 @@
 fn main() {
-    let _ = rekindle_client::web::run;
+    let _ = core::mem::size_of::<rekindle_client::adapter_v1::WebSession>();
 }

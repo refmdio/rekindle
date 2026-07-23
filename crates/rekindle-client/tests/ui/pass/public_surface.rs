@@ -1,4 +1,5 @@
 use rekindle_client::{
+    adapter_v1::{AdapterIdentity, AdapterTarget, IntegrationId},
     ClientError, ClientOptions, HandoffError, HandoffFuture, StateHandoff,
 };
 
@@ -32,16 +33,25 @@ fn main() {
     assert_send::<HandoffFuture<'static, ()>>();
     let _ = options.application_id;
     let _ = options.handoff.expect("handoff").schema_version();
+    let identity = AdapterIdentity {
+        integration: IntegrationId::Gpui,
+        target: AdapterTarget::Web,
+        identity_digest: [1; 32],
+    };
+    let _ = (identity, IntegrationId::Egui, IntegrationId::Slint, AdapterTarget::Desktop);
 
     let client = ClientError::Io;
     let _ = match client {
         ClientError::IncompatibleRuntime => 0,
         ClientError::PlatformInit => 1,
-        ClientError::WindowOpen => 2,
-        ClientError::Protocol => 3,
-        ClientError::Io => 4,
-        ClientError::Deadline => 5,
-        _ => 6,
+        ClientError::AdapterGraphics => 2,
+        ClientError::Application => 3,
+        ClientError::WindowOpen => 4,
+        ClientError::Protocol => 5,
+        ClientError::Io => 6,
+        ClientError::Deadline => 7,
+        ClientError::Shutdown => 8,
+        _ => 9,
     };
 
     let handoff = HandoffError::Rejected;

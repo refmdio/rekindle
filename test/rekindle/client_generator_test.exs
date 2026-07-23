@@ -14,8 +14,10 @@ defmodule Rekindle.ClientGeneratorTest do
     assert Map.has_key?(first, "src/bin/web.rs")
     assert Map.has_key?(first, "src/bin/desktop.rs")
     assert first["src/lib.rs"] =~ "rekindle_client::ClientOptions"
-    assert first["src/bin/web.rs"] =~ "rekindle_client::web::run"
-    assert first["src/bin/desktop.rs"] =~ "rekindle_client::desktop::run"
+    assert first["src/bin/web.rs"] =~ "rekindle_client::ClientOptions"
+    assert first["src/bin/desktop.rs"] =~ "rekindle_client::ClientOptions"
+    refute first["src/bin/web.rs"] =~ "rekindle_client::web"
+    refute first["src/bin/desktop.rs"] =~ "rekindle_client::desktop"
     assert first["Cargo.toml"] =~ ~s(web = ["rekindle-client/web"])
     assert first["Cargo.toml"] =~ ~s(desktop = ["rekindle-client/desktop"])
     assert first["src/app.rs"] =~ "cx.open_window"
@@ -244,7 +246,8 @@ defmodule Rekindle.ClientGeneratorTest do
       fn build() {}
 
       fn main() {
-          rekindle_client::desktop::run(build, sample_app_ui::client_options()).unwrap();
+          let _build: fn(&mut gpui::App) = build;
+          let _options: rekindle_client::ClientOptions = sample_app_ui::client_options();
       }
       """
     )

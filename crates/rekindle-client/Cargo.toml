@@ -5,16 +5,15 @@ edition = "2024"
 rust-version = "1.95"
 license = "MIT"
 publish = false
-description = "Target startup and portable state handoff facade for Rekindle GPUI clients."
+description = "Target startup and portable state handoff facade for Rekindle clients."
 
 [features]
 default = []
-web = ["dep:gpui"]
-desktop = ["dep:gpui"]
+web = []
+desktop = []
 state-handoff = ["dep:futures-util", "dep:sha2"]
 
 [dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", rev = "18f35ffac2da72ccdfb0e1bf756218fa1995162b", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
 sha2 = { version = "0.10", optional = true }
 

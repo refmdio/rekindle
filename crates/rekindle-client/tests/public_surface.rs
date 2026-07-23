@@ -190,11 +190,11 @@ fn public_surface_compile_matrix() {
         ),
         (
             "fail/web_module_without_feature.rs",
-            &["could not find `web` in `rekindle_client`"],
+            &["cannot find type `WebSession` in module `rekindle_client::adapter_v1`"],
         ),
         (
             "fail/desktop_module_without_feature.rs",
-            &["could not find `desktop` in `rekindle_client`"],
+            &["cannot find type `DesktopSession` in module `rekindle_client::adapter_v1`"],
         ),
     ] {
         assert_failure(fixture, &harness.compile_fixture(fixture), expected);
@@ -214,6 +214,14 @@ fn public_surface_compile_matrix() {
         "desktop feature on Wasm",
         &harness.compile_library(&["desktop"], Some("wasm32-unknown-unknown")),
         &["feature `desktop` is supported only for non-Wasm targets"],
+    );
+    assert_success(
+        "desktop feature on native",
+        &harness.compile_library(&["desktop"], None),
+    );
+    assert_success(
+        "web feature on Wasm",
+        &harness.compile_library(&["web"], Some("wasm32-unknown-unknown")),
     );
 }
 
