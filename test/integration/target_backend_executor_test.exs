@@ -303,7 +303,7 @@ defmodule Rekindle.TargetBackendExecutorTest do
     on_exit(fn ->
       Application.delete_env(@app, :mode)
       Application.delete_env(@app, :options_digest)
-      File.rm_rf(root)
+      remove_tree(root)
     end)
 
     %{
@@ -464,8 +464,28 @@ defmodule Rekindle.TargetBackendExecutorTest do
   end
 
   defp temp_dir!(prefix) do
-    path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+    path = Path.join(System.tmp_dir!(), "#{prefix}-#{suffix}")
     File.mkdir_p!(path)
     path
+  end
+
+  defp remove_tree(path) do
+    case File.lstat(path) do
+      {:ok, %{type: :directory}} ->
+        :ok = File.chmod(path, 0o700)
+
+        path
+        |> File.ls!()
+        |> Enum.each(&remove_tree(Path.join(path, &1)))
+
+        File.rmdir(path)
+
+      {:ok, _stat} ->
+        File.rm(path)
+
+      {:error, :enoent} ->
+        :ok
+    end
   end
 end
