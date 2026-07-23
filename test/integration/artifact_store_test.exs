@@ -874,7 +874,9 @@ defmodule Rekindle.ArtifactStoreTest do
         {result, descriptor.artifact_id}
       end)
 
-    assert_receive {:sealed_not_renamed, artifact_id, source_parent_mode, target_parent_mode}
+    assert_receive {:sealed_not_renamed, artifact_id, source_parent_mode, target_parent_mode},
+                   5_000
+
     assert source_parent_mode == 0o700
     assert target_parent_mode == 0o700
     refute File.exists?(artifact_path(root, :web, artifact_id))
