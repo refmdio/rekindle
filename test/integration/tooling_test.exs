@@ -86,6 +86,35 @@ defmodule Rekindle.ToolingIntegrationTest do
     assert error?(checks, :wasm_bindgen)
   end
 
+  test "setup rejects unusable Cargo executables", context do
+    broken = Path.join(context.root, "broken-cargo")
+    write_executable(broken, "#!/bin/sh\nexit 42\n")
+
+    assert {:error, checks} =
+             Setup.run(
+               :rekindle_tooling_test,
+               :desktop,
+               Keyword.put(context.options, :cargo, broken)
+             )
+
+    assert error?(checks, :cargo)
+    assert check!(checks, :cargo).message =~ "failed its readiness check"
+
+    non_executable = Path.join(context.root, "non-executable-cargo")
+    File.write!(non_executable, "#!/bin/sh\necho 'cargo 1.0.0'\n")
+    File.chmod!(non_executable, 0o644)
+
+    assert {:error, checks} =
+             Setup.run(
+               :rekindle_tooling_test,
+               :desktop,
+               Keyword.put(context.options, :cargo, non_executable)
+             )
+
+    assert error?(checks, :cargo)
+    assert check!(checks, :cargo).message =~ "failed its readiness check"
+  end
+
   test "Doctor checks a healthy project without mutating it", context do
     assert {:ok, _checks} = Setup.run(:rekindle_tooling_test, :enabled, context.options)
     clear_traces(context.root)
