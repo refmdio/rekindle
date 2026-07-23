@@ -51,8 +51,10 @@ defmodule Rekindle.TargetBackend.Executor do
   defp execute_owned(admission, context_builder, staging, services) do
     result =
       try do
-        context = context_builder.(QualifiedPath.issue(staging.path, :read_write))
-        execute_staged(admission, context, staging, services)
+        QualifiedPath.with_scope(fn ->
+          context = context_builder.(QualifiedPath.issue(staging.path, :read_write))
+          execute_staged(admission, context, staging, services)
+        end)
       rescue
         _exception -> contract_failure(staging.target, "Extension execution failed")
       catch
