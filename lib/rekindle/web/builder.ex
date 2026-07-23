@@ -26,7 +26,7 @@ defmodule Rekindle.Web.Builder do
            {:ok, manifest} <- Manifest.create(temporary, @entry),
            :ok <- write_manifest(temporary, manifest),
            {:ok, generation} <- publish(project, profile, temporary, manifest),
-           :ok <- select(project, profile, manifest) do
+           :ok <- maybe_activate(project, profile, manifest, options) do
         {:ok,
          %Result{
            target: :web,
@@ -46,6 +46,12 @@ defmodule Rekindle.Web.Builder do
     after
       File.rm_rf(temporary)
     end
+  end
+
+  @doc false
+  @spec activate(Rekindle.Config.t(), Result.t()) :: :ok | {:error, Error.t()}
+  def activate(project, %Result{target: :web, profile: profile, metadata: metadata}) do
+    select(project, profile, %{"generation" => metadata.generation})
   end
 
   defp bindgen(executable, artifact, output, options) do
@@ -238,6 +244,14 @@ defmodule Rekindle.Web.Builder do
       {:error, reason} ->
         File.rm(temporary)
         file_error(:selector_write, destination, reason)
+    end
+  end
+
+  defp maybe_activate(project, profile, manifest, options) do
+    if Keyword.get(options, :activate, true) do
+      select(project, profile, manifest)
+    else
+      :ok
     end
   end
 
