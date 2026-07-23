@@ -172,7 +172,8 @@ defmodule Rekindle.DevelopmentTest do
     assert runtime.status == 200
     assert runtime.resp_body =~ "navigator.gpu"
     assert runtime.resp_body =~ "await graphicsReady();"
-    assert runtime.resp_body =~ "await import(current.entry);"
+    assert runtime.resp_body =~ "const module = await import(current.entry);"
+    assert runtime.resp_body =~ "await module.default();"
     refute runtime.resp_body =~ ~s|getContext("webgl2")|
   end
 

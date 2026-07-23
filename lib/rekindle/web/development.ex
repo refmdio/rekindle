@@ -179,7 +179,11 @@ defmodule Rekindle.Web.Development do
         if (!activeGeneration) {
           loading = true;
           await graphicsReady();
-          await import(current.entry);
+          const module = await import(current.entry);
+          if (typeof module.default !== "function") {
+            throw new Error("The Web entry does not export a wasm-bindgen initializer.");
+          }
+          await module.default();
           activeGeneration = current.generation;
           errorView.hidden = true;
         }
