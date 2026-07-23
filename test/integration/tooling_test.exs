@@ -113,6 +113,34 @@ defmodule Rekindle.ToolingIntegrationTest do
 
     assert error?(checks, :cargo)
     assert check!(checks, :cargo).message =~ "failed its readiness check"
+
+    invalid_version = Path.join(context.root, "invalid-version-cargo")
+    write_executable(invalid_version, "#!/bin/sh\necho 'cargo definitely-not-a-version'\n")
+
+    assert {:error, checks} =
+             Setup.run(
+               :rekindle_tooling_test,
+               :desktop,
+               Keyword.put(context.options, :cargo, invalid_version)
+             )
+
+    assert error?(checks, :cargo)
+
+    oversized = Path.join(context.root, "oversized-version-cargo")
+
+    write_executable(
+      oversized,
+      "#!/bin/sh\nprintf 'cargo 1.2.3 '\nhead -c 5000 /dev/zero | tr '\\000' x\n"
+    )
+
+    assert {:error, checks} =
+             Setup.run(
+               :rekindle_tooling_test,
+               :desktop,
+               Keyword.put(context.options, :cargo, oversized)
+             )
+
+    assert error?(checks, :cargo)
   end
 
   test "Doctor checks a healthy project without mutating it", context do

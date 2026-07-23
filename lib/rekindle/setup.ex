@@ -73,8 +73,17 @@ defmodule Rekindle.Setup do
              output_limit: 4_096,
              env: Keyword.get(options, :process_env, [])
            ) do
-        {:ok, %{status: 0, output: "cargo " <> _version}} ->
-          passed(:cargo, "cargo found at #{path}")
+        {:ok, %{status: 0, output: output, truncated?: false}} ->
+          case output |> String.trim() |> String.split(~r/\s+/, trim: true) do
+            ["cargo", version | _rest] ->
+              case Version.parse(version) do
+                {:ok, _version} -> passed(:cargo, "cargo found at #{path}")
+                :error -> failed(:cargo, "cargo at #{path} failed its readiness check")
+              end
+
+            _ ->
+              failed(:cargo, "cargo at #{path} failed its readiness check")
+          end
 
         _ ->
           failed(:cargo, "cargo at #{path} failed its readiness check")
