@@ -27,22 +27,53 @@ defmodule Rekindle.Config do
 
     with {:ok, root} <- resolve_path(configured_root),
          {:ok, config} <- fetch(otp_app),
-         :ok <- keyword(config, "Rekindle configuration"),
-         :ok <- unique_keys(config, "Rekindle configuration"),
-         :ok <- known_keys(config, @config_keys, "Rekindle configuration"),
-         {:ok, integration} <- integration(config),
-         {:ok, targets} <- targets(config),
+         {:ok, parsed} <- parse(config),
          {:ok, client_root} <- project_path(root, "client"),
-         {:ok, public_dir} <- project_path(root, Keyword.get(config, :public_dir, "priv/static")) do
+         {:ok, public_dir} <- project_path(root, parsed.public_dir) do
       {:ok,
        %__MODULE__{
          otp_app: otp_app,
          root: root,
          client_root: client_root,
-         integration: integration,
-         targets: targets,
+         integration: parsed.integration,
+         targets: parsed.targets,
          public_dir: public_dir
        }}
+    end
+  end
+
+  @doc false
+  @spec validate(keyword()) :: :ok | {:error, Error.t()}
+  def validate(config) do
+    case parse(config) do
+      {:ok, _parsed} -> :ok
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
+
+  defp parse(config) do
+    with :ok <- keyword(config, "Rekindle configuration"),
+         :ok <- unique_keys(config, "Rekindle configuration"),
+         :ok <- known_keys(config, @config_keys, "Rekindle configuration"),
+         {:ok, integration} <- integration(config),
+         {:ok, targets} <- targets(config),
+         {:ok, public_dir} <- public_dir(config) do
+      {:ok, %{integration: integration, targets: targets, public_dir: public_dir}}
+    end
+  end
+
+  defp public_dir(config) do
+    case Keyword.get(config, :public_dir, "priv/static") do
+      value when is_binary(value) ->
+        if Path.type(value) == :relative,
+          do: {:ok, value},
+          else: error(:invalid_path, "path must be project-relative: #{inspect(value)}")
+
+      value ->
+        error(
+          :invalid_path,
+          "expected :public_dir to be a project-relative path, got: #{inspect(value)}"
+        )
     end
   end
 

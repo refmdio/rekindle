@@ -55,17 +55,23 @@ defmodule Rekindle.IntegrationsTest do
     assert slint_host =~ ~s(id="canvas")
   end
 
-  test "generated clients compile for Web and desktop" do
+  test "generated clients compile for every target selection" do
     for name <- Integration.names() do
-      root = tmp_dir(name)
-      write(root, Integration.render(name, [:web, :desktop]))
-      dependency_names = cargo_dependency_names!(root)
+      for targets <- [[:web], [:desktop], [:web, :desktop]] do
+        root = tmp_dir("#{name}-#{Enum.join(targets, "-")}")
+        write(root, Integration.render(name, targets))
+        dependency_names = cargo_dependency_names!(root)
 
-      assert Integration.dependency(name) in dependency_names
-      refute Enum.any?(dependency_names, &String.starts_with?(&1, "rekindle"))
-      cargo_fmt!(root)
-      cargo_check!(root, "web", "wasm32-unknown-unknown")
-      cargo_check!(root, "desktop", "x86_64-unknown-linux-gnu")
+        assert Integration.dependency(name) in dependency_names
+        refute Enum.any?(dependency_names, &String.starts_with?(&1, "rekindle"))
+        cargo_fmt!(root)
+
+        if :web in targets,
+          do: cargo_check!(root, "web", "wasm32-unknown-unknown")
+
+        if :desktop in targets,
+          do: cargo_check!(root, "desktop", "x86_64-unknown-linux-gnu")
+      end
     end
   end
 

@@ -115,6 +115,18 @@ defmodule Rekindle.InstallTest do
     assert content(rejected, "client/src/lib.rs") == "pub struct Existing;\n"
   end
 
+  test "does not retain an unselected standard binary during generation" do
+    original =
+      project(%{
+        "client/src/bin/desktop.rs" => "fn main() {}\n"
+      })
+
+    rejected = install(original, targets: ["web"])
+
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "will not overwrite"))
+    assert changed_contents(rejected) == changed_contents(original)
+  end
+
   test "rejects invalid selections before changing the project" do
     original = project()
 
@@ -191,6 +203,97 @@ defmodule Rekindle.InstallTest do
     end
   end
 
+  test "validates target-specific dependencies for each selected target" do
+    original =
+      existing_client(:egui, [:web])
+      |> update_content("client/Cargo.toml", fn manifest ->
+        String.replace(
+          manifest,
+          ~r/\n\[target\.'cfg\(target_arch = "wasm32"\)'\.dependencies\].*?(?=\n\[\[bin\]\])/s,
+          ""
+        )
+      end)
+
+    rejected = install(original, integration: "egui", targets: ["web"])
+
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "dependency for web"))
+    assert changed_contents(rejected) == changed_contents(original)
+  end
+
+  test "rejects malformed Cargo target tables without raising" do
+    original =
+      existing_client(:gpui, [:web])
+      |> update_content("client/Cargo.toml", fn manifest ->
+        manifest =
+          String.replace(
+            manifest,
+            ~r/\n\[target\.'cfg\(target_arch = "wasm32"\)'\.dependencies\].*?(?=\n\[\[bin\]\])/s,
+            ""
+          )
+
+        "target = \"invalid\"\n\n" <> manifest
+      end)
+
+    rejected = install(original, integration: "gpui", targets: ["web"])
+
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "target section"))
+    assert changed_contents(rejected) == changed_contents(original)
+  end
+
+  test "requires selected binaries to be discoverable by Cargo" do
+    disabled =
+      existing_client(:slint, [:web])
+      |> update_content("client/Cargo.toml", fn manifest ->
+        manifest
+        |> String.replace("[package]", "[package]\nautobins = false")
+        |> String.replace(~r/\n\[\[bin\]\].*?required-features = \["web"\]\n/s, "\n")
+      end)
+
+    rejected = install(disabled, integration: "slint", targets: ["web"])
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "does not define the web binary"))
+
+    explicit =
+      update_content(disabled, "client/Cargo.toml", fn manifest ->
+        manifest <>
+          """
+
+          [[bin]]
+          name = "web"
+          path = "src/bin/web.rs"
+          """
+      end)
+
+    assert install(explicit, integration: "slint", targets: ["web"]).issues == []
+  end
+
+  test "rejects invalid existing configuration before staging changes" do
+    installed = install(project(), integration: "egui", targets: ["web"])
+
+    invalid_configurations = [
+      update_content(installed, "config/config.exs", fn config ->
+        String.replace(
+          config,
+          ~s(web: [features: ["web"]]),
+          ~s(web: [features: :invalid])
+        )
+      end),
+      update_content(installed, "config/config.exs", fn config ->
+        String.replace(
+          config,
+          ~s(web: [features: ["web"]]),
+          ~s(web: [features: ["web"]], web: [])
+        )
+      end)
+    ]
+
+    for invalid <- invalid_configurations do
+      rejected = install(invalid)
+
+      assert Enum.any?(rejected.issues, &String.contains?(&1, "not a valid static selection"))
+      assert changed_contents(rejected) == changed_contents(invalid)
+    end
+  end
+
   test "adoption preserves custom Cargo target configuration and ignore policy" do
     original =
       existing_client(:egui, [:desktop], %{
@@ -208,6 +311,35 @@ defmodule Rekindle.InstallTest do
     assert client_contents(adopted) == before
     assert "/custom-target/" in ignore_lines(adopted)
     refute "/client/target/" in ignore_lines(adopted)
+  end
+
+  test "ignore additions preserve application-owned grouping and comments" do
+    original =
+      project(%{
+        ".gitignore" => """
+        # Elixir
+        /_build/
+
+        # Editor
+        /.lexical/
+        """
+      })
+
+    installed = install(original, integration: "egui", targets: ["web"])
+
+    assert content(installed, ".gitignore") ==
+             """
+             # Elixir
+             /_build/
+
+             # Editor
+             /.lexical/
+             /.rekindle/
+             /client/target/
+             /priv/static/rekindle/
+             """
+
+    assert content(install(installed), ".gitignore") == content(installed, ".gitignore")
   end
 
   test "rekindle.dev delegates arguments to phx.server" do

@@ -3,10 +3,10 @@ if Code.ensure_loaded?(Igniter) do
     @moduledoc false
 
     alias Igniter.Code.{Common, Function}
-    alias Igniter.Project.{Application, Config, TaskAliases}
-    alias Rekindle.Integration
+    alias Igniter.Project.{Application, TaskAliases}
+    alias Igniter.Project.Config, as: ProjectConfig
+    alias Rekindle.{Config, Integration}
 
-    @integrations Integration.names()
     @targets [:web, :desktop]
 
     @spec run(Igniter.t(), keyword()) :: Igniter.t()
@@ -87,12 +87,9 @@ if Code.ensure_loaded?(Igniter) do
         {:ok, zipper} ->
           with {:ok, zipper} <- Function.move_to_nth_argument(zipper, 2),
                {:ok, config} <- Common.expand_literal(zipper),
-               true <- Keyword.keyword?(config),
-               integration when integration in @integrations <- Keyword.get(config, :integration),
-               targets when is_list(targets) <- Keyword.get(config, :targets),
-               true <- Keyword.keyword?(targets),
-               true <- Keyword.keys(targets) != [],
-               true <- Enum.all?(Keyword.keys(targets), &(&1 in @targets)) do
+               :ok <- validate_existing_config(config),
+               integration <- Keyword.fetch!(config, :integration),
+               targets <- Keyword.fetch!(config, :targets) do
             {:ok,
              %{
                integration: integration,
@@ -101,6 +98,13 @@ if Code.ensure_loaded?(Igniter) do
           else
             _ -> {:error, "existing Rekindle configuration is not a valid static selection"}
           end
+      end
+    end
+
+    defp validate_existing_config(config) do
+      case Config.validate(config) do
+        :ok -> :ok
+        {:error, _error} -> false
       end
     end
 
@@ -144,9 +148,13 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp validate_client(igniter, selection, :generate) do
-      selection.integration
-      |> Integration.render(selection.targets)
-      |> Map.keys()
+      generated_paths =
+        selection.integration
+        |> Integration.render(selection.targets)
+        |> Map.keys()
+
+      (generated_paths ++ ["src/bin/web.rs", "src/bin/desktop.rs"])
+      |> Enum.uniq()
       |> Enum.find(&Igniter.exists?(igniter, Path.join("client", &1)))
       |> case do
         nil -> :ok
@@ -158,7 +166,9 @@ if Code.ensure_loaded?(Igniter) do
 
     defp validate_client(igniter, selection, :adopt) do
       with {:ok, manifest} <- read_manifest(igniter),
-           :ok <- direct_dependency(manifest, selection.integration),
+           :ok <- package(manifest),
+           :ok <- direct_dependencies(manifest, selection.integration, selection.targets),
+           :ok <- cargo_targets(manifest, selection.targets),
            :ok <- target_entries(igniter, selection.targets) do
         :ok
       end
@@ -180,10 +190,24 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp direct_dependency(manifest, selected) do
+    defp package(%{"package" => %{"name" => name}}) when is_binary(name) and name != "", do: :ok
+    defp package(_manifest), do: {:error, "client/Cargo.toml package requires a non-empty name"}
+
+    defp direct_dependencies(manifest, selected, targets) do
+      with :ok <- target_table(manifest) do
+        Enum.reduce_while(targets, :ok, fn target, :ok ->
+          case direct_dependency(manifest, selected, target) do
+            :ok -> {:cont, :ok}
+            {:error, message} -> {:halt, {:error, message}}
+          end
+        end)
+      end
+    end
+
+    defp direct_dependency(manifest, selected, target) do
       integrations =
         manifest
-        |> dependency_tables()
+        |> dependency_tables(target)
         |> Enum.flat_map(fn dependencies ->
           Enum.flat_map(dependencies, fn {name, requirement} ->
             package =
@@ -205,7 +229,7 @@ if Code.ensure_loaded?(Igniter) do
 
         [] ->
           {:error,
-           "client/Cargo.toml has no direct #{Integration.dependency(selected)} dependency"}
+           "client/Cargo.toml has no direct #{Integration.dependency(selected)} dependency for #{target}"}
 
         [found] ->
           {:error,
@@ -217,7 +241,12 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp dependency_tables(manifest) do
+    defp target_table(%{"target" => target}) when not is_map(target),
+      do: {:error, "client/Cargo.toml target section must contain target tables"}
+
+    defp target_table(_manifest), do: :ok
+
+    defp dependency_tables(manifest, target) do
       root =
         case manifest["dependencies"] do
           dependencies when is_map(dependencies) -> [dependencies]
@@ -228,14 +257,70 @@ if Code.ensure_loaded?(Igniter) do
         manifest
         |> Map.get("target", %{})
         |> Enum.flat_map(fn
-          {_selector, %{"dependencies" => dependencies}} when is_map(dependencies) ->
-            [dependencies]
+          {selector, %{"dependencies" => dependencies}}
+          when is_map(dependencies) and is_binary(selector) ->
+            if selector_applies?(selector, target), do: [dependencies], else: []
 
-          _ ->
+          {_selector, %{"dependencies" => _dependencies}} ->
+            []
+
+          {_selector, _table} ->
             []
         end)
 
       root ++ target
+    end
+
+    defp selector_applies?("wasm32-unknown-unknown", :web), do: true
+    defp selector_applies?("wasm32-unknown-unknown", :desktop), do: false
+
+    defp selector_applies?(selector, target) do
+      compact = String.replace(selector, ~r/\s+/, "")
+
+      wasm =
+        String.contains?(compact, ~s(target_arch="wasm32")) or
+          String.contains?(compact, ~s(target_family="wasm"))
+
+      negated = String.starts_with?(compact, "cfg(not(")
+
+      case {target, wasm, negated} do
+        {:web, true, false} -> true
+        {:desktop, true, true} -> true
+        _ -> false
+      end
+    end
+
+    defp cargo_targets(manifest, targets) do
+      package = Map.fetch!(manifest, "package")
+
+      case Map.get(package, "autobins", true) do
+        value when is_boolean(value) ->
+          Enum.reduce_while(targets, :ok, fn target, :ok ->
+            if value or explicit_bin?(manifest, target) do
+              {:cont, :ok}
+            else
+              {:halt,
+               {:error,
+                "client/Cargo.toml does not define the #{target} binary while package.autobins is false"}}
+            end
+          end)
+
+        _value ->
+          {:error, "client/Cargo.toml package.autobins must be a boolean"}
+      end
+    end
+
+    defp explicit_bin?(manifest, target) do
+      expected_name = Atom.to_string(target)
+      expected_path = "src/bin/#{target}.rs"
+
+      manifest
+      |> Map.get("bin", [])
+      |> List.wrap()
+      |> Enum.any?(fn
+        %{"name" => ^expected_name, "path" => ^expected_path} -> true
+        _bin -> false
+      end)
     end
 
     defp target_entries(igniter, targets) do
@@ -279,7 +364,7 @@ if Code.ensure_loaded?(Igniter) do
           {target, [features: [Atom.to_string(target)]]}
         end)
 
-      Config.configure_new(
+      ProjectConfig.configure_new(
         igniter,
         "config.exs",
         app,
@@ -311,8 +396,19 @@ if Code.ensure_loaded?(Igniter) do
 
       Igniter.create_or_update_file(igniter, ".gitignore", "", fn source ->
         content = Rewrite.Source.get(source, :content)
-        lines = String.split(content, "\n", trim: true)
-        updated = (lines ++ entries) |> Enum.uniq() |> Enum.join("\n") |> Kernel.<>("\n")
+        existing = MapSet.new(String.split(content, "\n"))
+        missing = Enum.reject(entries, &MapSet.member?(existing, &1))
+
+        updated =
+          case missing do
+            [] ->
+              content
+
+            missing ->
+              separator = if content == "" or String.ends_with?(content, "\n"), do: "", else: "\n"
+              content <> separator <> Enum.join(missing, "\n") <> "\n"
+          end
+
         Rewrite.Source.update(source, :content, updated)
       end)
     end

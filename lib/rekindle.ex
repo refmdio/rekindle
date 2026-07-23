@@ -1,9 +1,21 @@
 defmodule Rekindle do
+  use Supervisor
+
   @moduledoc """
   Mix-first tooling for Rust UI applications in Elixir and Phoenix projects.
   """
 
   alias Rekindle.Config
+
+  @doc false
+  @spec start_link(keyword()) :: Supervisor.on_start()
+  def start_link(options) do
+    otp_app = Keyword.fetch!(options, :otp_app)
+    Supervisor.start_link(__MODULE__, otp_app)
+  end
+
+  @impl Supervisor
+  def init(_otp_app), do: Supervisor.init([], strategy: :one_for_one)
 
   @doc """
   Builds artifacts for an enabled target.
