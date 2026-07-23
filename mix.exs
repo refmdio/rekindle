@@ -24,7 +24,8 @@ defmodule Rekindle.MixProject do
 
   defp deps do
     [
-      {:jason, "~> 1.4"}
+      {:jason, "~> 1.4"},
+      {:igniter, "~> 0.8", optional: true}
     ]
   end
 
