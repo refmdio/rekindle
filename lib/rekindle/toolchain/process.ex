@@ -139,7 +139,19 @@ defmodule Rekindle.Toolchain.Process do
         :ok
 
       _ ->
-        signal_process(os_pid, name, tools)
+        signal_group_members(os_pid, name, tools)
+        :ok
+    end
+  end
+
+  defp signal_group_members(group_pid, name, tools) do
+    case System.cmd(tools.pgrep, ["-g", Integer.to_string(group_pid)], stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> String.split(~r/\s+/, trim: true)
+        |> Enum.each(fn pid -> signal_process(String.to_integer(pid), name, tools) end)
+
+      _ ->
         :ok
     end
   end
@@ -188,15 +200,52 @@ defmodule Rekindle.Toolchain.Process do
   end
 
   defp process_tools do
-    Enum.reduce_while([:setsid, :pkill, :pgrep, :kill], {:ok, %{}}, fn name, {:ok, tools} ->
-      case System.find_executable(Atom.to_string(name)) do
-        nil ->
-          error = RuntimeError.exception("#{name} executable was not found")
-          {:halt, {:error, {:start, error}}}
+    with {:ok, tools} <-
+           Enum.reduce_while(
+             [:setsid, :pkill, :pgrep, :kill],
+             {:ok, %{}},
+             fn name, {:ok, tools} ->
+               case System.find_executable(Atom.to_string(name)) do
+                 nil ->
+                   error = RuntimeError.exception("#{name} executable was not found")
+                   {:halt, {:error, {:start, error}}}
 
-        path ->
-          {:cont, {:ok, Map.put(tools, name, path)}}
-      end
-    end)
+                 path ->
+                   {:cont, {:ok, Map.put(tools, name, path)}}
+               end
+             end
+           ),
+         :ok <- verify_process_tools(tools) do
+      {:ok, tools}
+    end
+  end
+
+  defp verify_process_tools(tools) do
+    with {:ok, group_pid} <- current_group_pid(),
+         {"", 0} <-
+           System.cmd(tools.pkill, ["-0", "-g", Integer.to_string(group_pid)],
+             stderr_to_stdout: true
+           ),
+         {_output, 0} <-
+           System.cmd(tools.pgrep, ["-g", Integer.to_string(group_pid)], stderr_to_stdout: true),
+         {"", 0} <-
+           System.cmd(tools.kill, ["-0", System.pid()], stderr_to_stdout: true) do
+      :ok
+    else
+      _ ->
+        error = RuntimeError.exception("process group controls are not operational")
+        {:error, {:start, error}}
+    end
+  end
+
+  defp current_group_pid do
+    with {:ok, stat} <- File.read("/proc/self/stat"),
+         [_process, fields] <- String.split(stat, ") ", parts: 2),
+         [_state, _parent, group | _rest] <- String.split(fields),
+         {group_pid, ""} <- Integer.parse(group) do
+      {:ok, group_pid}
+    else
+      _ -> :error
+    end
   end
 end
