@@ -603,7 +603,7 @@ defmodule Rekindle.ConfigTest do
                  web_dev()
                )
 
-      assert Enum.any?(errors, &(&1.code in [:path_invalid, :path_overlap]))
+      assert Enum.any?(errors, &(&1.code in [:invalid_value, :conflict]))
     end
 
     root = Path.join(System.tmp_dir!(), "rekindle-config-#{System.unique_integer([:positive])}")
@@ -1175,6 +1175,18 @@ defmodule Rekindle.ConfigTest do
 
   defp assert_error(result, code) do
     assert {:error, errors} = result
-    assert Enum.any?(errors, &(&1.code == code)), "expected #{code}, got: #{inspect(errors)}"
+
+    expected =
+      case code do
+        :config_missing -> :missing_key
+        :target_undeclared -> :missing_key
+        :path_overlap -> :conflict
+        :config_invalid -> :invalid_value
+        :path_invalid -> :invalid_value
+        value -> value
+      end
+
+    assert Enum.any?(errors, &(&1.code == expected)),
+           "expected #{expected}, got: #{inspect(errors)}"
   end
 end

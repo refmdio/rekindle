@@ -16,14 +16,22 @@ defmodule Rekindle.TargetBackend do
     ExternalPlan
   }
 
+  alias Rekindle.TargetBackend.CallbackCoordinator
+
   @id_pattern ~r/\A[a-z][a-z0-9_.-]{0,127}\z/
   @max_plan_entries 1_024
   @max_plan_bytes 1_048_576
   @max_plan_path_bytes 4_096
-  @max_config_errors 128
-  @max_config_error_path 128
+  @max_config_errors 256
   @max_supplemental_diagnostics 1_024
   @required_callbacks [backend_id: 0, backend_version: 0, validate: 2, plan: 2, finalize: 3]
+  @config_diagnostic_codes %{
+    invalid_type: :backend_invalid_type,
+    invalid_value: :backend_invalid_value,
+    unknown_key: :backend_unknown_key,
+    missing_key: :backend_missing_key,
+    conflict: :backend_conflict
+  }
 
   @callback backend_id() :: String.t()
   @callback backend_version() :: String.t()
@@ -52,8 +60,9 @@ defmodule Rekindle.TargetBackend do
   def admit(module, target, options)
       when is_atom(module) and target in [:web, :desktop] do
     with :ok <- ensure_backend(module),
-         {:ok, backend_id} <- stable_identity(module, :backend_id, &valid_id?/1),
-         {:ok, backend_version} <- stable_identity(module, :backend_version, &valid_version?/1),
+         {:ok, backend_id} <- stable_identity(module, :backend_id, target, &valid_id?/1),
+         {:ok, backend_version} <-
+           stable_identity(module, :backend_version, target, &valid_version?/1),
          :ok <- ensure_canonical_input(options),
          {:ok, normalized} <- invoke_validate(module, target, options),
          :ok <- ensure_canonical_output(normalized),
@@ -75,7 +84,7 @@ defmodule Rekindle.TargetBackend do
   def admit(_module, _target, _options) do
     {:error,
      [
-       ConfigError.new(
+       ConfigError.from_internal(
          [:backend, :module],
          :config_invalid,
          "backend module must be an existing atom and target must be web or desktop"
@@ -137,6 +146,73 @@ defmodule Rekindle.TargetBackend do
   def validate_finalize_result(_result),
     do: {:error, error([:backend, :finalize], "finalize/3 returned an invalid union")}
 
+  @doc false
+  @spec invoke_plan(module(), BackendContext.t(), CanonicalValue.t()) ::
+          {:ok, ExternalPlan.t()} | {:error, Rekindle.Failure.t()}
+  def invoke_plan(module, %BackendContext{target: target} = context, options) do
+    with {:ok, result} <- CallbackCoordinator.invoke(module, :plan, [context, options], target) do
+      case validate_plan_result(result) do
+        {:ok, %ExternalPlan{} = plan} -> {:ok, plan}
+        {:error, %Rekindle.Failure{target: ^target} = failure} -> {:error, failure}
+        {:error, %Rekindle.Failure{}} -> CallbackCoordinator.invalid_return(:plan, target)
+        {:error, %ConfigError{}} -> CallbackCoordinator.invalid_return(:plan, target)
+      end
+    end
+  end
+
+  @doc false
+  @spec invoke_finalize(module(), BackendContext.t(), CanonicalValue.t(), ExecutionResult.t()) ::
+          {:ok, ExternalArtifact.t()} | {:error, Rekindle.Failure.t()}
+  def invoke_finalize(module, %BackendContext{target: target} = context, options, result) do
+    with {:ok, returned} <-
+           CallbackCoordinator.invoke(module, :finalize, [context, options, result], target) do
+      case validate_finalize_result(returned) do
+        {:ok, %ExternalArtifact{} = artifact} -> {:ok, artifact}
+        {:error, %Rekindle.Failure{target: ^target} = failure} -> {:error, failure}
+        {:error, %Rekindle.Failure{}} -> CallbackCoordinator.invalid_return(:finalize, target)
+        {:error, %ConfigError{}} -> CallbackCoordinator.invalid_return(:finalize, target)
+      end
+    end
+  end
+
+  @doc false
+  @spec configuration_failure(Rekindle.target(), term()) :: Rekindle.Failure.t()
+  def configuration_failure(target, errors) when target in [:web, :desktop] do
+    if valid_error_list?(errors) do
+      diagnostics =
+        Enum.map(errors, fn error ->
+          {:ok, diagnostic} =
+            Diagnostic.new(
+              target: target,
+              stage: :configuration,
+              severity: :error,
+              code: Map.fetch!(@config_diagnostic_codes, error.code),
+              message: error.message
+            )
+
+          diagnostic
+        end)
+
+      Rekindle.Failure.new!(
+        target: target,
+        stage: :configuration,
+        code: :config_invalid,
+        message: "extension configuration is invalid",
+        diagnostics: diagnostics,
+        retryable?: false
+      )
+    else
+      Rekindle.Failure.new!(
+        target: target,
+        stage: :internal,
+        code: :contract_violation,
+        message: "extension configuration error contract violation",
+        diagnostics: [],
+        retryable?: false
+      )
+    end
+  end
+
   defp ensure_backend(module) do
     case Code.ensure_loaded(module) do
       {:module, ^module} ->
@@ -156,50 +232,62 @@ defmodule Rekindle.TargetBackend do
     end
   end
 
-  defp stable_identity(module, callback, validator) do
-    first = apply(module, callback, [])
-    second = apply(module, callback, [])
+  defp stable_identity(module, callback, target, validator) do
+    with {:ok, first} <- CallbackCoordinator.invoke(module, callback, [], target),
+         {:ok, second} <- CallbackCoordinator.invoke(module, callback, [], target) do
+      cond do
+        first != second ->
+          {:error,
+           error([:backend, callback], "backend identity callback changed during admission")}
 
-    cond do
-      first != second ->
-        {:error,
-         error([:backend, callback], "backend identity callback changed during admission")}
+        not validator.(first) ->
+          {:error, error([:backend, callback], "backend identity has an invalid format")}
 
-      not validator.(first) ->
-        {:error, error([:backend, callback], "backend identity has an invalid format")}
-
-      true ->
-        {:ok, first}
+        true ->
+          {:ok, first}
+      end
+    else
+      {:error, %Rekindle.Failure{} = failure} ->
+        {:error, callback_error(callback, failure)}
     end
-  rescue
-    _exception -> {:error, error([:backend, callback], "backend identity callback failed")}
-  catch
-    _kind, _reason -> {:error, error([:backend, callback], "backend identity callback failed")}
   end
 
   defp invoke_validate(module, target, options) do
-    case module.validate(target, options) do
-      {:ok, normalized} -> {:ok, normalized}
-      {:error, errors} when is_list(errors) -> validate_error_arm(errors)
-      _other -> {:error, error([:backend, :options], "validate/2 returned an invalid result")}
+    case CallbackCoordinator.invoke(module, :validate, [target, options], target) do
+      {:ok, {:ok, normalized}} ->
+        {:ok, normalized}
+
+      {:ok, {:error, errors}} when is_list(errors) ->
+        validate_error_arm(errors)
+
+      {:ok, _other} ->
+        {:error, error([:backend, :options], "validate/2 returned an invalid result")}
+
+      {:error, %Rekindle.Failure{} = failure} ->
+        {:error, callback_error(:validate, failure)}
     end
-  rescue
-    _exception -> {:error, error([:backend, :options], "validate/2 failed")}
-  catch
-    _kind, _reason -> {:error, error([:backend, :options], "validate/2 failed")}
   end
+
+  defp callback_error(:validate, failure),
+    do: ConfigError.from_internal([:backend, :options], :config_invalid, failure.message)
+
+  defp callback_error(callback, failure),
+    do: ConfigError.from_internal([:backend, callback], :config_invalid, failure.message)
 
   defp ensure_canonical_input(value) do
     case CanonicalValue.validate(value) do
       :ok -> :ok
-      {:error, error} -> {:error, %{error | path: [:backend, :options | error.path]}}
+      {:error, error} -> {:error, %{error | path: ["backend", "options" | error.path]}}
     end
   end
 
   defp ensure_canonical_output(value) do
     case CanonicalValue.validate(value) do
-      :ok -> :ok
-      {:error, error} -> {:error, %{error | path: [:backend, :normalized_options | error.path]}}
+      :ok ->
+        :ok
+
+      {:error, error} ->
+        {:error, %{error | path: ["backend", "normalized_options" | error.path]}}
     end
   end
 
@@ -210,30 +298,32 @@ defmodule Rekindle.TargetBackend do
       Enum.all?(:binary.bin_to_list(value), &(&1 in 0x20..0x7E))
   end
 
-  defp error(path, message), do: ConfigError.new(path, :config_invalid, message)
+  defp error(path, message), do: ConfigError.from_internal(path, :config_invalid, message)
 
   defp validate_error_arm([%ConfigError{} | _] = errors) do
-    if proper_list_within?(errors, @max_config_errors) and
-         Enum.all?(errors, &valid_config_error?/1),
-       do: {:error, errors},
-       else: {:error, error([:backend, :options], "validate/2 returned invalid errors")}
+    if valid_error_list?(errors),
+      do: {:error, errors},
+      else: {:error, invalid_configuration_errors()}
   end
 
   defp validate_error_arm(_errors),
-    do: {:error, error([:backend, :options], "validate/2 returned invalid errors")}
+    do: {:error, invalid_configuration_errors()}
 
-  defp valid_config_error?(%ConfigError{} = value) do
-    value.contract_version == 1 and is_list(value.path) and
-      proper_list_within?(value.path, @max_config_error_path) and
-      Enum.all?(value.path, &valid_path_segment?/1) and is_atom(value.code) and
-      is_binary(value.message) and value.message != "" and String.valid?(value.message) and
-      byte_size(value.message) <= 8_192
+  defp invalid_configuration_errors do
+    error([:backend, :options], "extension configuration error contract violation")
   end
 
-  defp valid_config_error?(_value), do: false
+  defp error_key(%ConfigError{} = error) do
+    {CanonicalValue.encode!(error.path), Atom.to_string(error.code), error.message}
+  end
 
-  defp valid_path_segment?(value),
-    do: is_atom(value) or is_binary(value) or (is_integer(value) and value >= 0)
+  defp valid_error_list?([%ConfigError{} | _] = errors) do
+    proper_list_within?(errors, @max_config_errors) and
+      Enum.all?(errors, &ConfigError.valid?/1) and errors == Enum.sort_by(errors, &error_key/1) and
+      errors == Enum.uniq_by(errors, &error_key/1)
+  end
+
+  defp valid_error_list?(_errors), do: false
 
   defp validate_failure_arm(failure, callback) do
     case Rekindle.Failure.sanitize(failure) do

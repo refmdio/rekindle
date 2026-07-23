@@ -169,6 +169,6 @@ defmodule Rekindle.Diagnostic do
   end
 
   defp error(code, message) do
-    {:error, Rekindle.ConfigError.new([:diagnostic], code, message)}
+    {:error, Rekindle.ConfigError.from_internal([:diagnostic], code, message)}
   end
 end

@@ -221,8 +221,8 @@ defmodule Rekindle.SetupTaskIntegrationTest do
       Application.put_env(:rekindle, :redact_values, malformed)
       outcome = Mix.Tasks.Rekindle.Setup.run_outcome([])
       assert outcome.exit_status == 1
-      assert outcome.value |> elem(1) |> Map.fetch!(:code) == :config_missing
-      assert outcome.stderr =~ "config_missing"
+      assert outcome.value |> elem(1) |> Map.fetch!(:code) == :config_invalid
+      assert outcome.stderr =~ "config_invalid"
     end
   end
 
@@ -283,7 +283,7 @@ defmodule Rekindle.SetupTaskIntegrationTest do
       )
 
     assert expected_status == 1
-    assert expected_output =~ "config_missing"
+    assert expected_output =~ "config_invalid"
     refute expected_output =~ "** (Mix)"
 
     {json_output, json_status} =
@@ -450,8 +450,7 @@ defmodule Rekindle.SetupTaskIntegrationTest do
 
     @impl true
     def validate(_target, %{"custom_error" => true}) do
-      {:error,
-       [Rekindle.ConfigError.new([:backend, :options], :backend_specific, "custom error")]}
+      {:error, [Rekindle.ConfigError.new(["backend", "options"], :invalid_value, "custom error")]}
     end
 
     def validate(_target, %{"error_shape" => "improper_outer"}) do
@@ -459,15 +458,15 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     end
 
     def validate(_target, %{"error_shape" => "oversized_outer"}) do
-      {:error, List.duplicate(error([:backend]), 129)}
+      {:error, List.duplicate(error(["backend"]), 257)}
     end
 
     def validate(_target, %{"error_shape" => "improper_path"}) do
-      {:error, [error([:backend | :improper_tail])]}
+      {:error, [error(["backend" | :improper_tail])]}
     end
 
     def validate(_target, %{"error_shape" => "oversized_path"}) do
-      {:error, [error(List.duplicate(:backend, 129))]}
+      {:error, [error(List.duplicate("backend", 33))]}
     end
 
     def validate(_target, options), do: {:ok, options}
@@ -478,7 +477,12 @@ defmodule Rekindle.SetupTaskIntegrationTest do
     @impl true
     def finalize(_context, _options, _result), do: raise("not invoked")
 
-    defp error(path),
-      do: Rekindle.ConfigError.new(path, :config_invalid, "invalid backend configuration")
+    defp error(path) do
+      %Rekindle.ConfigError{
+        path: path,
+        code: :invalid_value,
+        message: "invalid backend configuration"
+      }
+    end
   end
 end

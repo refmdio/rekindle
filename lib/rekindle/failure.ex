@@ -263,5 +263,6 @@ defmodule Rekindle.Failure do
     end
   end
 
-  defp error(code, message), do: {:error, ConfigError.new([:failure], code, message)}
+  defp error(code, message),
+    do: {:error, ConfigError.from_internal([:failure], code, message)}
 end

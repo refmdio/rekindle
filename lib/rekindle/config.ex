@@ -1692,6 +1692,9 @@ defmodule Rekindle.Config do
 
   defp bounded_proper_list?(_value, _limit, _count), do: false
 
-  defp error(path, code, message), do: {:error, ConfigError.new(path, code, message)}
-  defp errors(path, code, message), do: {:error, [ConfigError.new(path, code, message)]}
+  defp error(path, code, message),
+    do: {:error, ConfigError.from_internal(path, code, message)}
+
+  defp errors(path, code, message),
+    do: {:error, [ConfigError.from_internal(path, code, message)]}
 end

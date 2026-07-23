@@ -80,5 +80,6 @@ defmodule Rekindle.Redactor do
       else: value |> binary_part(0, byte_size(value) - 1) |> trim_invalid_suffix()
   end
 
-  defp error(message), do: {:error, ConfigError.new([:public_text], :config_invalid, message)}
+  defp error(message),
+    do: {:error, ConfigError.from_internal([:public_text], :config_invalid, message)}
 end

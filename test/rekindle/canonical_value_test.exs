@@ -14,10 +14,10 @@ defmodule Rekindle.CanonicalValueTest do
     assert :ok = CanonicalValue.validate(-9_007_199_254_740_991)
     assert :ok = CanonicalValue.validate(9_007_199_254_740_991)
 
-    assert {:error, %{code: :integer_out_of_range}} =
+    assert {:error, %{code: :invalid_value}} =
              CanonicalValue.validate(-9_007_199_254_740_992)
 
-    assert {:error, %{code: :integer_out_of_range}} =
+    assert {:error, %{code: :invalid_value}} =
              CanonicalValue.validate(9_007_199_254_740_992)
   end
 
@@ -25,14 +25,14 @@ defmodule Rekindle.CanonicalValueTest do
     unsupported = [1.0, :value, {:tuple}, self(), fn -> :ok end, make_ref(), URI.parse("/")]
 
     for value <- unsupported do
-      assert {:error, %{code: :unsupported_value}} = CanonicalValue.validate(value)
+      assert {:error, %{code: :invalid_type}} = CanonicalValue.validate(value)
     end
   end
 
   test "requires string NFC map keys and reports the nested path" do
-    assert {:error, %{code: :invalid_map_key, path: []}} = CanonicalValue.validate(%{atom: 1})
+    assert {:error, %{code: :invalid_type, path: []}} = CanonicalValue.validate(%{atom: 1})
 
-    assert {:error, %{code: :non_nfc_key, path: ["é"]}} =
+    assert {:error, %{code: :invalid_value, path: ["é"]}} =
              CanonicalValue.validate(%{"é" => 1})
 
     assert {:error, %{path: ["outer", 0]}} =
@@ -57,14 +57,14 @@ defmodule Rekindle.CanonicalValueTest do
         ] do
       assert {:error,
               %{
-                code: :unsupported_value,
+                code: :invalid_type,
                 path: ^path,
                 message: "list must be proper"
               }} = CanonicalValue.validate(value)
 
       refute CanonicalValue.valid?(value)
 
-      assert {:error, %{code: :unsupported_value, path: ^path}} =
+      assert {:error, %{code: :invalid_type, path: ^path}} =
                CanonicalValue.encode(value)
     end
   end

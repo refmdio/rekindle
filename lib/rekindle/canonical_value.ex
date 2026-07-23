@@ -156,6 +156,6 @@ defmodule Rekindle.CanonicalValue do
   defp proper_list?(_values), do: false
 
   defp error(path, code, message) do
-    {:error, ConfigError.new(path, code, message)}
+    {:error, ConfigError.from_internal(path, code, message)}
   end
 end

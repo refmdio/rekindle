@@ -64,8 +64,8 @@ defmodule Rekindle.TargetBackendTest do
        [
          %Rekindle.ConfigError{
            contract_version: 2,
-           path: [:backend],
-           code: :config_invalid,
+           path: ["backend"],
+           code: :invalid_value,
            message: "invalid"
          }
        ]}
@@ -84,22 +84,27 @@ defmodule Rekindle.TargetBackendTest do
     end
 
     def validate(_target, %{"case" => "oversized_outer"}) do
-      {:error, List.duplicate(error([:backend]), 129)}
+      {:error, List.duplicate(error(["backend"]), 257)}
     end
 
     def validate(_target, %{"case" => "improper_path"}) do
-      {:error, [error([:backend | :improper_tail])]}
+      {:error, [error(["backend" | :improper_tail])]}
     end
 
     def validate(_target, %{"case" => "oversized_path"}) do
-      {:error, [error(List.duplicate(:backend, 129))]}
+      {:error, [error(List.duplicate("backend", 33))]}
     end
 
     def plan(_context, _options), do: :ok
     def finalize(_context, _options, _result), do: :ok
 
-    defp error(path),
-      do: Rekindle.ConfigError.new(path, :config_invalid, "invalid backend configuration")
+    defp error(path) do
+      %Rekindle.ConfigError{
+        path: path,
+        code: :invalid_value,
+        message: "invalid backend configuration"
+      }
+    end
   end
 
   defmodule CanonicalOutputShapeBackend do
@@ -114,8 +119,32 @@ defmodule Rekindle.TargetBackendTest do
 
   defmodule VersionBackend do
     def backend_id, do: "version.backend"
-    def backend_version, do: Process.get({__MODULE__, :version}, "1")
+    def backend_version, do: :persistent_term.get({__MODULE__, :version}, "1")
     def validate(_target, options), do: {:ok, options}
+    def plan(_context, _options), do: :ok
+    def finalize(_context, _options, _result), do: :ok
+  end
+
+  defmodule ConfigErrorsBackend do
+    def backend_id, do: "config-errors.backend"
+    def backend_version, do: "1"
+
+    def validate(_target, %{"case" => kind}) do
+      first = Rekindle.ConfigError.new(["a"], :invalid_type, "first")
+      second = Rekindle.ConfigError.new(["b"], :conflict, "second")
+
+      errors =
+        case kind do
+          "valid" -> [first, second]
+          "empty" -> []
+          "unsorted" -> [second, first]
+          "duplicate" -> [first, first]
+          "oversized" -> List.duplicate(first, 257)
+        end
+
+      {:error, errors}
+    end
+
     def plan(_context, _options), do: :ok
     def finalize(_context, _options, _result), do: :ok
   end
@@ -135,7 +164,7 @@ defmodule Rekindle.TargetBackendTest do
   end
 
   test "rejects an unloaded module without converting text to an atom" do
-    assert {:error, [%ConfigError{path: [:backend, :module]}]} =
+    assert {:error, [%ConfigError{path: ["backend", "module"]}]} =
              TargetBackend.admit("Elixir.DoesNotExist", :web, %{})
   end
 
@@ -143,21 +172,21 @@ defmodule Rekindle.TargetBackendTest do
     assert {:error, [%ConfigError{message: message}]} = TargetBackend.admit(String, :web, %{})
     assert message =~ "missing callbacks"
 
-    assert {:error, [%ConfigError{path: [:backend, :backend_id]}]} =
+    assert {:error, [%ConfigError{path: ["backend", "backend_id"]}]} =
              TargetBackend.admit(InvalidIdentityBackend, :web, %{})
   end
 
   test "rejects backend-normalized values outside CanonicalValue" do
-    assert {:error, [%ConfigError{path: [:backend, :normalized_options]}]} =
+    assert {:error, [%ConfigError{path: ["backend", "normalized_options"]}]} =
              TargetBackend.admit(InvalidOptionsBackend, :web, %{})
 
-    assert {:error, [%ConfigError{path: [:backend, :options]}]} =
+    assert {:error, [%ConfigError{path: ["backend", "options"]}]} =
              TargetBackend.admit(InvalidValidateResultBackend, :web, %{})
 
-    assert {:error, [%ConfigError{path: [:backend, :options]}]} =
+    assert {:error, [%ConfigError{path: ["backend", "options"]}]} =
              TargetBackend.admit(EmptyValidateErrorsBackend, :web, %{})
 
-    assert {:error, [%ConfigError{path: [:backend, :options]}]} =
+    assert {:error, [%ConfigError{path: ["backend", "options"]}]} =
              TargetBackend.admit(InvalidValidateErrorsBackend, :web, %{})
   end
 
@@ -166,9 +195,9 @@ defmodule Rekindle.TargetBackendTest do
       assert {:error,
               [
                 %ConfigError{
-                  path: [:backend, :options],
-                  code: :config_invalid,
-                  message: "validate/2 returned invalid errors"
+                  path: ["backend", "options"],
+                  code: :invalid_value,
+                  message: "extension configuration error contract violation"
                 }
               ]} = TargetBackend.admit(ErrorShapeBackend, :web, %{"case" => shape})
     end
@@ -176,28 +205,28 @@ defmodule Rekindle.TargetBackendTest do
 
   test "rejects improper canonical input and callback output lists" do
     for {value, path} <- [
-          {[1 | :improper_tail], [:backend, :options]},
-          {%{"nested" => [1 | :improper_tail]}, [:backend, :options, "nested"]}
+          {[1 | :improper_tail], ["backend", "options"]},
+          {%{"nested" => [1 | :improper_tail]}, ["backend", "options", "nested"]}
         ] do
       assert {:error,
               [
                 %ConfigError{
                   path: ^path,
-                  code: :unsupported_value,
+                  code: :invalid_type,
                   message: "list must be proper"
                 }
               ]} = TargetBackend.admit(ValidBackend, :web, value)
     end
 
     for {shape, path} <- [
-          {"improper", [:backend, :normalized_options]},
-          {"nested", [:backend, :normalized_options, "nested"]}
+          {"improper", ["backend", "normalized_options"]},
+          {"nested", ["backend", "normalized_options", "nested"]}
         ] do
       assert {:error,
               [
                 %ConfigError{
                   path: ^path,
-                  code: :unsupported_value,
+                  code: :invalid_type,
                   message: "list must be proper"
                 }
               ]} =
@@ -211,10 +240,10 @@ defmodule Rekindle.TargetBackendTest do
   end
 
   test "admits only bounded control-free ASCII backend versions" do
-    on_exit(fn -> Process.delete({VersionBackend, :version}) end)
+    on_exit(fn -> :persistent_term.erase({VersionBackend, :version}) end)
 
     for version <- [" ", "1", "v1.2.3+build", String.duplicate("~", 128)] do
-      Process.put({VersionBackend, :version}, version)
+      :persistent_term.put({VersionBackend, :version}, version)
       assert {:ok, %{backend_version: ^version}} = TargetBackend.admit(VersionBackend, :web)
     end
 
@@ -228,9 +257,9 @@ defmodule Rekindle.TargetBackendTest do
           <<0x1F>>,
           <<0x7F>>
         ] do
-      Process.put({VersionBackend, :version}, version)
+      :persistent_term.put({VersionBackend, :version}, version)
 
-      assert {:error, [%ConfigError{path: [:backend, :backend_version]}]} =
+      assert {:error, [%ConfigError{path: ["backend", "backend_version"]}]} =
                TargetBackend.admit(VersionBackend, :web)
     end
   end
@@ -238,6 +267,48 @@ defmodule Rekindle.TargetBackendTest do
   test "publishes the exact behaviour callback surface" do
     assert TargetBackend.behaviour_info(:callbacks) |> Enum.sort() ==
              [backend_id: 0, backend_version: 0, finalize: 3, plan: 2, validate: 2]
+  end
+
+  test "admits only sorted unique backend configuration errors" do
+    first = ConfigError.new(["a"], :invalid_type, "first")
+    second = ConfigError.new(["b"], :conflict, "second")
+
+    assert {:error, [^first, ^second]} =
+             TargetBackend.admit(ConfigErrorsBackend, :web, %{"case" => "valid"})
+
+    for kind <- ~w[empty unsorted duplicate oversized] do
+      assert {:error,
+              [
+                %ConfigError{
+                  path: ["backend", "options"],
+                  code: :invalid_value,
+                  message: "extension configuration error contract violation"
+                }
+              ]} = TargetBackend.admit(ConfigErrorsBackend, :web, %{"case" => kind})
+    end
+  end
+
+  test "converts backend configuration errors to the exact public failure" do
+    errors = [
+      ConfigError.new(["a"], :invalid_type, "wrong type"),
+      ConfigError.new(["b"], :missing_key, "missing value")
+    ]
+
+    failure = TargetBackend.configuration_failure(:desktop, errors)
+
+    assert failure.code == :config_invalid
+    assert failure.stage == :configuration
+    assert failure.message == "extension configuration is invalid"
+
+    assert Enum.map(failure.diagnostics, & &1.code) ==
+             [:backend_invalid_type, :backend_missing_key]
+
+    assert Enum.map(failure.diagnostics, & &1.message) == ["wrong type", "missing value"]
+
+    invalid = TargetBackend.configuration_failure(:desktop, Enum.reverse(errors))
+    assert invalid.code == :contract_violation
+    assert invalid.diagnostics == []
+    assert invalid.message == "extension configuration error contract violation"
   end
 
   test "validates the exact plan and finalize return unions" do
@@ -327,7 +398,7 @@ defmodule Rekindle.TargetBackendTest do
 
     assert {:error, ^failure} = TargetBackend.validate_plan_result({:error, failure})
 
-    assert {:error, %ConfigError{path: [:backend, :plan]}} =
+    assert {:error, %ConfigError{path: ["backend", "plan"]}} =
              TargetBackend.validate_plan_result({:error, %{failure | contract_version: 2}})
 
     artifact = %ExternalArtifact{
@@ -351,7 +422,7 @@ defmodule Rekindle.TargetBackendTest do
     assert {:ok, ^artifact_with_diagnostic} =
              TargetBackend.validate_finalize_result({:ok, artifact_with_diagnostic})
 
-    assert {:error, %ConfigError{path: [:backend, :finalize]}} =
+    assert {:error, %ConfigError{path: ["backend", "finalize"]}} =
              TargetBackend.validate_finalize_result({
                :ok,
                %{artifact | supplemental_diagnostics: ["not a diagnostic"]}
@@ -359,7 +430,7 @@ defmodule Rekindle.TargetBackendTest do
 
     assert {:error, ^failure} = TargetBackend.validate_finalize_result({:error, failure})
 
-    assert {:error, %ConfigError{path: [:backend, :finalize]}} =
+    assert {:error, %ConfigError{path: ["backend", "finalize"]}} =
              TargetBackend.validate_finalize_result({:error, %{failure | contract_version: 2}})
 
     assert {:error, %ConfigError{}} =
@@ -514,7 +585,7 @@ defmodule Rekindle.TargetBackendTest do
   end
 
   defp assert_finalize_diagnostic_error(diagnostics) do
-    assert {:error, %ConfigError{path: [:backend, :finalize]}} =
+    assert {:error, %ConfigError{path: ["backend", "finalize"]}} =
              TargetBackend.validate_finalize_result({:ok, artifact(diagnostics)})
   end
 end
