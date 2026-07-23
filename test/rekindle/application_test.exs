@@ -1,7 +1,7 @@
 defmodule Rekindle.ApplicationTest do
   use ExUnit.Case, async: false
 
-  alias Rekindle.RuntimeState
+  alias Rekindle.{Failure, RuntimeState}
 
   @otp_app :rekindle_lifecycle_test
 
@@ -104,13 +104,41 @@ defmodule Rekindle.ApplicationTest do
   test "fails before runtime ownership when configuration is invalid" do
     Application.put_env(@otp_app, :rekindle_build, schema: 2)
 
-    assert {:error, {:configuration, errors}} =
+    assert {:error,
+            %Failure{
+              target: nil,
+              stage: :configuration,
+              code: :config_invalid,
+              message: "Project configuration is invalid",
+              diagnostics: diagnostics,
+              retryable?: false
+            }} =
              Rekindle.ProjectSupervisor.start_link(
                otp_app: @otp_app,
                name: unique_name(:invalid)
              )
 
-    assert Enum.any?(errors, &(&1.code == :invalid_value))
+    assert Enum.any?(diagnostics, &(&1.code == :invalid_value))
+    assert :none = RuntimeState.snapshot(File.cwd!())
+  end
+
+  test "reports missing configuration through the same public failure boundary" do
+    Application.delete_env(@otp_app, :rekindle_build)
+
+    assert {:error,
+            %Failure{
+              target: nil,
+              stage: :configuration,
+              code: :config_missing,
+              message: "Project configuration is missing",
+              diagnostics: [%{code: :missing_key}],
+              retryable?: false
+            }} =
+             Rekindle.ProjectSupervisor.start_link(
+               otp_app: @otp_app,
+               name: unique_name(:missing)
+             )
+
     assert :none = RuntimeState.snapshot(File.cwd!())
   end
 
