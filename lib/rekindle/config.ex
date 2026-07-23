@@ -773,7 +773,7 @@ defmodule Rekindle.Config do
     if :web in targets and bounded_proper_list?(value) do
       with :ok <- nonempty(value, path ++ [:accepted_origins]),
            {:ok, normalized} <- normalize_origins(value, path),
-           :ok <- intersects_endpoint_policy(normalized, otp_app, endpoint, path) do
+           :ok <- origins_within_endpoint_policy(normalized, otp_app, endpoint, path) do
         {:ok, %{source: :explicit, origins: normalized}}
       else
         _ -> error(path ++ [:accepted_origins], :config_invalid, "accepted origins are invalid")
@@ -979,90 +979,19 @@ defmodule Rekindle.Config do
     )
   end
 
-  defp intersects_endpoint_policy(origins, otp_app, endpoint, path) do
-    with {:ok, endpoint_config} <- endpoint_config(otp_app, endpoint, path) do
-      intersects_policy(
-        origins,
-        Keyword.get(endpoint_config, :check_origin, true),
-        endpoint_config,
-        path
-      )
+  defp origins_within_endpoint_policy(origins, otp_app, endpoint, path) do
+    with {:ok, endpoint_config} <- endpoint_config(otp_app, endpoint, path),
+         {:ok, allowed} <- finite_endpoint_origins(endpoint_config, path) do
+      if Enum.all?(origins, &(&1 in allowed)),
+        do: :ok,
+        else:
+          error(
+            path ++ [:accepted_origins],
+            :config_invalid,
+            "accepted origins exceed endpoint policy"
+          )
     end
   end
-
-  defp intersects_policy(origins, policy, endpoint_config, path) do
-    cond do
-      policy == false ->
-        :ok
-
-      policy == true ->
-        with {:ok, endpoint_origin} <- endpoint_origin(endpoint_config, path),
-             {:ok, endpoint} <- normalize_origin_parts(endpoint_origin) do
-          if Enum.any?(origins, fn origin ->
-               match?(
-                 {:ok, %{host: host}} when host == endpoint.host,
-                 normalize_origin_parts(origin)
-               )
-             end),
-             do: :ok,
-             else:
-               error(
-                 path ++ [:accepted_origins],
-                 :config_invalid,
-                 "accepted origins do not intersect endpoint policy"
-               )
-        end
-
-      is_list(policy) and bounded_proper_list?(policy) ->
-        if policy != [] and Enum.all?(policy, &valid_origin_policy?/1) do
-          if Enum.any?(origins, fn origin -> Enum.any?(policy, &policy_allows?(&1, origin)) end),
-            do: :ok,
-            else:
-              error(
-                path ++ [:accepted_origins],
-                :config_invalid,
-                "accepted origins do not intersect endpoint policy"
-              )
-        else
-          endpoint_policy_error(path)
-        end
-
-      true ->
-        error(
-          path ++ [:accepted_origins],
-          :config_invalid,
-          "accepted origins do not intersect endpoint policy"
-        )
-    end
-  end
-
-  defp policy_allows?(pattern, origin) when is_binary(pattern) do
-    with {:ok, policy} <- normalize_origin_policy(pattern),
-         {:ok, origin} <- normalize_origin_parts(origin) do
-      scheme_matches? = is_nil(policy.scheme) or policy.scheme == origin.scheme
-
-      host_matches? =
-        case policy.host do
-          {:exact, host} ->
-            host == origin.host
-
-          {:wildcard, suffix} ->
-            origin.host == suffix or String.ends_with?(origin.host, "." <> suffix)
-        end
-
-      port_matches? = policy.port == :any or policy.port == origin.port
-      scheme_matches? and host_matches? and port_matches?
-    else
-      _ -> false
-    end
-  end
-
-  defp policy_allows?(_pattern, _origin), do: false
-
-  defp valid_origin_policy?(value) when is_binary(value),
-    do: match?({:ok, _policy}, normalize_origin_policy(value))
-
-  defp valid_origin_policy?(_value), do: false
 
   defp normalize_origin_parts(value) do
     with true <- valid_origin_text?(value),

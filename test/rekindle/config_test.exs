@@ -732,7 +732,7 @@ defmodule Rekindle.ConfigTest do
     )
   end
 
-  test "explicit accepted origins must intersect the endpoint policy" do
+  test "every explicit accepted origin must belong to a finite endpoint policy" do
     previous = Application.get_env(:demo_app, Endpoint)
     Application.put_env(:demo_app, Endpoint, check_origin: ["https://allowed.example"])
 
@@ -770,26 +770,41 @@ defmodule Rekindle.ConfigTest do
 
     Application.put_env(:demo_app, Endpoint, check_origin: ["//*.example.com"])
 
-    assert {:ok, wildcard_project} =
-             Config.normalize(:demo_app, web_build(),
-               schema: 1,
-               enabled: true,
-               targets: [:web],
-               endpoint: Endpoint,
-               accepted_origins: ["https://app.example.com"]
-             )
+    assert_error(
+      Config.normalize(:demo_app, web_build(),
+        schema: 1,
+        enabled: true,
+        targets: [:web],
+        endpoint: Endpoint,
+        accepted_origins: ["https://app.example.com"]
+      ),
+      :config_invalid
+    )
 
-    assert wildcard_project.dev.accepted_origins == %{
-             source: :explicit,
-             origins: ["https://app.example.com"]
-           }
+    Application.put_env(:demo_app, Endpoint,
+      check_origin: ["https://allowed.example", "https://other.example"]
+    )
 
-    assert {:ok, _} =
-             Config.normalize(
-               :demo_app,
-               web_build(),
-               Keyword.put(dev, :accepted_origins, ["https://example.com"])
-             )
+    assert_error(
+      Config.normalize(
+        :demo_app,
+        web_build(),
+        Keyword.put(dev, :accepted_origins, [
+          "https://allowed.example",
+          "https://blocked.example"
+        ])
+      ),
+      :config_invalid
+    )
+
+    for policy <- [false, &Function.identity/1, ["//example.com"], []] do
+      Application.put_env(:demo_app, Endpoint, check_origin: policy)
+
+      assert_error(
+        Config.normalize(:demo_app, web_build(), dev),
+        :config_invalid
+      )
+    end
 
     Application.put_env(:demo_app, Endpoint, check_origin: ["https://example.com:8443/"])
 
@@ -825,9 +840,19 @@ defmodule Rekindle.ConfigTest do
     )
   end
 
-  test "accepted origins are canonical HTTP authorities even when endpoint checks are disabled" do
+  test "accepted origins are canonical HTTP authorities under an exact endpoint policy" do
     previous = Application.get_env(:demo_app, Endpoint)
-    Application.put_env(:demo_app, Endpoint, check_origin: false)
+
+    accepted = [
+      "HTTPS://EXAMPLE.COM:443",
+      "http://example.com:80",
+      "https://example.com:8443",
+      "https://127.0.0.1:8443",
+      "https://[0:0:0:0:0:0:0:1]:443",
+      "http://[2001:0db8:0:0:0:0:0:1]:8080"
+    ]
+
+    Application.put_env(:demo_app, Endpoint, check_origin: accepted)
 
     on_exit(fn ->
       if previous,
@@ -840,14 +865,7 @@ defmodule Rekindle.ConfigTest do
       enabled: true,
       targets: [:web],
       endpoint: Endpoint,
-      accepted_origins: [
-        "HTTPS://EXAMPLE.COM:443",
-        "http://example.com:80",
-        "https://example.com:8443",
-        "https://127.0.0.1:8443",
-        "https://[0:0:0:0:0:0:0:1]:443",
-        "http://[2001:0db8:0:0:0:0:0:1]:8080"
-      ]
+      accepted_origins: accepted
     ]
 
     assert {:ok, project} = Config.normalize(:demo_app, web_build(), dev)
