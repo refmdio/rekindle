@@ -22,35 +22,68 @@ defmodule Rekindle.TargetBackendExecutorTest do
     @impl true
     def run_exec(_helper, spawn, _state, options) do
       :ok = Keyword.fetch!(options, :after_handshake).(self())
-      :ok = Rekindle.TargetBackendExecutorTest.ManifestWriter.write(spawn)
+      mode = Application.get_env(:rekindle_target_backend_executor_test, :mode, :valid)
 
-      stdout =
-        if Application.get_env(:rekindle_target_backend_executor_test, :mode) == :cargo_json do
-          Jason.encode!(%{
-            "reason" => "compiler-message",
-            "message" => %{
-              "level" => "warning",
-              "message" => "extension warning",
-              "rendered" => "warning: extension warning"
-            }
-          }) <> "\n"
-        else
-          ""
-        end
+      case mode do
+        lifecycle when lifecycle in [:timeout, :cancel] ->
+          notify_waiting(lifecycle)
 
-      {:ok,
-       %{
-         outcome: :exited,
-         code: 0,
-         signal: nil,
-         cleanup: :confirmed,
-         discarded_stdout: 0,
-         discarded_stderr: 0
-       }, stdout, ""}
+          receive do
+            :cancel -> terminal(0, :confirmed, "", "")
+          end
+
+        :helper_crash ->
+          raise "helper crashed"
+
+        :cleanup_unconfirmed ->
+          terminal(0, :uncertain, "", "")
+
+        :nonzero ->
+          :ok = Rekindle.TargetBackendExecutorTest.ManifestWriter.write(spawn)
+          terminal(17, :confirmed, "", "extension failed")
+
+        _ ->
+          :ok = Rekindle.TargetBackendExecutorTest.ManifestWriter.write(spawn)
+          terminal(0, :confirmed, stdout(mode), "")
+      end
     end
 
     @impl true
-    def cancel(_worker, _header), do: :ok
+    def cancel(worker, _header) when is_pid(worker) do
+      send(worker, :cancel)
+      :ok
+    end
+
+    defp terminal(code, cleanup, stdout, stderr) do
+      {:ok,
+       %{
+         outcome: :exited,
+         code: code,
+         signal: nil,
+         cleanup: cleanup,
+         discarded_stdout: 0,
+         discarded_stderr: 0
+       }, stdout, stderr}
+    end
+
+    defp stdout(:cargo_json) do
+      Jason.encode!(%{
+        "reason" => "compiler-message",
+        "message" => %{
+          "level" => "warning",
+          "message" => "extension warning",
+          "rendered" => "warning: extension warning"
+        }
+      }) <> "\n"
+    end
+
+    defp stdout(_mode), do: ""
+
+    defp notify_waiting(mode) do
+      if owner = Application.get_env(:rekindle_target_backend_executor_test, :owner) do
+        send(owner, {:adapter_waiting, mode, self()})
+      end
+    end
   end
 
   defmodule ManifestWriter do
@@ -260,22 +293,32 @@ defmodule Rekindle.TargetBackendExecutorTest do
          env_mode: :replace,
          env_set: env_set,
          diagnostic_mode: if(mode == :cargo_json, do: :cargo_json, else: :opaque),
-         timeout_ms: 5_000,
+         timeout_ms: if(mode == :timeout, do: 1_000, else: 5_000),
          expected_manifest: expected_manifest
        }}
     end
 
     @impl true
-    def finalize(context, _options, _execution) do
-      {:ok,
-       %ExternalArtifact{
-         manifest:
-           if(context.target == :web,
-             do: "rekindle-web-manifest-v2.json",
-             else: "rekindle-native-manifest-v2.json"
-           ),
-         supplemental_diagnostics: []
-       }}
+    def finalize(context, _options, execution) do
+      if execution.outcome == :exited and execution.exit_code == 0 do
+        {:ok,
+         %ExternalArtifact{
+           manifest:
+             if(context.target == :web,
+               do: "rekindle-web-manifest-v2.json",
+               else: "rekindle-native-manifest-v2.json"
+             ),
+           supplemental_diagnostics: []
+         }}
+      else
+        {:error,
+         Rekindle.Failure.new!(
+           target: context.target,
+           stage: :execution,
+           code: :cargo_failed,
+           message: "Extension command failed"
+         )}
+      end
     end
   end
 
@@ -298,10 +341,12 @@ defmodule Rekindle.TargetBackendExecutorTest do
     {:ok, desktop_admission} = TargetBackend.admit(Backend, :desktop, %{})
     {:ok, web_admission} = TargetBackend.admit(Backend, :web, %{})
     Application.put_env(@app, :mode, :valid)
+    Application.put_env(@app, :owner, self())
     Application.put_env(@app, :options_digest, desktop_admission.options_digest)
 
     on_exit(fn ->
       Application.delete_env(@app, :mode)
+      Application.delete_env(@app, :owner)
       Application.delete_env(@app, :options_digest)
       remove_tree(root)
     end)
@@ -391,6 +436,39 @@ defmodule Rekindle.TargetBackendExecutorTest do
     assert diagnostic.message == "extension warning"
   end
 
+  test "propagates a confirmed external timeout and removes every owned resource", state do
+    assert_failed_execution(state, :timeout, :build_timeout)
+    assert_receive {:adapter_waiting, :timeout, _worker}
+  end
+
+  test "propagates cancellation during runner shutdown and removes every owned resource", state do
+    baseline = QualifiedPath.authority_size()
+    Application.put_env(@app, :mode, :cancel)
+    task = Task.async(fn -> execute(state) end)
+    assert_receive {:adapter_waiting, :cancel, _worker}
+
+    assert {:ok, shutdown} = ProcessRunner.begin_shutdown(state.runner)
+    assert {:error, %{code: :cancelled}} = Task.await(task, 2_000)
+
+    if is_reference(shutdown) do
+      assert_receive {:rekindle_process_runner_shutdown, ^shutdown, :ok}, 1_000
+    end
+
+    assert_failed_resources(state, baseline)
+  end
+
+  test "converts a helper crash and removes every owned resource", state do
+    assert_failed_execution(state, :helper_crash, :io_failed)
+  end
+
+  test "preserves an uncertain cleanup failure and removes staging authority", state do
+    assert_failed_execution(state, :cleanup_unconfirmed, :cleanup_unconfirmed)
+  end
+
+  test "lets the backend convert a nonzero terminal without admitting an artifact", state do
+    assert_failed_execution(state, :nonzero, :cargo_failed)
+  end
+
   defp execute(state, target \\ :desktop, builder \\ nil) do
     builder = builder || fn staging -> context(state, staging, target) end
 
@@ -400,6 +478,23 @@ defmodule Rekindle.TargetBackendExecutorTest do
       helper: "/bin/true",
       process: process_policy()
     )
+  end
+
+  defp assert_failed_execution(state, mode, code) do
+    baseline = QualifiedPath.authority_size()
+    Application.put_env(@app, :mode, mode)
+    assert {:error, %{code: ^code}} = execute(state)
+    assert_failed_resources(state, baseline)
+  end
+
+  defp assert_failed_resources(state, authority_baseline) do
+    assert staging_empty?(state.cache)
+    assert :sys.get_state(state.runner).jobs == %{}
+    assert :none = ArtifactStore.current(state.store, :desktop)
+    assert QualifiedPath.authority_size() == authority_baseline
+
+    generations = Path.join([state.cache, "generations", "desktop"])
+    assert File.ls!(generations) == []
   end
 
   defp context(state, staging, target) do
