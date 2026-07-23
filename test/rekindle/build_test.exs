@@ -1,6 +1,8 @@
 defmodule Rekindle.BuildTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureIO
+
   setup do
     previous = Application.get_env(:rekindle_build_test, Rekindle)
 
@@ -77,5 +79,43 @@ defmodule Rekindle.BuildTest do
     assert result.profile == :release
     assert File.regular?(result.artifact)
     assert result.artifact =~ "/release/desktop"
+  end
+
+  test "Mix build renders bounded Rust diagnostics", %{root: root} do
+    File.cp_r!("test/fixtures/cargo_project", Path.join(root, "client"))
+
+    File.write!(
+      Path.join(root, "client/src/bin/desktop.rs"),
+      "fn main() { missing_function(); }"
+    )
+
+    previous = Application.get_env(:rekindle, Rekindle)
+
+    on_exit(fn ->
+      if previous do
+        Application.put_env(:rekindle, Rekindle, previous)
+      else
+        Application.delete_env(:rekindle, Rekindle)
+      end
+    end)
+
+    Application.put_env(:rekindle, Rekindle,
+      integration: :gpui,
+      targets: [desktop: []]
+    )
+
+    output =
+      File.cd!(root, fn ->
+        Mix.Task.reenable("rekindle.build")
+
+        capture_io(:stderr, fn ->
+          assert_raise Mix.Error, "cargo build failed with status 101", fn ->
+            Mix.Tasks.Rekindle.Build.run(["desktop"])
+          end
+        end)
+      end)
+
+    assert output =~ "missing_function"
+    assert byte_size(output) <= 65_000
   end
 end
