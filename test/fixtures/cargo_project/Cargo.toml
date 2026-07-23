@@ -3,6 +3,9 @@ name = "fixture_ui"
 version = "0.1.0"
 edition = "2024"
 
+[dependencies]
+gpui = { path = "gpui" }
+
 [[bin]]
 name = "web"
 path = "src/bin/web.rs"

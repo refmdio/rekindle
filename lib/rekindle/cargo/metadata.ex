@@ -11,7 +11,8 @@ defmodule Rekindle.Cargo.Metadata do
           id: String.t(),
           name: String.t(),
           manifest_path: Path.t(),
-          targets: [map()]
+          targets: [map()],
+          dependencies: [String.t()]
         }
 
   @type t :: %__MODULE__{
@@ -22,16 +23,17 @@ defmodule Rekindle.Cargo.Metadata do
 
   @spec load(Rekindle.Config.t(), keyword()) :: {:ok, t()} | {:error, Error.t()}
   def load(project, options \\ []) do
-    executable = Keyword.get(options, :cargo, System.find_executable("cargo") || "cargo")
+    executable = Rekindle.Toolchain.cargo_path(options)
 
-    arguments = [
-      "metadata",
-      "--format-version",
-      "1",
-      "--no-deps",
-      "--manifest-path",
-      Path.join(project.client_root, "Cargo.toml")
-    ]
+    arguments =
+      [
+        "metadata",
+        "--format-version",
+        "1",
+        "--no-deps",
+        "--manifest-path",
+        Path.join(project.client_root, "Cargo.toml")
+      ] ++ if(Keyword.get(options, :locked, false), do: ["--locked"], else: [])
 
     case Process.run(executable, arguments, process_options(project, options)) do
       {:ok, %{truncated?: true}} ->
@@ -87,7 +89,8 @@ defmodule Rekindle.Cargo.Metadata do
       id: value["id"],
       name: value["name"],
       manifest_path: value["manifest_path"],
-      targets: value["targets"]
+      targets: value["targets"],
+      dependencies: Enum.map(value["dependencies"], & &1["name"])
     }
   end
 

@@ -40,7 +40,9 @@ defmodule Rekindle.Cargo do
     end
   end
 
-  defp resolve(metadata, project, target) do
+  @spec resolve(Metadata.t(), Rekindle.Config.t(), Target.t()) ::
+          {:ok, Metadata.package(), String.t()} | {:error, Error.t()}
+  def resolve(metadata, project, target) do
     workspace_packages =
       Enum.filter(metadata.packages, &MapSet.member?(metadata.workspace_members, &1.id))
 
@@ -104,7 +106,7 @@ defmodule Rekindle.Cargo do
   end
 
   defp execute(project, target, profile, package, binary, options) do
-    executable = Keyword.get(options, :cargo, System.find_executable("cargo") || "cargo")
+    executable = Rekindle.Toolchain.cargo_path(options)
 
     arguments =
       [

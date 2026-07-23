@@ -8,6 +8,57 @@ defmodule Rekindle.Toolchain do
   @spec wasm_bindgen_version() :: String.t()
   def wasm_bindgen_version, do: @wasm_bindgen_version
 
+  @spec cargo_path(keyword()) :: Path.t()
+  def cargo_path(options \\ []) do
+    Keyword.get(options, :cargo) || System.find_executable("cargo") || "cargo"
+  end
+
+  @spec rustup_path(keyword()) :: Path.t()
+  def rustup_path(options \\ []) do
+    Keyword.get(options, :rustup) || System.find_executable("rustup") || "rustup"
+  end
+
+  @spec installed_rust_targets(keyword()) :: {:ok, [String.t()]} | {:error, Error.t()}
+  def installed_rust_targets(options \\ []) do
+    case Process.run(rustup_path(options), ["target", "list", "--installed"],
+           cd: Keyword.get(options, :cd, File.cwd!()),
+           timeout: Keyword.get(options, :timeout, 30_000),
+           output_limit: 64_000,
+           env: Keyword.get(options, :process_env, [])
+         ) do
+      {:ok, %{status: 0, output: output}} ->
+        {:ok, String.split(output, ~r/\s+/, trim: true)}
+
+      {:ok, result} ->
+        error(:rustup_failed, "rustup target list failed", output: result.output)
+
+      {:error, reason} ->
+        process_error(:rustup_failed, "rustup target list", reason)
+    end
+  end
+
+  @spec install_rust_target(String.t(), keyword()) :: :ok | {:error, Error.t()}
+  def install_rust_target(target, options \\ []) do
+    case Process.run(rustup_path(options), ["target", "add", target],
+           cd: Keyword.get(options, :cd, File.cwd!()),
+           timeout: Keyword.get(options, :timeout, 600_000),
+           output_limit: 8_000_000,
+           cancel_ref: Keyword.get(options, :cancel_ref),
+           env: Keyword.get(options, :process_env, [])
+         ) do
+      {:ok, %{status: 0}} ->
+        :ok
+
+      {:ok, result} ->
+        error(:rust_target_install_failed, "rustup target add #{target} failed",
+          output: result.output
+        )
+
+      {:error, reason} ->
+        process_error(:rust_target_install_failed, "rustup target add #{target}", reason)
+    end
+  end
+
   @spec wasm_bindgen_path(String.t(), map()) :: Path.t()
   def wasm_bindgen_path(version \\ @wasm_bindgen_version, environment \\ System.get_env()) do
     Path.join([
@@ -39,7 +90,7 @@ defmodule Rekindle.Toolchain do
     environment = Keyword.get(options, :env, System.get_env())
     path = wasm_bindgen_path(version, environment)
     root = path |> Path.dirname() |> Path.dirname()
-    cargo = Keyword.get(options, :cargo, System.find_executable("cargo") || "cargo")
+    cargo = cargo_path(options)
 
     arguments = [
       "install",
