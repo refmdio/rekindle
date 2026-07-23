@@ -156,16 +156,21 @@ defmodule Rekindle.BuildFacadeTest do
   end
 
   test "public APIs validate their closed arguments before dispatch" do
-    assert {:error, %{code: :config_invalid, stage: :configuration}} =
-             Rekindle.build(@otp_app, :web, mode: :other)
+    invalid_builds = [
+      {@otp_app, :web, [mode: :other]},
+      {@otp_app, :web, [mode: :dev, extra: true]},
+      {nil, :web, [mode: :dev]},
+      {@otp_app, :other, [mode: :dev]},
+      {@otp_app, :web, %{mode: :dev}}
+    ]
 
-    assert {:error, %{code: :config_invalid, stage: :configuration}} =
-             Rekindle.build(@otp_app, :web, mode: :dev, extra: true)
+    for {otp_app, target, options} <- invalid_builds do
+      assert_raise ArgumentError, fn -> Rekindle.build(otp_app, target, options) end
+    end
 
-    assert {:error, %{code: :config_invalid, stage: :configuration}} =
-             Rekindle.build(nil, :web, mode: :dev)
-
-    assert :none = Rekindle.current(@otp_app, :other)
+    for {otp_app, target} <- [{nil, :web}, {@otp_app, :other}, {"app", :desktop}] do
+      assert_raise ArgumentError, fn -> Rekindle.current(otp_app, target) end
+    end
   end
 
   defp loader(targets) do
