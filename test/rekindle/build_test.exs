@@ -83,10 +83,11 @@ defmodule Rekindle.BuildTest do
 
   test "Mix build renders bounded Rust diagnostics", %{root: root} do
     File.cp_r!("test/fixtures/cargo_project", Path.join(root, "client"))
+    oversized = String.duplicate("界", 30_000)
 
     File.write!(
       Path.join(root, "client/src/bin/desktop.rs"),
-      "fn main() { missing_function(); }"
+      "compile_error!(#{inspect(oversized)});"
     )
 
     previous = Application.get_env(:rekindle, Rekindle)
@@ -115,7 +116,9 @@ defmodule Rekindle.BuildTest do
         end)
       end)
 
-    assert output =~ "missing_function"
-    assert byte_size(output) <= 65_000
+    assert output =~ "界"
+    assert output =~ "[diagnostics truncated]"
+    assert String.valid?(output)
+    assert byte_size(output) <= 64_001
   end
 end
