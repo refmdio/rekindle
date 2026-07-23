@@ -24,8 +24,7 @@ defmodule Rekindle.Desktop.Builder do
                cargo.binary
              ),
            :ok <- write_manifest(temporary, manifest),
-           {:ok, generation} <- publish(project, profile, temporary, manifest),
-           :ok <- select(project, profile, manifest) do
+           {:ok, generation} <- publish(project, profile, temporary, manifest) do
         {:ok,
          %Result{
            target: :desktop,
@@ -127,35 +126,6 @@ defmodule Rekindle.Desktop.Builder do
 
       {:error, %Error{} = error} ->
         {:error, error}
-    end
-  end
-
-  defp select(project, profile, manifest) do
-    root = state_root(project, profile)
-    destination = Path.join(root, "desktop-current.json")
-    temporary = destination <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
-
-    selector =
-      Jason.encode!(%{
-        "generation" => manifest["generation"],
-        "target" => manifest["target"],
-        "manifest" =>
-          Path.join([
-            "desktop",
-            manifest["target"],
-            manifest["generation"],
-            "manifest.json"
-          ])
-      })
-
-    with :ok <- mkdir(root),
-         :ok <- File.write(temporary, selector),
-         :ok <- File.rename(temporary, destination) do
-      :ok
-    else
-      {:error, reason} ->
-        File.rm(temporary)
-        file_error(:selector_write, destination, reason)
     end
   end
 

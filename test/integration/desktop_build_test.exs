@@ -59,13 +59,8 @@ defmodule Rekindle.DesktopBuildTest do
     assert manifest["executable"] == "desktop"
     assert manifest["sha256"] == sha256(File.read!(result.artifact))
 
-    selector = root |> Path.join(".rekindle/dev/desktop-current.json") |> read_json()
-    assert selector["target"] == tools.target
-    assert selector["generation"] == generation
-
-    assert selector["manifest"] ==
-             "desktop/#{tools.target}/#{generation}/manifest.json"
-
+    refute File.exists?(Path.join(root, ".rekindle/dev/desktop-current.json"))
+    refute File.exists?(Path.join(root, ".rekindle/dev/desktop-last-running.json"))
     assert Path.wildcard(Path.join(root, ".rekindle/tmp/desktop/*")) == []
 
     assert {:ok, second} = build(root, tools)
@@ -79,22 +74,22 @@ defmodule Rekindle.DesktopBuildTest do
     assert {:ok, result} = build(root, tools, profile: :release)
     assert result.profile == :release
     assert result.artifact =~ "/.rekindle/release/desktop/#{tools.target}/"
-    assert File.regular?(Path.join(root, ".rekindle/release/desktop-current.json"))
+    refute File.exists?(Path.join(root, ".rekindle/release/desktop-current.json"))
+    refute File.exists?(Path.join(root, ".rekindle/release/desktop-last-running.json"))
     refute File.exists?(Path.join(root, ".rekindle/dev/desktop-current.json"))
     refute File.exists?(tools.launched)
   end
 
-  test "preserves the selected generation when existing bytes are changed", %{root: root} do
+  test "rejects changed bytes in an existing generation", %{root: root} do
     tools = fake_tools(root, executable?: true)
     assert {:ok, result} = build(root, tools)
-    selector_path = Path.join(root, ".rekindle/dev/desktop-current.json")
-    selector = File.read!(selector_path)
 
     File.write!(result.artifact, "changed")
     File.chmod!(result.artifact, 0o755)
 
     assert {:error, %Rekindle.Desktop.Error{kind: :executable_hash}} = build(root, tools)
-    assert File.read!(selector_path) == selector
+    assert File.read!(result.artifact) == "changed"
+    refute File.exists?(Path.join(root, ".rekindle/dev/desktop-last-running.json"))
     assert Path.wildcard(Path.join(root, ".rekindle/tmp/desktop/*")) == []
   end
 
@@ -218,8 +213,6 @@ defmodule Rekindle.DesktopBuildTest do
     {:ok, %{mode: mode}} = File.stat(path)
     Bitwise.band(mode, 0o111) != 0
   end
-
-  defp read_json(path), do: path |> File.read!() |> Jason.decode!()
 
   defp sha256(contents),
     do: contents |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
