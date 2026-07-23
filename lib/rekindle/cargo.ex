@@ -81,7 +81,10 @@ defmodule Rekindle.Cargo do
   end
 
   defp binary(package, project, target) do
-    expected_entry = Path.join(project.root, target.entry) |> Path.expand()
+    expected_entry =
+      project.client_root
+      |> Path.join(Path.relative_to(target.entry, "client"))
+      |> Path.expand()
 
     candidates =
       Enum.filter(package.targets, fn candidate ->

@@ -42,6 +42,17 @@ defmodule Rekindle.CargoTest do
     assert Path.basename(result.artifact) == "desktop"
   end
 
+  test "builds through a contained client symbolic link", %{project: project} do
+    actual_client = Path.join(project.root, "actual-client")
+    File.rename!(project.client_root, actual_client)
+    File.ln_s!("actual-client", project.client_root)
+    project = %{project | client_root: actual_client}
+
+    assert {:ok, result} = Cargo.build(project, target(:desktop), :dev)
+    assert result.binary == "desktop"
+    assert File.regular?(result.artifact)
+  end
+
   test "discovers the Web Wasm artifact from Cargo messages", %{project: project} do
     target = target(:web)
     cargo = rustup_path("cargo")
