@@ -140,6 +140,21 @@ defmodule Rekindle.ToolingIntegrationTest do
     assert error?(checks, :desktop_output)
   end
 
+  test "Doctor checks search permission for the effective user", context do
+    Application.put_env(:rekindle_tooling_test, Rekindle,
+      integration: :gpui,
+      targets: [desktop: []]
+    )
+
+    state = Path.join(context.root, ".rekindle")
+    File.mkdir_p!(state)
+    File.chmod!(state, 0o601)
+    on_exit(fn -> File.chmod(state, 0o700) end)
+
+    assert {:error, checks} = Doctor.run(:rekindle_tooling_test, context.options)
+    assert error?(checks, :state)
+  end
+
   test "Mix tasks report success and return nonzero on diagnosis failure", context do
     previous = Application.get_env(:rekindle, Rekindle)
     previous_path = System.get_env("PATH")

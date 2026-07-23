@@ -1,8 +1,6 @@
 defmodule Rekindle.Doctor do
   @moduledoc false
 
-  import Bitwise
-
   alias Rekindle.Cargo
   alias Rekindle.Cargo.Metadata
   alias Rekindle.Config
@@ -152,8 +150,8 @@ defmodule Rekindle.Doctor do
 
   defp writable_parent?(path) do
     case File.lstat(path) do
-      {:ok, %{type: :directory, access: access, mode: mode}} ->
-        access in [:write, :read_write] and (mode &&& 0o111) != 0
+      {:ok, %{type: :directory, access: access}} ->
+        access in [:write, :read_write] and searchable?(path)
 
       {:ok, _stat} ->
         false
@@ -164,6 +162,16 @@ defmodule Rekindle.Doctor do
 
       {:error, _reason} ->
         false
+    end
+  end
+
+  defp searchable?(path) do
+    case System.find_executable("test") do
+      nil ->
+        false
+
+      executable ->
+        match?({"", 0}, System.cmd(executable, ["-x", path], stderr_to_stdout: true))
     end
   end
 
