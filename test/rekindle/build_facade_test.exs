@@ -16,12 +16,6 @@ defmodule Rekindle.BuildFacadeTest do
       send(Application.fetch_env!(project.otp_app, :test_owner), {:build_called, mode})
       Application.fetch_env!(project.otp_app, :build_result)
     end
-
-    @impl true
-    def current(project) do
-      send(Application.fetch_env!(project.otp_app, :test_owner), :current_called)
-      Application.fetch_env!(project.otp_app, :current_result)
-    end
   end
 
   defmodule RaisingHandler do
@@ -29,9 +23,6 @@ defmodule Rekindle.BuildFacadeTest do
 
     @impl true
     def build(_project, _mode), do: raise("handler detail")
-
-    @impl true
-    def current(_project), do: throw(:handler_detail)
   end
 
   setup do
@@ -40,7 +31,6 @@ defmodule Rekindle.BuildFacadeTest do
     on_exit(fn ->
       Application.delete_env(@otp_app, :test_owner)
       Application.delete_env(@otp_app, :build_result)
-      Application.delete_env(@otp_app, :current_result)
     end)
 
     :ok
@@ -66,22 +56,26 @@ defmodule Rekindle.BuildFacadeTest do
 
   test "returns only validated current generation snapshots" do
     generation = generation(:web)
-    Application.put_env(@otp_app, :current_result, {:ok, generation})
 
     assert {:ok, ^generation} =
              BuildFacade.current(@otp_app, :web,
-               handlers: %{web: Handler},
+               current_reader: fn _root, :web -> {:ok, generation} end,
                load_project: loader([:web])
              )
-
-    assert_receive :current_called
-    Application.put_env(@otp_app, :current_result, :none)
 
     assert :none =
              BuildFacade.current(@otp_app, :web,
-               handlers: %{web: Handler},
+               current_reader: fn _root, :web -> :none end,
                load_project: loader([:web])
              )
+
+    assert :none =
+             BuildFacade.current(@otp_app, :web,
+               current_reader: fn _root, :web -> {:ok, generation(:desktop)} end,
+               load_project: loader([:web])
+             )
+
+    refute function_exported?(Handler, :current, 1)
   end
 
   test "rejects undeclared, unavailable, mismatched, malformed, and raised handlers" do
@@ -122,28 +116,17 @@ defmodule Rekindle.BuildFacadeTest do
                load_project: loader([:web])
              )
 
-    for operation <- [:build, :current] do
-      result =
-        case operation do
-          :build ->
-            BuildFacade.build(@otp_app, :web, :dev,
-              handlers: %{web: RaisingHandler},
-              load_project: loader([:web])
-            )
+    assert {:error, %{code: :contract_violation, stage: :internal}} =
+             BuildFacade.build(@otp_app, :web, :dev,
+               handlers: %{web: RaisingHandler},
+               load_project: loader([:web])
+             )
 
-          :current ->
-            BuildFacade.current(@otp_app, :web,
-              handlers: %{web: RaisingHandler},
-              load_project: loader([:web])
-            )
-        end
-
-      if operation == :build do
-        assert {:error, %{code: :contract_violation, stage: :internal}} = result
-      else
-        assert result == :none
-      end
-    end
+    assert :none =
+             BuildFacade.current(@otp_app, :web,
+               current_reader: fn _root, _target -> throw(:core_detail) end,
+               load_project: loader([:web])
+             )
   end
 
   test "preserves sanitized expected failures" do

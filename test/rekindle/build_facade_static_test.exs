@@ -29,7 +29,7 @@ defmodule Rekindle.BuildFacadeStaticTest do
     source = File.read!(Path.join(File.cwd!(), "lib/rekindle/target_handler.ex"))
 
     assert source =~ "@callback build("
-    assert source =~ "@callback current("
+    refute source =~ "@callback current("
     refute source =~ "@callback activate("
     refute source =~ "@callback project("
     refute source =~ "@callback export("

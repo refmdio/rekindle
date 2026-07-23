@@ -1,7 +1,7 @@
 defmodule Rekindle.BuildFacade do
   @moduledoc false
 
-  alias Rekindle.{BuildResult, Config, ConfigError, Failure, GenerationRef}
+  alias Rekindle.{BuildResult, Config, ConfigError, Failure, GenerationRef, RuntimeState}
 
   @handlers %{
     web: Rekindle.Web.TargetHandler,
@@ -27,8 +27,7 @@ defmodule Rekindle.BuildFacade do
     with :ok <- validate_request(otp_app, target, nil, options),
          {:ok, project} <- load_project(otp_app, options),
          :ok <- declared(project, target),
-         {:ok, handler} <- resolve_handler(target, options),
-         result <- invoke(handler, :current, [project]),
+         result <- read_current(project, target, options),
          {:ok, result} <- validate_current_result(result, target) do
       result
     else
@@ -37,7 +36,7 @@ defmodule Rekindle.BuildFacade do
   end
 
   defp validate_request(otp_app, target, mode, options) do
-    allowed = [:handlers, :load_project]
+    allowed = [:current_reader, :handlers, :load_project]
 
     if is_atom(otp_app) and otp_app not in [nil, true, false] and target in [:web, :desktop] and
          mode in [nil, :dev, :release] and Keyword.keyword?(options) and
@@ -89,12 +88,21 @@ defmodule Rekindle.BuildFacade do
          {:ok, handler} <- Map.fetch(handlers, target),
          true <- is_atom(handler),
          {:module, ^handler} <- Code.ensure_loaded(handler),
-         true <- function_exported?(handler, :build, 2),
-         true <- function_exported?(handler, :current, 1) do
+         true <- function_exported?(handler, :build, 2) do
       {:ok, handler}
     else
       _ -> {:error, contract_failure("Target handler is unavailable")}
     end
+  end
+
+  defp read_current(project, target, options) do
+    reader = Keyword.get(options, :current_reader, &RuntimeState.current/2)
+
+    reader.(project.project_root, target)
+  rescue
+    _exception -> :invalid
+  catch
+    _kind, _reason -> :invalid
   end
 
   defp invoke(handler, function, arguments) do
@@ -140,12 +148,12 @@ defmodule Rekindle.BuildFacade do
   defp validate_current_result({:ok, %GenerationRef{} = generation}, target) do
     case GenerationRef.new(Map.from_struct(generation)) do
       {:ok, %GenerationRef{target: ^target} = generation} -> {:ok, {:ok, generation}}
-      _ -> {:error, contract_failure("Target handler returned an invalid current generation")}
+      _ -> {:error, contract_failure("Core state returned an invalid current generation")}
     end
   end
 
   defp validate_current_result(_result, _target),
-    do: {:error, contract_failure("Target handler returned an invalid current generation")}
+    do: {:error, contract_failure("Core state returned an invalid current generation")}
 
   defp sanitize_failure(failure) do
     case Failure.sanitize(failure) do
