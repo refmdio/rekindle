@@ -111,6 +111,35 @@ defmodule Rekindle.ToolingIntegrationTest do
     assert check.status == :error
   end
 
+  test "Doctor rejects output paths that are not real writable directories", context do
+    Application.put_env(:rekindle_tooling_test, Rekindle,
+      integration: :gpui,
+      targets: [desktop: []]
+    )
+
+    output = Path.join(context.root, "dist/rekindle")
+    File.mkdir_p!(Path.dirname(output))
+    File.write!(output, "not a directory")
+
+    assert {:error, checks} = Doctor.run(:rekindle_tooling_test, context.options)
+    assert error?(checks, :desktop_output)
+
+    File.rm_rf!(Path.dirname(output))
+    File.write!(Path.dirname(output), "not a directory")
+
+    assert {:error, checks} = Doctor.run(:rekindle_tooling_test, context.options)
+    assert error?(checks, :desktop_output)
+
+    File.rm!(Path.dirname(output))
+    destination = Path.join(context.root, "actual-output")
+    File.mkdir_p!(destination)
+    File.mkdir_p!(Path.dirname(output))
+    File.ln_s!(destination, output)
+
+    assert {:error, checks} = Doctor.run(:rekindle_tooling_test, context.options)
+    assert error?(checks, :desktop_output)
+  end
+
   test "Mix tasks report success and return nonzero on diagnosis failure", context do
     previous = Application.get_env(:rekindle, Rekindle)
     previous_path = System.get_env("PATH")

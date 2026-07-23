@@ -1,6 +1,8 @@
 defmodule Rekindle.Doctor do
   @moduledoc false
 
+  import Bitwise
+
   alias Rekindle.Cargo
   alias Rekindle.Cargo.Metadata
   alias Rekindle.Config
@@ -148,9 +150,12 @@ defmodule Rekindle.Doctor do
   end
 
   defp writable_parent?(path) do
-    case File.stat(path) do
-      {:ok, %{access: access}} ->
-        access in [:write, :read_write]
+    case File.lstat(path) do
+      {:ok, %{type: :directory, access: access, mode: mode}} ->
+        access in [:write, :read_write] and (mode &&& 0o111) != 0
+
+      {:ok, _stat} ->
+        false
 
       {:error, :enoent} ->
         parent = Path.dirname(path)
