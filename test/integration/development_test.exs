@@ -889,6 +889,132 @@ defmodule Rekindle.DevelopmentTest do
     assert_until(fn -> not Process.alive?(daemon) end)
   end
 
+  test "serializes desktop selection and cleanup with independent VMs", %{root: root} do
+    supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+    launcher = start_launcher(root, supervisor)
+    selected = desktop_result(root, "selected-after-lock", :running)
+    stale = desktop_result(root, "cleanup-after-lock", :exit)
+    ready = Path.join(root, "desktop-development.ready")
+    release = Path.join(root, "desktop-development.release")
+    port = publication_lock_process(root, {:desktop, :dev}, ready, release)
+
+    on_exit(fn ->
+      File.write(release, "release")
+      if Port.info(port), do: Port.close(port)
+    end)
+
+    assert_until(fn -> File.regular?(ready) end, 200)
+
+    assert :independent =
+             Rekindle.Publication.with_lock(
+               root,
+               {:web, :dev},
+               fn -> :independent end,
+               50
+             )
+
+    DesktopDevelopment.replace(launcher, selected)
+    cleanup = Task.async(fn -> Rekindle.Development.Cleanup.desktop(root, stale) end)
+
+    {:ok, project} =
+      Rekindle.Config.load(:rekindle_development_test, project_root: root)
+
+    startup = Task.async(fn -> Rekindle.Development.Cleanup.startup(project) end)
+    discard = Task.async(fn -> Rekindle.Development.Cleanup.discard(project, stale) end)
+
+    refute_receive {DesktopDevelopment, {:ready, ^selected}}, 200
+    assert Task.yield(cleanup, 100) == nil
+    assert Task.yield(startup, 100) == nil
+    assert Task.yield(discard, 100) == nil
+    refute File.exists?(Path.join(root, ".rekindle/dev/desktop-last-running.json"))
+
+    File.write!(release, "release")
+    assert_receive {^port, {:exit_status, 0}}, 5_000
+    assert :ok = Task.await(cleanup, 5_000)
+    assert :ok = Task.await(startup, 5_000)
+    assert :ok = Task.await(discard, 5_000)
+    assert_receive {DesktopDevelopment, {:ready, ^selected}}, 5_000
+
+    marker = read_marker(root)
+    assert marker["generation"] == selected.metadata.generation
+    assert marker["target"] == selected.metadata.rust_target
+    assert File.dir?(Path.dirname(selected.metadata.manifest))
+  end
+
+  @tag capture_log: true
+  test "keeps the desktop marker valid across competing launchers", %{root: root} do
+    supervisor_a =
+      start_supervised!(
+        Supervisor.child_spec(
+          {DynamicSupervisor, strategy: :one_for_one},
+          id: :desktop_supervisor_a
+        )
+      )
+
+    supervisor_b =
+      start_supervised!(
+        Supervisor.child_spec(
+          {DynamicSupervisor, strategy: :one_for_one},
+          id: :desktop_supervisor_b
+        )
+      )
+
+    launcher_a = start_launcher(root, supervisor_a, :desktop_launcher_a)
+    launcher_b = start_launcher(root, supervisor_b, :desktop_launcher_b)
+    first = desktop_result(root, "competing-first", :running)
+    second = desktop_result(root, "competing-second", :running)
+
+    generation_root =
+      Path.join([
+        root,
+        ".rekindle",
+        "dev",
+        "desktop",
+        Rekindle.Toolchain.desktop_target()
+      ])
+
+    for value <- 1..20 do
+      generation =
+        :sha256
+        |> :crypto.hash(Integer.to_string(value))
+        |> Base.encode16(case: :lower)
+
+      path = Path.join(generation_root, generation)
+      File.mkdir_p!(path)
+      File.touch!(path, {{2030, 1, 1}, {0, 0, value}})
+    end
+
+    DesktopDevelopment.replace(launcher_a, first)
+    DesktopDevelopment.replace(launcher_b, second)
+
+    events =
+      for _index <- 1..2 do
+        assert_receive {DesktopDevelopment, event}, 5_000
+        event
+      end
+
+    assert Enum.any?(events, &match?({:ready, _result}, &1))
+
+    marker = read_marker(root)
+    selected = Enum.find([first, second], &(&1.metadata.generation == marker["generation"]))
+    assert selected
+    assert marker["target"] == selected.metadata.rust_target
+    assert File.dir?(Path.dirname(selected.metadata.manifest))
+
+    manifest =
+      selected.metadata.manifest
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert :ok =
+             Rekindle.Desktop.Manifest.validate(
+               Path.dirname(selected.metadata.manifest),
+               manifest
+             )
+
+    assert length(File.ls!(generation_root)) == 2
+  end
+
   test "maps client changes to affected targets and ignores Cargo output", %{root: root} do
     client = Path.join(root, "client")
 
@@ -996,10 +1122,15 @@ defmodule Rekindle.DevelopmentTest do
   test "cleans abandoned startup output while preserving selected generations", %{root: root} do
     temporary = Path.join([root, ".rekindle", "tmp", "web", "abandoned"])
     marker = Path.join([root, ".rekindle", "dev", ".tmp-web-current-abandoned"])
+
+    desktop_marker =
+      Path.join([root, ".rekindle", "dev", ".tmp-desktop-last-running-abandoned"])
+
     File.mkdir_p!(temporary)
     File.write!(Path.join(temporary, "partial"), "partial")
     File.mkdir_p!(Path.dirname(marker))
     File.write!(marker, "partial")
+    File.write!(desktop_marker, "partial")
 
     selected = publish_web(root, "export default 'selected';")
     web_root = Path.join([root, ".rekindle", "dev", "web"])
@@ -1016,6 +1147,7 @@ defmodule Rekindle.DevelopmentTest do
     assert :ok = Rekindle.Development.Cleanup.startup(project)
     refute File.exists?(Path.join([root, ".rekindle", "tmp"]))
     refute File.exists?(marker)
+    refute File.exists?(desktop_marker)
     assert File.dir?(Path.join(web_root, selected))
     assert length(Path.wildcard(Path.join(web_root, String.duplicate("?", 64)))) == 2
   end
@@ -1285,9 +1417,16 @@ defmodule Rekindle.DevelopmentTest do
   end
 
   defp start_launcher(root, supervisor) do
+    start_launcher(root, supervisor, DesktopDevelopment)
+  end
+
+  defp start_launcher(root, supervisor, id) do
     start_supervised!(
-      {DesktopDevelopment,
-       project_root: root, supervisor: supervisor, readiness: 75, notify: self()}
+      Supervisor.child_spec(
+        {DesktopDevelopment,
+         project_root: root, supervisor: supervisor, readiness: 75, notify: self()},
+        id: id
+      )
     )
   end
 

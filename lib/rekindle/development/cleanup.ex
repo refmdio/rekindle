@@ -8,6 +8,7 @@ defmodule Rekindle.Development.Cleanup do
 
   @retained 2
   @generation ~r/\A[0-9a-f]{64}\z/
+  @desktop_lock {:desktop, :dev}
 
   @spec startup(Rekindle.Config.t()) :: :ok
   def startup(project) do
@@ -26,20 +27,23 @@ defmodule Rekindle.Development.Cleanup do
     remove_empty_tmp_root(project.root)
 
     with_cleanup_lock(project, {:web, :dev}, fn ->
-      remove_temporary_markers(project.root)
+      remove_temporary_markers(project.root, ".tmp-web-current-")
       web_selected = selected_web(project.root)
       prune(project.root, Path.join([project.root, ".rekindle", "dev", "web"]), web_selected)
     end)
 
-    desktop_root = Path.join([project.root, ".rekindle", "dev", "desktop"])
-    desktop_selected = selected_desktop(project.root)
+    with_cleanup_lock(project, @desktop_lock, fn ->
+      remove_temporary_markers(project.root, ".tmp-desktop-last-running-")
+      desktop_root = Path.join([project.root, ".rekindle", "dev", "desktop"])
+      desktop_selected = selected_desktop(project.root)
 
-    desktop_root
-    |> child_directories(project.root)
-    |> Enum.each(fn directory ->
-      target = Path.basename(directory)
-      selected = if desktop_selected[:target] == target, do: desktop_selected[:generation]
-      prune(project.root, directory, selected)
+      desktop_root
+      |> child_directories(project.root)
+      |> Enum.each(fn directory ->
+        target = Path.basename(directory)
+        selected = if desktop_selected[:target] == target, do: desktop_selected[:generation]
+        prune(project.root, directory, selected)
+      end)
     end)
 
     :ok
@@ -77,16 +81,11 @@ defmodule Rekindle.Development.Cleanup do
 
   def discard(
         project,
-        %{
-          target: :desktop,
-          metadata: %{generation: generation, manifest: manifest, rust_target: target}
-        } = result
+        %{target: :desktop} = result
       ) do
-    marker = selected_desktop(project.root)
-    selected = if marker[:target] == target, do: marker[:generation]
-
-    if selected != generation, do: remove_owned_directory(project.root, Path.dirname(manifest))
-    desktop(project.root, result, selected)
+    with_cleanup_lock(project, @desktop_lock, fn ->
+      discard_desktop_locked(project.root, result)
+    end)
   end
 
   def discard(_project, _result), do: :ok
@@ -104,11 +103,25 @@ defmodule Rekindle.Development.Cleanup do
 
   @spec desktop(Path.t(), Rekindle.Build.Result.t()) :: :ok
   def desktop(root, result) do
-    desktop(root, result, result.metadata.generation)
+    with_desktop_lock(root, fn ->
+      marker = selected_desktop(root)
+      selected = desktop_selection(marker, result.metadata.rust_target)
+      desktop_locked(root, result, selected)
+    end)
+    |> cleanup_lock_result(@desktop_lock)
   end
 
-  @spec desktop(Path.t(), Rekindle.Build.Result.t(), String.t()) :: :ok
-  def desktop(root, result, selected_generation) do
+  @doc false
+  @spec with_desktop_lock(Path.t(), (-> result)) ::
+          result | {:error, {:publication_lock, term()}}
+        when result: term()
+  def with_desktop_lock(root, function) when is_function(function, 0) do
+    Publication.with_lock(root, @desktop_lock, function)
+  end
+
+  @doc false
+  @spec desktop_locked(Path.t(), Rekindle.Build.Result.t(), String.t() | nil) :: :ok
+  def desktop_locked(root, result, selected_generation) do
     directory =
       Path.join([
         root,
@@ -120,6 +133,30 @@ defmodule Rekindle.Development.Cleanup do
 
     prune(root, directory, selected_generation)
   end
+
+  defp discard_desktop_locked(
+         root,
+         %{
+           metadata: %{generation: generation, manifest: manifest, rust_target: target}
+         } = result
+       ) do
+    marker = selected_desktop(root)
+    selected = desktop_selection(marker, target)
+
+    if selected != generation, do: remove_owned_directory(root, Path.dirname(manifest))
+    desktop_locked(root, result, selected)
+  end
+
+  defp desktop_selection(marker, target) do
+    if marker[:target] == target, do: marker[:generation]
+  end
+
+  defp cleanup_lock_result({:error, {:publication_lock, reason}}, key) do
+    Logger.warning("could not clean #{inspect(key)} state: #{inspect(reason)}")
+    :ok
+  end
+
+  defp cleanup_lock_result(result, _key), do: result
 
   defp prune(root, directory, selected) do
     case OwnedPath.validate_directory(root, directory) do
@@ -260,18 +297,21 @@ defmodule Rekindle.Development.Cleanup do
       :ok ->
         :ok
 
+      {:error, :enoent} ->
+        :ok
+
       {:error, reason} ->
         Logger.warning("could not remove #{path}: #{OwnedPath.format_error(reason)}")
     end
   end
 
-  defp remove_temporary_markers(root) do
+  defp remove_temporary_markers(root, prefix) do
     directory = Path.join([root, ".rekindle", "dev"])
 
     case File.ls(directory) do
       {:ok, names} ->
         names
-        |> Enum.filter(&String.starts_with?(&1, ".tmp-web-current-"))
+        |> Enum.filter(&String.starts_with?(&1, prefix))
         |> Enum.each(fn name ->
           path = Path.join(directory, name)
           OwnedPath.remove_file(root, path)

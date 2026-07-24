@@ -9,6 +9,7 @@ defmodule Rekindle.Desktop.Development do
   alias Rekindle.Development.Cleanup
   alias Rekindle.Desktop.{Error, Manifest}
   alias Rekindle.OwnedPath
+  alias Rekindle.Publication
 
   @generation ~r/\A[0-9a-f]{64}\z/
 
@@ -38,7 +39,7 @@ defmodule Rekindle.Desktop.Development do
        readiness: Keyword.get(options, :readiness, 300),
        notify: Keyword.get(options, :notify),
        process_options: Keyword.get(options, :process_options, []),
-       retained: load_retained(root),
+       retained: locked_retained(root),
        current: nil,
        candidate: nil
      }}
@@ -75,9 +76,8 @@ defmodule Rekindle.Desktop.Development do
     candidate = state.candidate
 
     if running?(candidate.pid) do
-      case write_marker(state.root, candidate.result) do
+      case retain_running(state.root, candidate.result) do
         :ok ->
-          Cleanup.desktop(state.root, candidate.result)
           notify(state.notify, {:ready, candidate.result})
           {:noreply, %{state | retained: candidate.result, current: candidate, candidate: nil}}
 
@@ -194,13 +194,7 @@ defmodule Rekindle.Desktop.Development do
   end
 
   defp cleanup_rejected(state, result) do
-    selected =
-      case state.retained do
-        %{metadata: %{generation: generation}} -> generation
-        nil -> result.metadata.generation
-      end
-
-    Cleanup.desktop(state.root, result, selected)
+    Cleanup.desktop(state.root, result)
   end
 
   defp running?(pid) do
@@ -295,10 +289,31 @@ defmodule Rekindle.Desktop.Development do
     end
   end
 
+  defp locked_retained(root) do
+    case Cleanup.with_desktop_lock(root, fn -> load_retained(root) end) do
+      %Result{} = result -> result
+      _error -> nil
+    end
+  end
+
+  defp retain_running(root, result) do
+    case Cleanup.with_desktop_lock(root, fn ->
+           with :ok <- validate(root, result),
+                :ok <- write_marker(root, result) do
+             Cleanup.desktop_locked(root, result, result.metadata.generation)
+           end
+         end) do
+      {:error, {:publication_lock, reason}} ->
+        marker_error(reason)
+
+      result ->
+        result
+    end
+  end
+
   defp write_marker(root, result) do
     directory = Path.join([root, ".rekindle", "dev"])
     destination = Path.join(directory, "desktop-last-running.json")
-    temporary = destination <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
 
     marker =
       Jason.encode!(%{
@@ -308,19 +323,31 @@ defmodule Rekindle.Desktop.Development do
       })
 
     with :ok <- OwnedPath.ensure_directory(root, directory),
-         :ok <- File.write(temporary, marker),
+         {:ok, temporary} <-
+           Publication.temporary_file(directory, ".tmp-desktop-last-running-") do
+      publish_marker(root, temporary, destination, marker)
+    else
+      {:error, reason} -> marker_error(reason)
+    end
+  end
+
+  defp publish_marker(root, temporary, destination, marker) do
+    with :ok <- File.write(temporary, marker),
          :ok <- File.rename(temporary, destination) do
       :ok
     else
       {:error, reason} ->
         OwnedPath.remove_file(root, temporary)
-
-        {:error,
-         Error.new(
-           :marker_write,
-           "desktop launch state could not be updated: #{OwnedPath.format_error(reason)}"
-         )}
+        marker_error(reason)
     end
+  end
+
+  defp marker_error(reason) do
+    {:error,
+     Error.new(
+       :marker_write,
+       "desktop launch state could not be updated: #{OwnedPath.format_error(reason)}"
+     )}
   end
 
   defp stop(_supervisor, nil), do: :ok
