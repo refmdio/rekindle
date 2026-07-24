@@ -43,7 +43,8 @@ mix igniter.install rekindle --integration egui --targets web,desktop
 
 The selected entries must already exist at `client/src/bin/web.rs` and
 `client/src/bin/desktop.rs`. Rekindle validates the Cargo package and selected
-integration before changing the project.
+integration from an isolated copy before changing the project. A lockfile is
+not required, and validation does not create or update files under `client/`.
 
 ## Next steps
 

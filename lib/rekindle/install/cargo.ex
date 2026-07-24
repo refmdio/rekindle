@@ -36,65 +36,17 @@ if Code.ensure_loaded?(Igniter) do
 
     defp with_client_root(igniter, callback) do
       client_root = Path.expand("client")
+      project_root = temporary_root()
 
-      if File.regular?(Path.join(client_root, "Cargo.toml")) do
-        with_lock_preserved(client_root, callback)
-      else
-        project_root = temporary_root()
-
-        try do
-          :ok = materialize(igniter, project_root)
-          callback.(Path.join(project_root, "client"), false)
-        after
-          File.rm_rf(project_root)
+      try do
+        if File.regular?(Path.join(client_root, "Cargo.toml")) do
+          copy_project(File.cwd!(), project_root)
         end
-      end
-    end
 
-    defp with_lock_preserved(client_root, callback) do
-      with {:ok, workspace_root} <- workspace_root(client_root) do
-        lock = Path.join(workspace_root, "Cargo.lock")
-
-        case File.read(lock) do
-          {:ok, _contents} ->
-            callback.(client_root, true)
-
-          {:error, :enoent} ->
-            {:error,
-             "Cargo.lock is required to adopt a live Cargo project; run cargo generate-lockfile --manifest-path client/Cargo.toml"}
-
-          {:error, reason} ->
-            {:error, "cannot inspect Cargo.lock: #{:file.format_error(reason)}"}
-        end
-      end
-    end
-
-    defp workspace_root(client_root) do
-      arguments = [
-        "locate-project",
-        "--workspace",
-        "--message-format",
-        "plain",
-        "--manifest-path",
-        Path.join(client_root, "Cargo.toml")
-      ]
-
-      case Process.run(Rekindle.Toolchain.cargo_path(), arguments,
-             cd: client_root,
-             timeout: 30_000,
-             output_limit: 16_000
-           ) do
-        {:ok, %{status: 0, output: output}} ->
-          case output |> String.split("\n", trim: true) |> List.last() do
-            nil -> {:error, "cargo locate-project returned no workspace manifest"}
-            manifest -> {:ok, Path.dirname(manifest)}
-          end
-
-        {:ok, result} ->
-          {:error, "cargo locate-project failed with status #{result.status}: #{result.output}"}
-
-        {:error, reason} ->
-          {:error, "cargo locate-project could not run: #{inspect(reason)}"}
+        :ok = materialize(igniter, project_root)
+        callback.(Path.join(project_root, "client"), false)
+      after
+        File.rm_rf(project_root)
       end
     end
 
@@ -105,6 +57,59 @@ if Code.ensure_loaded?(Igniter) do
         File.mkdir_p!(Path.dirname(path))
         File.write!(path, Rewrite.Source.get(source, :content))
       end)
+    end
+
+    @snapshot_ignored [
+      ".git",
+      ".rekindle",
+      "_build",
+      "assets/node_modules",
+      "client/target",
+      "deps",
+      "dist/rekindle",
+      "priv/static/rekindle"
+    ]
+
+    defp copy_project(source, destination) do
+      File.mkdir_p!(destination)
+      copy_entries(source, destination, "")
+    end
+
+    defp copy_entries(source, destination, relative) do
+      source
+      |> File.ls!()
+      |> Enum.each(fn name ->
+        child_relative = Path.join(relative, name)
+
+        unless child_relative in @snapshot_ignored do
+          copy_entry(
+            Path.join(source, name),
+            Path.join(destination, name),
+            child_relative
+          )
+        end
+      end)
+    end
+
+    defp copy_entry(source, destination, relative) do
+      case File.lstat!(source) do
+        %{type: :directory, mode: mode} ->
+          File.mkdir_p!(destination)
+          File.chmod!(destination, mode)
+          copy_entries(source, destination, relative)
+
+        %{type: :regular, mode: mode} ->
+          File.mkdir_p!(Path.dirname(destination))
+          File.cp!(source, destination)
+          File.chmod!(destination, mode)
+
+        %{type: :symlink} ->
+          File.mkdir_p!(Path.dirname(destination))
+          File.ln_s!(File.read_link!(source), destination)
+
+        _other ->
+          :ok
+      end
     end
 
     defp temporary_root do

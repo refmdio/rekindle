@@ -37,6 +37,7 @@ Every integration keeps shared application and UI logic in `client/src/lib.rs`.
 The `web` and `desktop` binaries should contain platform startup code only.
 Target-specific behavior can be selected with the generated Cargo features.
 
-Re-running the installer does not replace an existing Cargo client. See
-[Getting Started](../introduction/getting-started.md) to adopt or validate an
-existing crate.
+Re-running the installer does not replace an existing Cargo client. Adoption
+validates an isolated copy, so the existing crate and its lockfile state remain
+unchanged. See [Getting Started](../introduction/getting-started.md) for the
+required target entries.

@@ -404,9 +404,14 @@ defmodule Rekindle.InstallTest do
     assert changed_contents(rejected) == changed_contents(original)
   end
 
-  test "resolves project-relative path dependencies without changing the client" do
+  test "adopts a lockless client with project-relative path dependencies without changing it" do
     original =
       existing_client(:gpui, [:web], %{
+        "client/.cargo/config.toml" => """
+        [build]
+        target-dir = "target"
+        """,
+        "client/build-helper.sh" => "#!/bin/sh\nexit 0\n",
         "shared/Cargo.toml" => """
         [package]
         name = "gpui"
@@ -427,12 +432,22 @@ defmodule Rekindle.InstallTest do
     before = client_contents(original)
     root = tmp_dir()
     write_project(root, original)
+    File.chmod!(Path.join(root, "client/build-helper.sh"), 0o700)
+    before_files = filesystem_tree(Path.join(root, "client"))
 
     adopted =
       File.cd!(root, fn ->
-        lockless = install(original, integration: "gpui", targets: ["web"])
-        assert Enum.any?(lockless.issues, &String.contains?(&1, "Cargo.lock is required"))
+        result = install(original, integration: "gpui", targets: ["web"])
+
+        assert result.issues == []
         refute File.exists?("client/Cargo.lock")
+        assert filesystem_tree("client") == before_files
+
+        rejected = install(original, integration: "slint", targets: ["web"])
+
+        assert rejected.issues != []
+        refute File.exists?("client/Cargo.lock")
+        assert filesystem_tree("client") == before_files
 
         {_output, 0} =
           System.cmd(
@@ -441,9 +456,11 @@ defmodule Rekindle.InstallTest do
             stderr_to_stdout: true
           )
 
-        lock = File.read!("client/Cargo.lock")
-        result = install(original, integration: "gpui", targets: ["web"])
-        assert File.read!("client/Cargo.lock") == lock
+        locked_files = filesystem_tree("client")
+        locked = install(original, integration: "gpui", targets: ["web"])
+
+        assert locked.issues == []
+        assert filesystem_tree("client") == locked_files
         result
       end)
 
@@ -732,6 +749,26 @@ defmodule Rekindle.InstallTest do
       path = Path.join(root, relative)
       File.mkdir_p!(Path.dirname(path))
       File.write!(path, Rewrite.Source.get(source, :content))
+    end)
+  end
+
+  defp filesystem_tree(root) do
+    root
+    |> Path.join("**")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.reject(&(&1 == root))
+    |> Map.new(fn path ->
+      relative = Path.relative_to(path, root)
+      stat = File.lstat!(path)
+
+      value =
+        case stat.type do
+          :regular -> {:regular, stat.mode, File.read!(path)}
+          :directory -> {:directory, stat.mode}
+          :symlink -> {:symlink, File.read_link!(path)}
+        end
+
+      {relative, value}
     end)
   end
 
