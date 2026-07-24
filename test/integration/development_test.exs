@@ -425,6 +425,93 @@ defmodule Rekindle.DevelopmentTest do
   end
 
   @tag timeout: 60_000
+  test "serializes delayed browser runtime polls and retries", %{root: root} do
+    browser = System.find_executable("chromium") || flunk("Chromium is required")
+    directory = Path.join(root, "browser-single-flight")
+    profile = Path.join(directory, "profile")
+    generation = String.duplicate("a", 64)
+
+    Application.put_env(:rekindle_development_test, Rekindle,
+      integration: :egui,
+      targets: [web: []]
+    )
+
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+    runtime = request("/__rekindle/runtime.js", options).resp_body
+
+    module =
+      """
+      export default async function initialize() {
+        const root = document.documentElement;
+        const initializers = Number(root.dataset.initializers || "0") + 1;
+        root.dataset.initializers = String(initializers);
+        if (!root.dataset.requestsAtInitialization) {
+          root.dataset.requestsAtInitialization = root.dataset.requests;
+        }
+      }
+      """
+
+    selector =
+      Jason.encode!(%{
+        generation: generation,
+        entry: "data:text/javascript,#{URI.encode(module)}"
+      })
+
+    page =
+      """
+      <!doctype html>
+      <html><body>
+        <canvas id="the_canvas_id"></canvas>
+        <pre id="rekindle-error" hidden></pre>
+      <script>
+        HTMLCanvasElement.prototype.getContext = () => ({});
+        let requests = 0;
+        window.fetch = () => {
+          requests += 1;
+          const request = requests;
+          document.documentElement.dataset.requests = String(requests);
+          return new Promise((resolve) => {
+            window.setTimeout(() => {
+              resolve(new Response(request === 1 ? "" : #{Jason.encode!(selector)}, {
+                status: request === 1 ? 503 : 200,
+                headers: {"content-type": "application/json"}
+              }));
+            }, 600);
+          });
+        };
+      </script>
+      <script type="module">#{runtime}</script>
+      </body></html>
+      """
+
+    File.mkdir_p!(directory)
+    page_path = Path.join(directory, "index.html")
+    File.write!(page_path, page)
+
+    arguments = [
+      "--headless=new",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-dev-shm-usage",
+      "--allow-file-access-from-files",
+      "--user-data-dir=#{profile}",
+      "--virtual-time-budget=2500",
+      "--dump-dom",
+      "file://#{page_path}"
+    ]
+
+    assert {:ok, %{status: 0, output: output}} =
+             Rekindle.Toolchain.Process.run(browser, arguments,
+               cd: directory,
+               timeout: 30_000,
+               output_limit: 1_000_000
+             )
+
+    assert output =~ ~s(data-requests-at-initialization="2")
+    assert output =~ ~s(data-initializers="1")
+  end
+
+  @tag timeout: 60_000
   test "rejects missing browser graphics capabilities before importing Web output", %{root: root} do
     cases = [
       {:gpui,

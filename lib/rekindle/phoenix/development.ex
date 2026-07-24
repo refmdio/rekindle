@@ -229,6 +229,7 @@ defmodule Rekindle.Phoenix.Development do
 
     async function update() {
       if (loading) return;
+      loading = true;
 
       try {
         const response = await fetch(currentUrl, {cache: "no-store"});
@@ -246,7 +247,6 @@ defmodule Rekindle.Phoenix.Development do
         }
 
         if (!activeGeneration) {
-          loading = true;
           await graphicsReady();
           const module = await import(current.entry);
           if (typeof module.default !== "function") {
