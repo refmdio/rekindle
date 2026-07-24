@@ -40,14 +40,26 @@ if Code.ensure_loaded?(Igniter) do
       with {:ok, project_root} <- temporary_root() do
         result =
           with :ok <- maybe_copy_project(client_root, project_root),
-               :ok <- materialize(igniter, project_root) do
-            callback.(Path.join(project_root, "client"), false)
+               :ok <- materialize(igniter, project_root),
+               root = Path.join(project_root, "client"),
+               {:ok, locked?} <- locked?(root) do
+            callback.(root, locked?)
           end
 
         case remove_snapshot(project_root) do
           :ok -> result
           {:error, _message} = error -> error
         end
+      end
+    end
+
+    defp locked?(root) do
+      lockfile = Path.join(root, "Cargo.lock")
+
+      case File.lstat(lockfile) do
+        {:ok, _stat} -> {:ok, true}
+        {:error, :enoent} -> {:ok, false}
+        {:error, reason} -> snapshot_error(lockfile, "inspect client lockfile", reason)
       end
     end
 

@@ -275,6 +275,7 @@ defmodule Rekindle.InstallTest do
       update_content(gpui, "client/Cargo.toml", fn manifest ->
         String.replace(manifest, "[dependencies]", "[dependencies]\neframe = \"0.35\"")
       end)
+      |> delete_file("client/Cargo.lock")
 
     malformed = update_content(gpui, "client/Cargo.toml", &("[package\n" <> &1))
 
@@ -312,6 +313,7 @@ defmodule Rekindle.InstallTest do
           ""
         )
       end)
+      |> delete_file("client/Cargo.lock")
 
     impossible_web =
       existing_client(:egui, [:web])
@@ -322,6 +324,7 @@ defmodule Rekindle.InstallTest do
           "cfg(all(target_arch = \"wasm32\", target_os = \"windows\"))"
         )
       end)
+      |> delete_file("client/Cargo.lock")
 
     for original <- [native_only, impossible_web] do
       rejected = install(original, integration: "egui", targets: ["web"])
@@ -528,6 +531,27 @@ defmodule Rekindle.InstallTest do
     assert client_contents(adopted) == before
   end
 
+  test "rejects a stale lockfile before staging application changes" do
+    original =
+      existing_client(:gpui, [:web])
+      |> update_content("client/Cargo.toml", fn manifest ->
+        String.replace(manifest, ~s(version = "0.1.0"), ~s(version = "0.2.0"), global: false)
+      end)
+
+    root = tmp_dir()
+    write_project(root, original)
+    before = filesystem_tree(root)
+
+    rejected =
+      File.cd!(root, fn ->
+        install(original, integration: "gpui", targets: ["web"])
+      end)
+
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "cargo metadata failed"))
+    assert changed_contents(rejected) == changed_contents(original)
+    assert filesystem_tree(root) == before
+  end
+
   test "rejects an external symlink without inspecting its target tree" do
     original = existing_client(:gpui, [:web])
     root = tmp_dir()
@@ -635,6 +659,7 @@ defmodule Rekindle.InstallTest do
       |> update_content("client/Cargo.toml", fn manifest ->
         manifest <> "\n[workspace]\nmembers = [\"member\"]\n"
       end)
+      |> delete_file("client/Cargo.lock")
 
     adopted = install(original, integration: "gpui", targets: ["web"])
 
