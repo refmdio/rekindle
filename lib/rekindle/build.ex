@@ -15,7 +15,7 @@ defmodule Rekindle.Build do
              | Rekindle.Desktop.Error.t()
              | Rekindle.Toolchain.Error.t()
              | Rekindle.Web.Error.t()}
-  def run(%Config{} = project, target, options) do
+  def run(project, target, options) do
     profile = Keyword.get(options, :profile, :dev)
 
     with :ok <- validate_target(target),
