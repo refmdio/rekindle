@@ -142,6 +142,31 @@ defmodule Rekindle.WebBuildTest do
     assert File.read!(Path.join(namespace, "keep.txt")) == "application-owned"
   end
 
+  test "rejects a missing or changed manifest in an existing public generation", %{root: root} do
+    tools = fake_tools(root, "success")
+    assert {:ok, result} = build(root, tools, profile: :release)
+
+    selector_path = Path.join(root, "priv/static/rekindle/web-current.json")
+    selector = File.read!(selector_path)
+    manifest_path = result.metadata.manifest
+    manifest = File.read!(manifest_path)
+
+    File.write!(manifest_path, Jason.encode!(%{"generation" => result.metadata.generation}))
+
+    assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} =
+             build(root, tools, profile: :release)
+
+    assert File.read!(selector_path) == selector
+
+    File.write!(manifest_path, manifest)
+    File.rm!(manifest_path)
+
+    assert {:error, %Rekindle.Web.Error{kind: :manifest_read}} =
+             build(root, tools, profile: :release)
+
+    assert File.read!(selector_path) == selector
+  end
+
   test "rolls back a new generation when the release selector cannot be replaced", %{
     root: root
   } do

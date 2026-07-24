@@ -69,7 +69,7 @@ defmodule Rekindle.Web.Release do
   defp publish_generation(source, destination, manifest) do
     case File.lstat(destination) do
       {:ok, %{type: :directory}} ->
-        with :ok <- Manifest.validate(destination, manifest) do
+        with :ok <- validate_generation(destination, manifest) do
           {:ok, false}
         end
 
@@ -85,7 +85,7 @@ defmodule Rekindle.Web.Release do
 
         with :ok <- mkdir(Path.dirname(destination)),
              :ok <- copy_directory(source, temporary),
-             :ok <- Manifest.validate(temporary, manifest),
+             :ok <- validate_generation(temporary, manifest),
              :ok <- File.rename(temporary, destination) do
           {:ok, true}
         else
@@ -100,6 +100,20 @@ defmodule Rekindle.Web.Release do
 
       {:error, reason} ->
         file_error(:publish, destination, reason)
+    end
+  end
+
+  defp validate_generation(root, expected) do
+    with {:ok, stored} <- read_manifest(root),
+         true <- stored == expected,
+         :ok <- Manifest.validate(root, stored) do
+      :ok
+    else
+      false ->
+        error(:invalid_manifest, "published Web manifest does not match its generation")
+
+      {:error, %Error{} = error} ->
+        {:error, error}
     end
   end
 
