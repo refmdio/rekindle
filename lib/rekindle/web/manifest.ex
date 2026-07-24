@@ -59,8 +59,12 @@ defmodule Rekindle.Web.Manifest do
   defp canonical_members(members) do
     valid? =
       Enum.all?(members, fn
-        %{"path" => path} when is_binary(path) -> true
-        _member -> false
+        %{"path" => path, "sha256" => hash} = member
+        when is_binary(path) and is_binary(hash) and map_size(member) == 2 ->
+          true
+
+        _member ->
+          false
       end)
 
     if valid? and members == Enum.sort_by(members, & &1["path"]),

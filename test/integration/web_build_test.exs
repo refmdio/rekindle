@@ -417,7 +417,7 @@ defmodule Rekindle.WebBuildTest do
              )
   end
 
-  test "rejects reordered members under a recomputed generation", %{root: root} do
+  test "rejects noncanonical members under a recomputed generation", %{root: root} do
     tools = fake_tools(root, "success-one")
     assert {:ok, selected_result} = build(root, tools, profile: :release)
 
@@ -447,6 +447,25 @@ defmodule Rekindle.WebBuildTest do
 
     assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} =
              Rekindle.Web.Manifest.validate_deployment(generation_root, reordered)
+
+    members_with_extra =
+      List.update_at(manifest["members"], 0, &Map.put(&1, "ignored", true))
+
+    with_extra =
+      manifest
+      |> Map.put("members", members_with_extra)
+      |> Map.put(
+        "generation",
+        sha256(Jason.encode!([manifest["version"], manifest["entry"], members_with_extra]))
+      )
+
+    refute with_extra["generation"] == manifest["generation"]
+
+    assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} =
+             Rekindle.Web.Manifest.validate(generation_root, with_extra)
+
+    assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} =
+             Rekindle.Web.Manifest.validate_deployment(generation_root, with_extra)
 
     File.write!(manifest_path, Jason.encode!(reordered))
 
