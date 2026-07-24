@@ -74,7 +74,7 @@ defmodule Rekindle.IntegrationsTest do
           do: cargo_check!(root, "web", "wasm32-unknown-unknown")
 
         if :desktop in targets,
-          do: cargo_check!(root, "desktop", host_target!())
+          do: cargo_check!(root, "desktop", desktop_target!())
       end
     end
   end
@@ -133,7 +133,7 @@ defmodule Rekindle.IntegrationsTest do
 
       assert {:ok, desktop} = Rekindle.build(:desktop, options)
       assert desktop.metadata.package == package
-      assert desktop.metadata.rust_target == host_target!()
+      assert desktop.metadata.rust_target == desktop_target!()
       assert File.regular?(desktop.artifact)
       assert File.regular?(desktop.metadata.manifest)
       assert_desktop_starts!(desktop.artifact, name)
@@ -199,8 +199,9 @@ defmodule Rekindle.IntegrationsTest do
     String.trim(path)
   end
 
-  defp host_target! do
-    {:ok, target} = Rekindle.Toolchain.host_target()
+  defp desktop_target! do
+    target = Rekindle.Toolchain.desktop_target()
+    assert {:ok, ^target} = Rekindle.Toolchain.target(:desktop)
     target
   end
 
