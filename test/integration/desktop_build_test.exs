@@ -69,6 +69,37 @@ defmodule Rekindle.DesktopBuildTest do
     refute File.exists?(tools.launched)
   end
 
+  test "rejects linked project state ancestors without external writes", %{root: root} do
+    tools = fake_tools(root, executable?: true)
+    external = Path.join(root, "external-state")
+    File.mkdir!(external)
+    File.write!(Path.join(external, "sentinel"), "unchanged")
+    state = Path.join(root, ".rekindle")
+    File.ln_s!(external, state)
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :mkdir, message: message}} =
+             build(root, tools)
+
+    assert message =~ "project state path"
+    refute File.exists?(Path.join(external, "tmp"))
+    assert File.read!(Path.join(external, "sentinel")) == "unchanged"
+
+    File.rm!(state)
+    assert {:ok, selected} = build(root, tools)
+    artifact = File.read!(selected.artifact)
+    manifest = File.read!(selected.metadata.manifest)
+
+    tmp = Path.join(state, "tmp")
+    File.rename!(tmp, Path.join(state, "tmp-owned"))
+    File.ln_s!(external, tmp)
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :mkdir}} = build(root, tools)
+    assert File.read!(selected.artifact) == artifact
+    assert File.read!(selected.metadata.manifest) == manifest
+    refute File.exists?(Path.join(external, "desktop"))
+    assert File.read!(Path.join(external, "sentinel")) == "unchanged"
+  end
+
   test "publishes a content-named desktop release without launching it", %{root: root} do
     tools = fake_tools(root, executable?: true, marker: "first")
     target_root = Path.join([root, "dist", "rekindle", "desktop", tools.target])
@@ -411,6 +442,30 @@ defmodule Rekindle.DesktopBuildTest do
              selected_manifest
              |> Jason.decode!()
              |> then(&Rekindle.Desktop.Manifest.validate_deployment(release_root, &1))
+  end
+
+  test "rejects a desktop release source reached through linked state ancestry", %{root: root} do
+    selected_tools = fake_tools(root, executable?: true, marker: "selected")
+    assert {:ok, selected} = build(root, selected_tools, profile: :release)
+    selected_manifest = File.read!(selected.metadata.manifest)
+
+    candidate_tools = fake_tools(root, executable?: true, marker: "candidate")
+    assert {:ok, candidate} = build(root, candidate_tools)
+    candidate_manifest = File.read!(candidate.metadata.manifest)
+    dev = Path.join(root, ".rekindle/dev")
+    external = Path.join(root, "external-dev")
+    File.rename!(dev, external)
+    File.ln_s!(external, dev)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_desktop_build_test, project_root: root)
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :manifest_read}} =
+             Rekindle.Desktop.Release.publish(project, %{candidate | profile: :release})
+
+    assert File.read!(selected.metadata.manifest) == selected_manifest
+    assert File.regular?(selected.artifact)
+    assert File.read!(candidate.metadata.manifest) == candidate_manifest
   end
 
   defp build(root, tools, options \\ []) do

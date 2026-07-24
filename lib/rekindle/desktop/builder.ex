@@ -4,6 +4,7 @@ defmodule Rekindle.Desktop.Builder do
   alias Rekindle.Build.Result
   alias Rekindle.Desktop.{Error, Manifest}
   alias Rekindle.Publication
+  alias Rekindle.State
 
   @spec build(Rekindle.Config.t(), Rekindle.Config.Target.t(), :dev | :release, keyword()) ::
           {:ok, Result.t()} | {:error, Rekindle.Cargo.Error.t() | Error.t()}
@@ -52,7 +53,7 @@ defmodule Rekindle.Desktop.Builder do
           {:ok, result}
         end
       after
-        File.rm_rf(temporary)
+        State.remove_directory(project.root, temporary)
       end
     end
   end
@@ -104,7 +105,7 @@ defmodule Rekindle.Desktop.Builder do
 
     destination = Path.join(parent, manifest["generation"])
 
-    with :ok <- mkdir(parent),
+    with :ok <- state_directory(project, parent),
          {:ok, destination} <-
            rename_generation(temporary, destination, manifest["generation"]) do
       {:ok, destination}
@@ -158,9 +159,11 @@ defmodule Rekindle.Desktop.Builder do
   defp temporary_directory(project) do
     parent = Path.join([project.root, ".rekindle", "tmp", "desktop"])
 
-    case Publication.temporary_directory(parent, "build-") do
-      {:ok, path} -> {:ok, path}
-      {:error, reason} -> file_error(:mkdir, parent, reason)
+    with :ok <- state_directory(project, parent) do
+      case Publication.temporary_directory(parent, "build-") do
+        {:ok, path} -> {:ok, path}
+        {:error, reason} -> file_error(:mkdir, parent, reason)
+      end
     end
   end
 
@@ -178,15 +181,15 @@ defmodule Rekindle.Desktop.Builder do
     ])
   end
 
-  defp mkdir(path) do
-    case File.mkdir_p(path) do
+  defp state_directory(project, path) do
+    case State.ensure_directory(project.root, path) do
       :ok -> :ok
       {:error, reason} -> file_error(:mkdir, path, reason)
     end
   end
 
   defp file_error(kind, path, reason),
-    do: error(kind, "cannot update #{path}: #{:file.format_error(reason)}")
+    do: error(kind, "cannot update #{path}: #{State.format_error(reason)}")
 
   defp error(kind, message), do: {:error, Error.new(kind, message)}
 end

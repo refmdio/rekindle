@@ -8,6 +8,7 @@ defmodule Rekindle.Desktop.Development do
   alias Rekindle.Build.Result
   alias Rekindle.Development.Cleanup
   alias Rekindle.Desktop.{Error, Manifest}
+  alias Rekindle.State
 
   @generation ~r/\A[0-9a-f]{64}\z/
 
@@ -127,7 +128,7 @@ defmodule Rekindle.Desktop.Development do
   end
 
   defp launch(state, result) do
-    case validate(result) do
+    case validate(state.root, result) do
       :ok ->
         fallback = state.retained
         discard_candidate(state)
@@ -235,8 +236,12 @@ defmodule Rekindle.Desktop.Development do
     error -> {:error, error}
   end
 
-  defp validate(%Result{target: :desktop, profile: :dev, metadata: metadata} = result) do
+  defp validate(
+         root,
+         %Result{target: :desktop, profile: :dev, metadata: metadata} = result
+       ) do
     with manifest_path when is_binary(manifest_path) <- metadata[:manifest],
+         :ok <- State.validate_parent(root, manifest_path),
          {:ok, contents} <- File.read(manifest_path),
          {:ok, manifest} <- Jason.decode(contents),
          true <- manifest["generation"] == metadata[:generation],
@@ -250,14 +255,15 @@ defmodule Rekindle.Desktop.Development do
     end
   end
 
-  defp validate(_result),
+  defp validate(_root, _result),
     do: {:error, Error.new(:invalid_result, "expected a desktop development build result")}
 
   defp load_retained(root) do
     directory = Path.join([root, ".rekindle", "dev"])
     marker_path = Path.join(directory, "desktop-last-running.json")
 
-    with {:ok, contents} <- File.read(marker_path),
+    with :ok <- State.validate_directory(root, directory),
+         {:ok, contents} <- File.read(marker_path),
          {:ok,
           %{
             "generation" => generation,
@@ -301,18 +307,18 @@ defmodule Rekindle.Desktop.Development do
         "manifest" => Path.relative_to(result.metadata.manifest, directory)
       })
 
-    with :ok <- File.mkdir_p(directory),
+    with :ok <- State.ensure_directory(root, directory),
          :ok <- File.write(temporary, marker),
          :ok <- File.rename(temporary, destination) do
       :ok
     else
       {:error, reason} ->
-        File.rm(temporary)
+        State.remove_file(root, temporary)
 
         {:error,
          Error.new(
            :marker_write,
-           "desktop launch state could not be updated: #{:file.format_error(reason)}"
+           "desktop launch state could not be updated: #{State.format_error(reason)}"
          )}
     end
   end

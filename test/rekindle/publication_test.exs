@@ -19,6 +19,17 @@ defmodule Rekindle.PublicationTest do
     assert File.regular?(second_file)
   end
 
+  test "does not reserve temporary members through a linked parent" do
+    root = temporary_root()
+    external = temporary_root()
+    parent = Path.join(root, "linked")
+    File.ln_s!(external, parent)
+
+    assert {:error, :enotdir} = Publication.temporary_directory(parent)
+    assert {:error, :enotdir} = Publication.temporary_file(parent)
+    assert File.ls!(external) == []
+  end
+
   test "serializes independent BEAM processes and releases after process exit" do
     root = temporary_root()
     ready = Path.join(root, "ready")

@@ -76,6 +76,37 @@ defmodule Rekindle.WebBuildTest do
     assert File.read!(result.artifact) =~ "app_bg.wasm"
   end
 
+  test "rejects linked project state ancestors without external writes", %{root: root} do
+    tools = fake_tools(root, "success")
+    external = Path.join(root, "external-state")
+    File.mkdir!(external)
+    File.write!(Path.join(external, "sentinel"), "unchanged")
+    state = Path.join(root, ".rekindle")
+    File.ln_s!(external, state)
+
+    assert {:error, %Rekindle.Web.Error{kind: :mkdir, message: message}} =
+             build(root, tools)
+
+    assert message =~ "project state path"
+    refute File.exists?(Path.join(external, "tmp"))
+    assert File.read!(Path.join(external, "sentinel")) == "unchanged"
+
+    File.rm!(state)
+    assert {:ok, selected} = build(root, tools)
+    selector = File.read!(Path.join(root, ".rekindle/dev/web-current.json"))
+    artifact = File.read!(selected.artifact)
+
+    tmp = Path.join(state, "tmp")
+    File.rename!(tmp, Path.join(state, "tmp-owned"))
+    File.ln_s!(external, tmp)
+
+    assert {:error, %Rekindle.Web.Error{kind: :mkdir}} = build(root, tools)
+    assert File.read!(Path.join(root, ".rekindle/dev/web-current.json")) == selector
+    assert File.read!(selected.artifact) == artifact
+    refute File.exists?(Path.join(external, "web"))
+    assert File.read!(Path.join(external, "sentinel")) == "unchanged"
+  end
+
   test "publishes release output separately from development output", %{root: root} do
     tools = fake_tools(root, "success")
 
@@ -694,6 +725,30 @@ defmodule Rekindle.WebBuildTest do
 
     assert {:error, %Rekindle.Web.Error{kind: :mkdir}} = build(root, tools)
     refute File.exists?(Path.join(root, ".rekindle/dev/web-current.json"))
+  end
+
+  test "rejects a Web release source reached through linked state ancestry", %{root: root} do
+    tools = fake_tools(root, "success")
+    assert {:ok, selected} = build(root, tools, profile: :release)
+    selector_path = Path.join(root, "priv/static/rekindle/entry.js")
+    selector = File.read!(selector_path)
+
+    assert {:ok, candidate} = build(root, tools)
+    candidate_manifest = File.read!(candidate.metadata.manifest)
+    dev = Path.join(root, ".rekindle/dev")
+    external = Path.join(root, "external-dev")
+    File.rename!(dev, external)
+    File.ln_s!(external, dev)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    assert {:error, %Rekindle.Web.Error{kind: :manifest_read}} =
+             Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+    assert File.read!(selector_path) == selector
+    assert File.regular?(selected.artifact)
+    assert File.read!(candidate.metadata.manifest) == candidate_manifest
   end
 
   test "detects changed, duplicate, and escaping manifest members", %{root: root} do

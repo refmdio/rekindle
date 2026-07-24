@@ -5,6 +5,7 @@ defmodule Rekindle.Web.Release do
 
   alias Rekindle.Build.Result
   alias Rekindle.Publication
+  alias Rekindle.State
   alias Rekindle.Web.{Error, Manifest}
 
   @retained 2
@@ -19,7 +20,8 @@ defmodule Rekindle.Web.Release do
     source = Path.dirname(metadata.manifest)
     namespace = Path.join(project.public_dir, "rekindle")
 
-    with {:ok, manifest} <- read_manifest(source),
+    with :ok <- validate_source(project, source),
+         {:ok, manifest} <- read_manifest(source),
          :ok <- Manifest.validate(source, manifest),
          true <- manifest["generation"] == metadata.generation do
       with_lock(project, fn -> publish_locked(namespace, source, manifest, result) end)
@@ -294,6 +296,13 @@ defmodule Rekindle.Web.Release do
     end
   end
 
+  defp validate_source(project, source) do
+    case State.validate_directory(project.root, source) do
+      :ok -> :ok
+      {:error, reason} -> file_error(:manifest_read, source, reason)
+    end
+  end
+
   defp mkdir(path) do
     case File.mkdir_p(path) do
       :ok -> :ok
@@ -309,7 +318,7 @@ defmodule Rekindle.Web.Release do
   end
 
   defp file_error(kind, path, reason),
-    do: error(kind, "cannot update #{path}: #{:file.format_error(reason)}")
+    do: error(kind, "cannot update #{path}: #{State.format_error(reason)}")
 
   defp error(kind, message), do: {:error, Error.new(kind, message)}
 end

@@ -4,12 +4,23 @@ defmodule Rekindle.Development.Cleanup do
   require Logger
 
   alias Rekindle.Publication
+  alias Rekindle.State
 
   @retained 2
   @generation ~r/\A[0-9a-f]{64}\z/
 
   @spec startup(Rekindle.Config.t()) :: :ok
   def startup(project) do
+    state_root = Path.join(project.root, ".rekindle")
+
+    case State.validate_directory(project.root, state_root) do
+      :ok -> startup_owned(project)
+      {:error, :enoent} -> :ok
+      {:error, reason} -> warn_unsafe(reason)
+    end
+  end
+
+  defp startup_owned(project) do
     cleanup_staging(project, :web)
     cleanup_staging(project, :desktop)
     remove_empty_tmp_root(project.root)
@@ -17,18 +28,18 @@ defmodule Rekindle.Development.Cleanup do
     with_cleanup_lock(project, {:web, :dev}, fn ->
       remove_temporary_markers(project.root)
       web_selected = selected_web(project.root)
-      prune(Path.join([project.root, ".rekindle", "dev", "web"]), web_selected)
+      prune(project.root, Path.join([project.root, ".rekindle", "dev", "web"]), web_selected)
     end)
 
     desktop_root = Path.join([project.root, ".rekindle", "dev", "desktop"])
     desktop_selected = selected_desktop(project.root)
 
     desktop_root
-    |> child_directories()
+    |> child_directories(project.root)
     |> Enum.each(fn directory ->
       target = Path.basename(directory)
       selected = if desktop_selected[:target] == target, do: desktop_selected[:generation]
-      prune(directory, selected)
+      prune(project.root, directory, selected)
     end)
 
     :ok
@@ -37,6 +48,7 @@ defmodule Rekindle.Development.Cleanup do
   defp cleanup_staging(project, target) do
     with_cleanup_lock(project, {:staging, target}, fn ->
       remove_owned_directory(
+        project.root,
         Path.join([project.root, ".rekindle", "tmp", Atom.to_string(target)])
       )
     end)
@@ -58,7 +70,7 @@ defmodule Rekindle.Development.Cleanup do
     with_cleanup_lock(project, {:web, :dev}, fn ->
       selected = selected_web(project.root)
 
-      if selected != generation, do: remove_owned_directory(Path.dirname(manifest))
+      if selected != generation, do: remove_owned_directory(project.root, Path.dirname(manifest))
       web_locked(project, selected)
     end)
   end
@@ -73,7 +85,7 @@ defmodule Rekindle.Development.Cleanup do
     marker = selected_desktop(project.root)
     selected = if marker[:target] == target, do: marker[:generation]
 
-    if selected != generation, do: remove_owned_directory(Path.dirname(manifest))
+    if selected != generation, do: remove_owned_directory(project.root, Path.dirname(manifest))
     desktop(project.root, result, selected)
   end
 
@@ -87,7 +99,7 @@ defmodule Rekindle.Development.Cleanup do
   @doc false
   @spec web_locked(Rekindle.Config.t(), String.t() | nil) :: :ok
   def web_locked(project, generation) do
-    prune(Path.join([project.root, ".rekindle", "dev", "web"]), generation)
+    prune(project.root, Path.join([project.root, ".rekindle", "dev", "web"]), generation)
   end
 
   @spec desktop(Path.t(), Rekindle.Build.Result.t()) :: :ok
@@ -106,15 +118,24 @@ defmodule Rekindle.Development.Cleanup do
         result.metadata.rust_target
       ])
 
-    prune(directory, selected_generation)
+    prune(root, directory, selected_generation)
   end
 
-  defp prune(directory, selected) do
-    directory
-    |> generations()
-    |> Enum.sort_by(fn {_path, modified} -> modified end, :desc)
-    |> keep(selected)
-    |> Enum.each(&remove/1)
+  defp prune(root, directory, selected) do
+    case State.validate_directory(root, directory) do
+      :ok ->
+        directory
+        |> generations()
+        |> Enum.sort_by(fn {_path, modified} -> modified end, :desc)
+        |> keep(selected)
+        |> Enum.each(&remove(root, &1))
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        warn_unsafe(reason)
+    end
 
     :ok
   end
@@ -154,20 +175,35 @@ defmodule Rekindle.Development.Cleanup do
     |> Enum.reject(&MapSet.member?(retained, &1))
   end
 
-  defp remove(path) do
-    case File.rm_rf(path) do
-      {:ok, _removed} -> :ok
-      {:error, reason, file} -> Logger.warning("could not remove #{file}: #{inspect(reason)}")
+  defp remove(root, path) do
+    case State.remove_directory(root, path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("could not remove #{path}: #{State.format_error(reason)}")
     end
   end
 
   defp selected_web(root) do
-    read_generation(Path.join([root, ".rekindle", "dev", "web-current.json"]))
+    path = Path.join([root, ".rekindle", "dev", "web-current.json"])
+
+    case State.validate_parent(root, path) do
+      :ok -> read_generation(path)
+      {:error, _reason} -> nil
+    end
   end
 
   defp selected_desktop(root) do
     path = Path.join([root, ".rekindle", "dev", "desktop-last-running.json"])
 
+    case State.validate_parent(root, path) do
+      :ok -> read_desktop_generation(path)
+      {:error, _reason} -> %{}
+    end
+  end
+
+  defp read_desktop_generation(path) do
     case File.read(path) do
       {:ok, contents} ->
         case Jason.decode(contents) do
@@ -199,7 +235,14 @@ defmodule Rekindle.Development.Cleanup do
     end
   end
 
-  defp child_directories(root) do
+  defp child_directories(path, root) do
+    case State.validate_directory(root, path) do
+      :ok -> real_child_directories(path)
+      {:error, _reason} -> []
+    end
+  end
+
+  defp real_child_directories(root) do
     case File.ls(root) do
       {:ok, names} ->
         Enum.flat_map(names, fn name ->
@@ -212,8 +255,14 @@ defmodule Rekindle.Development.Cleanup do
     end
   end
 
-  defp remove_owned_directory(path) do
-    if match?({:ok, %{type: :directory}}, File.lstat(path)), do: remove(path)
+  defp remove_owned_directory(root, path) do
+    case State.remove_directory(root, path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("could not remove #{path}: #{State.format_error(reason)}")
+    end
   end
 
   defp remove_temporary_markers(root) do
@@ -225,7 +274,7 @@ defmodule Rekindle.Development.Cleanup do
         |> Enum.filter(&String.starts_with?(&1, ".tmp-web-current-"))
         |> Enum.each(fn name ->
           path = Path.join(directory, name)
-          if match?({:ok, %{type: :regular}}, File.lstat(path)), do: File.rm(path)
+          State.remove_file(root, path)
         end)
 
       {:error, _reason} ->
@@ -234,9 +283,20 @@ defmodule Rekindle.Development.Cleanup do
   end
 
   defp remove_empty_tmp_root(root) do
-    case File.rmdir(Path.join([root, ".rekindle", "tmp"])) do
-      :ok -> :ok
+    path = Path.join([root, ".rekindle", "tmp"])
+
+    with :ok <- State.validate_directory(root, path) do
+      case File.rmdir(path) do
+        :ok -> :ok
+        {:error, _reason} -> :ok
+      end
+    else
       {:error, _reason} -> :ok
     end
+  end
+
+  defp warn_unsafe(reason) do
+    Logger.warning("could not inspect project state: #{State.format_error(reason)}")
+    :ok
   end
 end

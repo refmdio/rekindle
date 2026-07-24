@@ -829,6 +829,30 @@ defmodule Rekindle.DevelopmentTest do
     assert length(Path.wildcard(Path.join(web_root, String.duplicate("?", 64)))) == 2
   end
 
+  test "does not read or mutate development state through a linked state root", %{root: root} do
+    external = Path.join(root, "external-state")
+    temporary = Path.join([external, "tmp", "web", "abandoned"])
+    marker = Path.join([external, "dev", ".tmp-web-current-abandoned"])
+    error = Path.join([external, "dev", "web-error.json"])
+    File.mkdir_p!(temporary)
+    File.write!(Path.join(temporary, "partial"), "unchanged")
+    File.mkdir_p!(Path.dirname(marker))
+    File.write!(marker, "unchanged")
+    File.write!(error, Jason.encode!(%{"error" => "retained"}))
+    File.ln_s!(external, Path.join(root, ".rekindle"))
+
+    {:ok, project} =
+      Rekindle.Config.load(:rekindle_development_test, project_root: root)
+
+    assert :ok = Rekindle.Development.Cleanup.startup(project)
+    assert :ok = Development.put_error(project, "must not escape")
+    assert :ok = Development.clear_error(project)
+
+    assert File.read!(Path.join(temporary, "partial")) == "unchanged"
+    assert File.read!(marker) == "unchanged"
+    assert Jason.decode!(File.read!(error)) == %{"error" => "retained"}
+  end
+
   test "startup cleanup waits for live staging in independent VMs", %{root: root} do
     {:ok, project} =
       Rekindle.Config.load(:rekindle_development_test, project_root: root)

@@ -3,6 +3,7 @@ defmodule Rekindle.Web.Builder do
 
   alias Rekindle.Build.Result
   alias Rekindle.Publication
+  alias Rekindle.State
   alias Rekindle.Toolchain.Process
   alias Rekindle.Web.{Error, Manifest}
 
@@ -55,7 +56,7 @@ defmodule Rekindle.Web.Builder do
           {:ok, result}
         end
       after
-        File.rm_rf(temporary)
+        State.remove_directory(project.root, temporary)
       end
     end
   end
@@ -197,7 +198,7 @@ defmodule Rekindle.Web.Builder do
     parent = generation_parent(project, profile)
     destination = Path.join(parent, manifest["generation"])
 
-    with :ok <- mkdir(parent),
+    with :ok <- state_directory(project, parent),
          {:ok, destination} <-
            rename_generation(temporary, destination, manifest["generation"]),
          :ok <- validate_published(destination, manifest["generation"]) do
@@ -254,7 +255,7 @@ defmodule Rekindle.Web.Builder do
         "manifest" => Path.join(["web", manifest["generation"], "manifest.json"])
       })
 
-    with :ok <- mkdir(root),
+    with :ok <- state_directory(project, root),
          {:ok, temporary} <- Publication.temporary_file(root, ".tmp-web-current-") do
       try do
         with :ok <- File.write(temporary, selector),
@@ -264,7 +265,7 @@ defmodule Rekindle.Web.Builder do
           {:error, reason} -> file_error(:selector_write, destination, reason)
         end
       after
-        File.rm(temporary)
+        State.remove_file(project.root, temporary)
       end
     else
       {:error, %Error{} = error} -> {:error, error}
@@ -300,9 +301,11 @@ defmodule Rekindle.Web.Builder do
   defp temporary_directory(project) do
     parent = Path.join([project.root, ".rekindle", "tmp", "web"])
 
-    case Publication.temporary_directory(parent, "build-") do
-      {:ok, path} -> {:ok, path}
-      {:error, reason} -> file_error(:mkdir, parent, reason)
+    with :ok <- state_directory(project, parent) do
+      case Publication.temporary_directory(parent, "build-") do
+        {:ok, path} -> {:ok, path}
+        {:error, reason} -> file_error(:mkdir, parent, reason)
+      end
     end
   end
 
@@ -327,15 +330,15 @@ defmodule Rekindle.Web.Builder do
   defp toolchain_options(options),
     do: Keyword.take(options, [:timeout, :env])
 
-  defp mkdir(path) do
-    case File.mkdir_p(path) do
+  defp state_directory(project, path) do
+    case State.ensure_directory(project.root, path) do
       :ok -> :ok
       {:error, reason} -> file_error(:mkdir, path, reason)
     end
   end
 
   defp file_error(kind, path, reason),
-    do: error(kind, "cannot update #{path}: #{:file.format_error(reason)}")
+    do: error(kind, "cannot update #{path}: #{State.format_error(reason)}")
 
   defp error(kind, message, options \\ []),
     do: {:error, Error.new(kind, message, options)}

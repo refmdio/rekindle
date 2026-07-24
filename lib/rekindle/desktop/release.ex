@@ -6,6 +6,7 @@ defmodule Rekindle.Desktop.Release do
   alias Rekindle.Build.Result
   alias Rekindle.Desktop.{Error, Manifest}
   alias Rekindle.Publication
+  alias Rekindle.State
 
   @release_executable ~r/\Aapplication-[0-9a-f]{64}\z/
 
@@ -20,7 +21,8 @@ defmodule Rekindle.Desktop.Release do
     destination_root =
       Path.join([project.root, "dist", "rekindle", "desktop", metadata.rust_target])
 
-    with {:ok, source_manifest} <- read_manifest(metadata.manifest),
+    with :ok <- validate_source(project, source_root),
+         {:ok, source_manifest} <- read_manifest(metadata.manifest),
          :ok <- Manifest.validate(source_root, source_manifest),
          true <- source_manifest["generation"] == metadata.generation,
          true <- source_manifest["target"] == metadata.rust_target,
@@ -251,6 +253,13 @@ defmodule Rekindle.Desktop.Release do
     end
   end
 
+  defp validate_source(project, source) do
+    case State.validate_directory(project.root, source) do
+      :ok -> :ok
+      {:error, reason} -> file_error(:manifest_read, source, reason)
+    end
+  end
+
   defp mkdir(path) do
     case File.mkdir_p(path) do
       :ok -> :ok
@@ -298,7 +307,7 @@ defmodule Rekindle.Desktop.Release do
     do: contents |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
 
   defp file_error(kind, path, reason),
-    do: error(kind, "cannot update #{path}: #{:file.format_error(reason)}")
+    do: error(kind, "cannot update #{path}: #{State.format_error(reason)}")
 
   defp error(kind, message), do: {:error, Error.new(kind, message)}
 end

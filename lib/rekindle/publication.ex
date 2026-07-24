@@ -8,15 +8,19 @@ defmodule Rekindle.Publication do
   @spec temporary_directory(Path.t(), String.t()) ::
           {:ok, Path.t()} | {:error, File.posix()}
   def temporary_directory(parent, prefix \\ ".tmp-") do
-    with :ok <- File.mkdir_p(parent) do
-      reserve(parent, prefix, &File.mkdir/1, @attempts)
+    case File.lstat(parent) do
+      {:ok, %{type: :directory}} -> reserve(parent, prefix, &File.mkdir/1, @attempts)
+      {:ok, _stat} -> {:error, :enotdir}
+      {:error, reason} -> {:error, reason}
     end
   end
 
   @spec temporary_file(Path.t(), String.t()) :: {:ok, Path.t()} | {:error, File.posix()}
   def temporary_file(parent, prefix \\ ".tmp-") do
-    with :ok <- File.mkdir_p(parent) do
-      reserve(parent, prefix, &reserve_file/1, @attempts)
+    case File.lstat(parent) do
+      {:ok, %{type: :directory}} -> reserve(parent, prefix, &reserve_file/1, @attempts)
+      {:ok, _stat} -> {:error, :enotdir}
+      {:error, reason} -> {:error, reason}
     end
   end
 
