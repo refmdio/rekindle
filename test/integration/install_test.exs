@@ -1,16 +1,3 @@
-Code.compiler_options(ignore_module_conflict: true)
-
-defmodule Mix.Tasks.Phx.Server do
-  use Mix.Task
-
-  @impl Mix.Task
-  def run(arguments) do
-    send(Application.fetch_env!(:rekindle, :phx_server_probe), {:phx_server, arguments})
-  end
-end
-
-Code.compiler_options(ignore_module_conflict: false)
-
 defmodule Rekindle.InstallTest do
   use ExUnit.Case, async: false
 
@@ -622,19 +609,36 @@ defmodule Rekindle.InstallTest do
   end
 
   test "rekindle.dev delegates arguments to phx.server" do
-    Application.put_env(:rekindle, :phx_server_probe, self())
+    phoenix_task = :code.which(Mix.Tasks.Phx.Server)
+    rekindle_ebin = Mix.Tasks.Rekindle.Dev |> :code.which() |> Path.dirname()
+    elixir = System.find_executable("elixir")
+    assert is_binary(elixir)
 
-    on_exit(fn ->
-      Application.delete_env(:rekindle, :phx_server_probe)
-      Mix.Task.reenable("phx.server")
-      Mix.Task.reenable("rekindle.dev")
-    end)
+    script = """
+    Application.ensure_all_started(:mix)
+    Code.prepend_path(#{inspect(rekindle_ebin)})
 
-    Mix.Task.reenable("phx.server")
-    Mix.Task.reenable("rekindle.dev")
+    defmodule Mix.Tasks.Phx.Server do
+      use Mix.Task
+
+      @impl Mix.Task
+      def run(arguments) do
+        arguments
+        |> :erlang.term_to_binary()
+        |> Base.encode64()
+        |> then(&IO.puts("delegated:" <> &1))
+      end
+    end
+
+    Code.ensure_loaded!(Mix.Tasks.Rekindle.Dev)
     Mix.Tasks.Rekindle.Dev.run(["--open"])
+    """
 
-    assert_receive {:phx_server, ["--open"]}
+    {output, 0} = System.cmd(elixir, ["-e", script], stderr_to_stdout: true)
+    [encoded] = Regex.run(~r/^delegated:(.+)$/m, output, capture: :all_but_first)
+
+    assert encoded |> Base.decode64!() |> :erlang.binary_to_term([:safe]) == ["--open"]
+    assert :code.which(Mix.Tasks.Phx.Server) == phoenix_task
   end
 
   test "does not install the browser plug for a desktop-only client" do
