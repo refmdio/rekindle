@@ -12,9 +12,9 @@ desktop target.
 ## Requirements
 
 - Elixir 1.17 or later
-- A Phoenix application with an endpoint
 - Rust and Cargo
-- Igniter 0.8 or later as a development dependency
+- A Phoenix project generator for a new application, or an existing Phoenix
+  application with an endpoint
 - The Rust targets and native system libraries required by the selected UI
   integration
 
@@ -23,7 +23,32 @@ setup command. A global installation is not required.
 
 ## Installation
 
-Add Igniter to the Phoenix application's development dependencies:
+### Create a new Phoenix application
+
+Install the Igniter and Phoenix project generators:
+
+```console
+mix archive.install hex igniter_new
+mix archive.install hex phx_new
+```
+
+Create the Phoenix application and install Rekindle in one command:
+
+```console
+mix igniter.new my_app \
+  --with phx.new \
+  --install rekindle \
+  --integration gpui \
+  --targets web,desktop
+```
+
+`--integration` and `--targets` are forwarded to the Rekindle installer. Pass
+Phoenix generator options with `--with-args`, for example
+`--with-args="--no-ecto"`.
+
+### Add Rekindle to an existing Phoenix application
+
+Add Igniter to the application's development dependencies:
 
 ```elixir
 def deps do
