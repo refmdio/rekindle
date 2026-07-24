@@ -180,6 +180,69 @@ defmodule Rekindle.WebBuildTest do
     refute File.exists?(destination)
   end
 
+  test "serializes concurrent Web releases in the same public namespace", %{root: root} do
+    tools = fake_tools(root, "success-one")
+    assert {:ok, first} = build(root, tools)
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, second} = build(root, tools)
+
+    File.write!(tools.mode, "success-three")
+    assert {:ok, third} = build(root, tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    parent = self()
+    namespace = Path.join(root, "priv/static/rekindle")
+    lock = {{Rekindle.Web.Release, namespace}, self()}
+    assert :global.set_lock(lock)
+
+    tasks =
+      for candidate <-
+            List.duplicate(first, 4) ++
+              List.duplicate(second, 4) ++
+              List.duplicate(third, 4) do
+        Task.async(fn ->
+          send(parent, {:ready, self()})
+
+          receive do
+            :publish -> Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+          end
+        end)
+      end
+
+    pids =
+      for _index <- 1..length(tasks) do
+        assert_receive {:ready, pid}
+        pid
+      end
+
+    try do
+      Enum.each(pids, &send(&1, :publish))
+      Enum.each(tasks, &assert(Task.yield(&1, 50) == nil))
+    after
+      :global.del_lock(lock)
+    end
+
+    assert Enum.all?(tasks, fn task ->
+             match?({:ok, %Rekindle.Build.Result{}}, Task.await(task, 10_000))
+           end)
+
+    selector = namespace |> Path.join("web-current.json") |> read_json()
+    generation_root = Path.join([namespace, "web", selector["generation"]])
+    manifest = generation_root |> Path.join("manifest.json") |> read_json()
+
+    assert File.regular?(Path.join(namespace, selector["entry"]))
+    assert File.regular?(Path.join(namespace, selector["manifest"]))
+    assert :ok = Rekindle.Web.Manifest.validate(generation_root, manifest)
+
+    assert namespace
+           |> Path.join("web")
+           |> File.ls!()
+           |> Enum.count(&(&1 =~ ~r/^[0-9a-f]{64}$/)) <= 2
+  end
+
   test "keeps the selected generation when the next package is incomplete", %{root: root} do
     tools = fake_tools(root, "success")
     assert {:ok, result} = build(root, tools)

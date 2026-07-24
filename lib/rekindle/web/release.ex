@@ -17,18 +17,13 @@ defmodule Rekindle.Web.Release do
       ) do
     source = Path.dirname(metadata.manifest)
     namespace = Path.join(project.public_dir, "rekindle")
-    destination = Path.join([namespace, "web", metadata.generation])
 
     with {:ok, manifest} <- read_manifest(source),
          :ok <- Manifest.validate(source, manifest),
-         true <- manifest["generation"] == metadata.generation,
-         {:ok, published?} <- publish_generation(source, destination, manifest) do
-      finish_publication(
-        namespace,
-        destination,
-        manifest,
-        result,
-        published?
+         true <- manifest["generation"] == metadata.generation do
+      :global.trans(
+        {{__MODULE__, namespace}, self()},
+        fn -> publish_locked(namespace, source, manifest, result) end
       )
     else
       false ->
@@ -36,6 +31,20 @@ defmodule Rekindle.Web.Release do
 
       {:error, %Error{} = error} ->
         {:error, error}
+    end
+  end
+
+  defp publish_locked(namespace, source, manifest, result) do
+    destination = Path.join([namespace, "web", manifest["generation"]])
+
+    with {:ok, published?} <- publish_generation(source, destination, manifest) do
+      finish_publication(
+        namespace,
+        destination,
+        manifest,
+        result,
+        published?
+      )
     end
   end
 
