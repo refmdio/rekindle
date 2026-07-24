@@ -8,18 +8,27 @@ defmodule Rekindle.Integration do
   @integrations %{
     gpui: %{
       dependency: "gpui",
+      files: ["Cargo.toml", "rust-toolchain.toml", "src/lib.rs"],
       graphics: %{web: :webgpu, desktop: :native},
       host: "",
       template: "gpui"
     },
     egui: %{
       dependency: "eframe",
+      files: ["Cargo.toml", "rust-toolchain.toml", "src/lib.rs", "src/app.rs"],
       graphics: %{web: :webgl2, desktop: :native},
       host: ~s(<canvas id="rekindle-canvas"></canvas>),
       template: "egui"
     },
     slint: %{
       dependency: "slint",
+      files: [
+        "Cargo.toml",
+        "rust-toolchain.toml",
+        "build.rs",
+        "src/lib.rs",
+        "ui/app-window.slint"
+      ],
       graphics: %{web: :webgl2, desktop: :native},
       host: ~s(<canvas id="canvas"></canvas>),
       template: "slint"
@@ -48,10 +57,9 @@ defmodule Rekindle.Integration do
       wasm_bindgen_version: Rekindle.Toolchain.wasm_bindgen_version()
     ]
 
-    common = ["Cargo.toml", "rust-toolchain.toml", "src/lib.rs"]
     entries = Enum.map(targets, &"src/bin/#{&1}.rs")
 
-    Map.new(common ++ entries, fn path ->
+    Map.new(integration.files ++ entries, fn path ->
       template =
         Application.app_dir(
           :rekindle,

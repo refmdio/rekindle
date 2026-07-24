@@ -15,14 +15,26 @@ defmodule Rekindle.IntegrationsTest do
       web = Integration.render(name, [:web])
       desktop = Integration.render(name, [:desktop])
 
+      expected_files =
+        case name do
+          :gpui ->
+            ["Cargo.toml", "rust-toolchain.toml", "src/lib.rs"]
+
+          :egui ->
+            ["Cargo.toml", "rust-toolchain.toml", "src/app.rs", "src/lib.rs"]
+
+          :slint ->
+            [
+              "Cargo.toml",
+              "build.rs",
+              "rust-toolchain.toml",
+              "src/lib.rs",
+              "ui/app-window.slint"
+            ]
+        end
+
       assert Map.keys(both) |> Enum.sort() ==
-               [
-                 "Cargo.toml",
-                 "rust-toolchain.toml",
-                 "src/bin/desktop.rs",
-                 "src/bin/web.rs",
-                 "src/lib.rs"
-               ]
+               Enum.sort(expected_files ++ ["src/bin/desktop.rs", "src/bin/web.rs"])
 
       assert Map.has_key?(web, "src/bin/web.rs")
       refute Map.has_key?(web, "src/bin/desktop.rs")
@@ -191,23 +203,29 @@ defmodule Rekindle.IntegrationsTest do
 
   defp assert_framework_entrypoints(:egui, files) do
     assert files["Cargo.toml"] =~
-             ~s(features = ["default_fonts", "glow", "wayland", "x11"])
+             ~s(features = ["default_fonts", "glow", "persistence", "wayland", "x11"])
 
     assert files["src/bin/web.rs"] =~ "use wasm_bindgen::JsCast;"
     assert files["src/bin/web.rs"] =~ "eframe::WebRunner::new()"
     assert files["src/bin/desktop.rs"] =~ "eframe::run_native("
-    assert files["src/lib.rs"] =~ ~S|ui.heading("Hello World!");|
+    assert files["src/lib.rs"] =~ "pub use app::TemplateApp;"
+    assert files["src/app.rs"] =~ ~S|ui.heading("eframe template");|
+    assert files["src/app.rs"] =~ ~S|ui.text_edit_singleline(&mut self.label);|
+    assert files["src/app.rs"] =~ "egui::Slider::new"
   end
 
   defp assert_framework_entrypoints(:slint, files) do
     assert files["Cargo.toml"] =~
              ~s(features = ["compat-1-2", "renderer-femtovg", "backend-winit", "std"])
 
-    assert files["src/bin/web.rs"] =~ "use slint::ComponentHandle;"
-    assert files["src/bin/web.rs"] =~ ".run()"
+    assert files["Cargo.toml"] =~ ~s(slint-build = "1.16")
+    assert files["build.rs"] =~ ~S|slint_build::compile("ui/app-window.slint")|
+    assert files["src/lib.rs"] =~ "slint::include_modules!();"
+    assert files["src/lib.rs"] =~ "AppWindow::new()"
+    assert files["src/bin/web.rs"] =~ "::run()"
     assert files["src/bin/desktop.rs"] =~ "::run()"
-    assert files["src/lib.rs"] =~ ~s(text: "hello world";)
-    assert files["src/lib.rs"] =~ "color: green;"
+    assert files["ui/app-window.slint"] =~ "Counter: \\{root.counter}"
+    assert files["ui/app-window.slint"] =~ ~s(text: "Increase value";)
   end
 
   defp cargo_check!(root, target, triple) do

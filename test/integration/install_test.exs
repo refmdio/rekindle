@@ -57,6 +57,22 @@ defmodule Rekindle.InstallTest do
       manifest = content(installed, "client/Cargo.toml")
       assert manifest =~ Rekindle.Integration.dependency(String.to_existing_atom(integration))
 
+      case integration do
+        "gpui" ->
+          assert content(installed, "client/src/lib.rs") =~ "pub struct HelloWorld"
+
+        "egui" ->
+          assert content(installed, "client/src/lib.rs") =~ "pub use app::TemplateApp;"
+          assert content(installed, "client/src/app.rs") =~ "pub struct TemplateApp"
+
+        "slint" ->
+          assert content(installed, "client/build.rs") =~ "slint_build::compile"
+          assert content(installed, "client/src/lib.rs") =~ "slint::include_modules!();"
+
+          assert content(installed, "client/ui/app-window.slint") =~
+                   "export component AppWindow"
+      end
+
       for target <- ~w(web desktop) do
         path = "client/src/bin/#{target}.rs"
 

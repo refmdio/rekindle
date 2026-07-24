@@ -1,7 +1,16 @@
 fn main() -> eframe::Result {
+    env_logger::init();
+
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([400.0, 300.0])
+            .with_min_inner_size([300.0, 220.0]),
+        ..Default::default()
+    };
+
     eframe::run_native(
-        "My egui App",
-        eframe::NativeOptions::default(),
-        Box::new(|_| Ok(Box::new(<%= @crate_name %>::HelloWorld))),
+        "eframe template",
+        options,
+        Box::new(|context| Ok(Box::new(<%= @crate_name %>::TemplateApp::new(context)))),
     )
 }

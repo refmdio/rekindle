@@ -1,9 +1,3 @@
-pub struct HelloWorld;
+mod app;
 
-impl eframe::App for HelloWorld {
-    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
-        eframe::egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading("Hello World!");
-        });
-    }
-}
+pub use app::TemplateApp;

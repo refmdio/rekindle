@@ -20,7 +20,8 @@ mix igniter.install rekindle --integration egui --targets web,desktop
 ```
 
 The generated Web entry mounts eframe into a canvas and uses WebGL2. The desktop
-entry uses eframe's native runtime.
+entry uses eframe's native runtime. The shared `TemplateApp` lives in
+`client/src/app.rs`, following the official eframe template layout.
 
 ## Slint
 
@@ -29,12 +30,17 @@ mix igniter.install rekindle --integration slint --targets web,desktop
 ```
 
 The generated Web entry mounts Slint into a canvas and uses WebGL2. The desktop
-entry uses Slint's native runtime.
+entry uses Slint's native runtime. The generated `build.rs` compiles
+`client/ui/app-window.slint`, while `client/src/lib.rs` connects the component's
+callbacks for both targets.
 
 ## Shared UI code
 
-Every integration keeps shared application and UI logic in `client/src/lib.rs`.
-The `web` and `desktop` binaries should contain platform startup code only.
+Every integration keeps one shared application implementation for Web and
+desktop. GPUI uses `client/src/lib.rs`; eframe follows its official
+`client/src/app.rs` plus `client/src/lib.rs` layout; Slint keeps its UI in
+`client/ui/app-window.slint` with shared Rust bindings in `client/src/lib.rs`.
+The `web` and `desktop` binaries contain platform startup code only.
 Target-specific behavior can be selected with the generated Cargo features.
 
 Re-running the installer does not replace an existing Cargo client. Adoption
