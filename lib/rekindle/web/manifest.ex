@@ -218,7 +218,13 @@ defmodule Rekindle.Web.Manifest do
   end
 
   defp validate_membership(:canonical, root, declared), do: exact_members(root, declared)
-  defp validate_membership(:deployment, _root, _declared), do: :ok
+
+  defp validate_membership(:deployment, root, _declared) do
+    case members(root) do
+      {:ok, _members} -> :ok
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
 
   defp exact_members(root, declared) do
     with {:ok, actual} <- members(root) do

@@ -596,6 +596,19 @@ defmodule Rekindle.WebBuildTest do
 
     File.rm!(derivative)
 
+    external_member = Path.join(root, "external-member")
+    File.write!(external_member, "external")
+    unlisted = Path.join(generation_root, "unlisted")
+    File.ln_s!(external_member, unlisted)
+
+    assert {:error, %Rekindle.Web.Error{kind: :unsupported_member}} =
+             Rekindle.Web.Manifest.validate(generation_root, manifest)
+
+    assert {:error, %Rekindle.Web.Error{kind: :unsupported_member}} =
+             Rekindle.Web.Manifest.validate_deployment(generation_root, manifest)
+
+    File.rm!(unlisted)
+
     external = Path.join(root, "external-snippets")
     File.mkdir_p!(external)
 
@@ -645,6 +658,27 @@ defmodule Rekindle.WebBuildTest do
              Rekindle.Web.Manifest.validate_deployment(candidate_root, candidate_manifest)
 
     File.write!(tools.mode, "success-two")
+
+    assert {:error, %Rekindle.Web.Error{kind: :unsupported_member}} =
+             build(root, tools, profile: :release)
+
+    assert File.read!(selector_path) == selected
+    assert :ok = Rekindle.Web.Manifest.validate_deployment(selected_root, selected_manifest)
+
+    File.rm!(Path.join(candidate_root, "snippets"))
+    File.mkdir!(Path.join(candidate_root, "snippets"))
+
+    File.cp!(
+      Path.join(external, "helper.js"),
+      Path.join(candidate_root, "snippets/helper.js")
+    )
+
+    external_member = Path.join(root, "external-release-member")
+    File.write!(external_member, "external")
+    File.ln_s!(external_member, Path.join(candidate_root, "unlisted"))
+
+    assert {:error, %Rekindle.Web.Error{kind: :unsupported_member}} =
+             Rekindle.Web.Manifest.validate_deployment(candidate_root, candidate_manifest)
 
     assert {:error, %Rekindle.Web.Error{kind: :unsupported_member}} =
              build(root, tools, profile: :release)
