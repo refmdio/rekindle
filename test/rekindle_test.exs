@@ -167,7 +167,7 @@ defmodule RekindleTest do
       rustc,
       """
       #!/bin/sh
-      printf 'rustc 1.90.0\\nhost: test-target\\n'
+      printf 'rustc 1.90.0\\nhost: x86_64-unknown-linux-gnu\\n'
       """
     )
 
@@ -184,9 +184,10 @@ defmodule RekindleTest do
       Rekindle.Desktop.Manifest.create(
         temporary,
         "desktop",
-        "test-target",
+        Rekindle.Toolchain.desktop_target(),
         "client",
-        "desktop"
+        "desktop",
+        :gpui
       )
 
     generation_root =
@@ -195,7 +196,7 @@ defmodule RekindleTest do
         ".rekindle",
         "dev",
         "desktop",
-        "test-target",
+        Rekindle.Toolchain.desktop_target(),
         manifest["generation"]
       ])
 
@@ -211,7 +212,7 @@ defmodule RekindleTest do
       metadata: %{
         generation: manifest["generation"],
         manifest: manifest_path,
-        rust_target: "test-target"
+        rust_target: Rekindle.Toolchain.desktop_target()
       }
     }
   end

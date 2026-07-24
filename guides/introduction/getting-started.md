@@ -24,7 +24,9 @@ mix igniter.install rekindle --integration gpui --targets web,desktop
 
 Valid integrations are `gpui`, `egui`, and `slint`. Valid target selections are
 `web`, `desktop`, and `web,desktop`. When the flags are omitted for a new
-client, Rekindle selects GPUI and enables both targets.
+client, Rekindle selects GPUI and enables both targets. The Web target is
+`wasm32-unknown-unknown`; Rekindle 0.1 qualifies desktop builds on
+`x86_64-unknown-linux-gnu`.
 
 The installer adds Rekindle as an application dependency, creates or adopts the
 Rust client, configures the Phoenix development runtime, and adds Web release

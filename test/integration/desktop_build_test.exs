@@ -284,7 +284,7 @@ defmodule Rekindle.DesktopBuildTest do
   end
 
   defp fake_tools(root, options) do
-    target = "x86_64-fixture-linux-gnu"
+    target = Rekindle.Toolchain.desktop_target()
     launched = Path.join(root, "launched")
     artifact = Path.join(root, "client/target/#{target}/debug/desktop")
     rustc = Path.join(root, "fake-rustc")

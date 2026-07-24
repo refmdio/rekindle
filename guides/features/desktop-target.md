@@ -1,7 +1,9 @@
 # Desktop Target
 
 The desktop target compiles and runs the native binary selected from the shared
-client crate.
+client crate. Rekindle 0.1 supports desktop builds on
+`x86_64-unknown-linux-gnu`. Other native targets are not qualified and are
+rejected with a diagnostic instead of producing an untested release artifact.
 
 ## Development
 

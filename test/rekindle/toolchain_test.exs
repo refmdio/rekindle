@@ -3,6 +3,17 @@ defmodule Rekindle.ToolchainTest do
 
   alias Rekindle.Toolchain
 
+  test "accepts only the qualified desktop target" do
+    root = tmp_dir()
+    supported = fake_rustc(root, Toolchain.desktop_target())
+    unsupported = fake_rustc(root, "aarch64-unknown-linux-gnu")
+
+    assert {:ok, "x86_64-unknown-linux-gnu"} = Toolchain.target(:desktop, rustc: supported)
+
+    assert {:error, %Toolchain.Error{kind: :unsupported_desktop_target}} =
+             Toolchain.target(:desktop, rustc: unsupported)
+  end
+
   test "resolves only the requested version in the user cache" do
     home = tmp_dir()
     environment = %{"XDG_CACHE_HOME" => Path.join(home, "cache"), "HOME" => home}
@@ -108,6 +119,12 @@ defmodule Rekindle.ToolchainTest do
     File.mkdir_p!(Path.dirname(path))
     File.write!(path, contents)
     File.chmod!(path, 0o755)
+  end
+
+  defp fake_rustc(root, target) do
+    path = Path.join(root, "rustc-#{target}")
+    write_executable(path, "#!/bin/sh\nprintf 'rustc 1.90.0\\nhost: #{target}\\n'\n")
+    path
   end
 
   defp tmp_dir do

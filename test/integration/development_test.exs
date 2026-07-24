@@ -503,7 +503,15 @@ defmodule Rekindle.DevelopmentTest do
       assert_receive {DesktopDevelopment, {:ready, ^stable}}, 1_000
     end
 
-    generation_root = Path.join([root, ".rekindle", "dev", "desktop", "test-target"])
+    generation_root =
+      Path.join([
+        root,
+        ".rekindle",
+        "dev",
+        "desktop",
+        Rekindle.Toolchain.desktop_target()
+      ])
+
     generations = File.ls!(generation_root)
 
     assert length(generations) == 2
@@ -858,7 +866,7 @@ defmodule Rekindle.DevelopmentTest do
 
     File.write!(source, body)
     File.chmod!(source, 0o755)
-    target = "test-target"
+    target = Rekindle.Toolchain.desktop_target()
     temporary = Path.join(root, "#{name}-generation")
     File.mkdir_p!(temporary)
     executable = "desktop"
@@ -867,7 +875,14 @@ defmodule Rekindle.DevelopmentTest do
     File.chmod!(artifact, 0o755)
 
     {:ok, manifest} =
-      Rekindle.Desktop.Manifest.create(temporary, executable, target, "client", "desktop")
+      Rekindle.Desktop.Manifest.create(
+        temporary,
+        executable,
+        target,
+        "client",
+        "desktop",
+        :gpui
+      )
 
     generation_root =
       Path.join([root, ".rekindle", "dev", "desktop", target, manifest["generation"]])
