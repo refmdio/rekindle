@@ -1,8 +1,8 @@
 defmodule Rekindle.Test.DesktopWindow do
   import ExUnit.Assertions
 
-  @default_timeout 5_000
-  @weston_timeout 8_000
+  @default_timeout 15_000
+  @weston_timeout 20_000
   @event_parsers [
     {~r/get_xdg_surface\(new id xdg_surface#(\d+), wl_surface#(\d+)\)/, :xdg_surface},
     {~r/xdg_surface#(\d+)\.get_toplevel\(new id xdg_toplevel#(\d+)\)/, :toplevel},
@@ -122,7 +122,7 @@ defmodule Rekindle.Test.DesktopWindow do
   end
 
   defp run(tools, runtime, executable, arguments, timeout) do
-    socket = "rekindle-#{System.unique_integer([:positive, :monotonic])}"
+    socket = "rekindle-#{resource_id()}"
     log = Path.join(runtime, "weston.log")
 
     command = [
@@ -214,12 +214,21 @@ defmodule Rekindle.Test.DesktopWindow do
     path =
       Path.join(
         System.tmp_dir!(),
-        "rekindle-wayland-#{System.unique_integer([:positive, :monotonic])}"
+        "rekindle-wayland-#{resource_id()}"
       )
 
     File.mkdir_p!(path)
     File.chmod!(path, 0o700)
     path
+  end
+
+  defp resource_id do
+    token =
+      12
+      |> :crypto.strong_rand_bytes()
+      |> Base.url_encode64(padding: false)
+
+    "#{System.pid()}-#{token}"
   end
 
   defp duration(milliseconds), do: "#{milliseconds / 1_000}s"

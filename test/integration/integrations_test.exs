@@ -421,11 +421,17 @@ defmodule Rekindle.IntegrationsTest do
     path =
       Path.join(
         System.tmp_dir!(),
-        "rekindle-#{name}-#{System.unique_integer([:positive, :monotonic])}"
+        "rekindle-#{name}-#{System.pid()}-#{random_token()}"
       )
 
     File.mkdir_p!(path)
     on_exit(fn -> File.rm_rf!(path) end)
     path
+  end
+
+  defp random_token do
+    12
+    |> :crypto.strong_rand_bytes()
+    |> Base.url_encode64(padding: false)
   end
 end

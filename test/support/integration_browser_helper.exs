@@ -10,8 +10,9 @@ defmodule Rekindle.Test.IntegrationBrowser do
       System.find_executable("chromedriver") ||
         flunk("ChromeDriver is required for Web startup")
 
-    host_root = Path.join(root, "browser")
-    profile = Path.join(root, "chromium-profile")
+    session = resource_id()
+    host_root = Path.join(root, "browser-#{session}")
+    profile = Path.join(root, "chromium-profile-#{session}")
     File.cp_r!(Path.dirname(artifact), host_root)
 
     {:ok, %{graphics: %{web: graphics}, host: host}} = Integration.fetch(integration)
@@ -414,6 +415,15 @@ defmodule Rekindle.Test.IntegrationBrowser do
     {:ok, port} = :inet.port(socket)
     :ok = :gen_tcp.close(socket)
     port
+  end
+
+  defp resource_id do
+    token =
+      12
+      |> :crypto.strong_rand_bytes()
+      |> Base.url_encode64(padding: false)
+
+    "#{System.pid()}-#{token}"
   end
 
   defp wait_until!(timeout, function, message) do
