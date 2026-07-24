@@ -68,16 +68,159 @@ defmodule Rekindle.DesktopBuildTest do
     refute File.exists?(tools.launched)
   end
 
-  test "keeps release and development generations separate", %{root: root} do
-    tools = fake_tools(root, executable?: true)
+  test "publishes a content-named desktop release without launching it", %{root: root} do
+    tools = fake_tools(root, executable?: true, marker: "first")
+    target_root = Path.join([root, "dist", "rekindle", tools.target])
+    File.mkdir_p!(target_root)
+    File.write!(Path.join(target_root, "keep.txt"), "application-owned")
+    File.write!(Path.join(target_root, ".tmp-stale"), "incomplete")
 
     assert {:ok, result} = build(root, tools, profile: :release)
     assert result.profile == :release
-    assert result.artifact =~ "/.rekindle/release/desktop/#{tools.target}/"
+    assert Path.dirname(result.artifact) == target_root
+    assert Path.basename(result.artifact) == "desktop-#{sha256(File.read!(result.artifact))}"
+    assert executable?(result.artifact)
+    refute File.exists?(tools.launched)
+
+    manifest = result.metadata.manifest |> File.read!() |> Jason.decode!()
+    assert result.metadata.manifest == Path.join(target_root, "manifest.json")
+    assert manifest["generation"] == result.metadata.generation
+    assert manifest["target"] == tools.target
+    assert manifest["sha256"] == sha256(File.read!(result.artifact))
+    assert manifest["executable"] == Path.basename(result.artifact)
+    assert :ok = Rekindle.Desktop.Manifest.validate(target_root, manifest)
+    assert File.read!(Path.join(target_root, "keep.txt")) == "application-owned"
+    refute File.exists?(Path.join(target_root, ".tmp-stale"))
+
+    previous = result.artifact
+    tools = fake_tools(root, executable?: true, marker: "second")
+    assert {:ok, replacement} = build(root, tools, profile: :release)
+    refute replacement.artifact == previous
+    refute File.exists?(previous)
+    assert File.regular?(replacement.artifact)
+
+    assert Path.wildcard(
+             Path.join([
+               root,
+               ".rekindle/release/desktop",
+               tools.target,
+               "*",
+               "manifest.json"
+             ])
+           ) != []
+
     refute File.exists?(Path.join(root, ".rekindle/release/desktop-current.json"))
     refute File.exists?(Path.join(root, ".rekindle/release/desktop-last-running.json"))
     refute File.exists?(Path.join(root, ".rekindle/dev/desktop-current.json"))
     refute File.exists?(tools.launched)
+  end
+
+  test "preserves the prior release when the next manifest cannot be published", %{root: root} do
+    project_root = root
+    tools = fake_tools(root, executable?: true, marker: "first")
+    assert {:ok, first} = build(root, tools, profile: :release)
+
+    release_root = Path.dirname(first.artifact)
+    manifest_path = Path.join(release_root, "manifest.json")
+    manifest = File.read!(manifest_path)
+    File.rm!(manifest_path)
+    File.mkdir!(manifest_path)
+
+    tools = fake_tools(project_root, executable?: true, marker: "second")
+
+    publication =
+      try do
+        build(project_root, tools, profile: :release)
+      after
+        File.rmdir!(manifest_path)
+        File.write!(manifest_path, manifest)
+      end
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :manifest_write}} = publication
+    assert File.regular?(first.artifact)
+    assert File.read!(manifest_path) == manifest
+
+    assert release_root
+           |> File.ls!()
+           |> Enum.filter(&String.starts_with?(&1, "desktop-")) == [Path.basename(first.artifact)]
+  end
+
+  test "keeps the selected manifest unchanged when replacement is not writable", %{root: root} do
+    tools = fake_tools(root, executable?: true, marker: "first")
+    assert {:ok, first} = build(root, tools, profile: :release)
+
+    release_root = Path.dirname(first.artifact)
+    manifest_path = Path.join(release_root, "manifest.json")
+    selected = File.read!(manifest_path)
+
+    tools = fake_tools(root, executable?: true, marker: "second")
+    assert {:ok, candidate} = build(root, tools)
+    contents = File.read!(candidate.artifact)
+    staged = Path.join(release_root, "desktop-#{sha256(contents)}")
+    File.cp!(candidate.artifact, staged)
+    File.chmod!(staged, 0o755)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_desktop_build_test, project_root: root)
+
+    File.chmod!(release_root, 0o555)
+
+    publication =
+      try do
+        Rekindle.Desktop.Release.publish(project, %{candidate | profile: :release})
+      after
+        File.chmod!(release_root, 0o755)
+      end
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :manifest_write}} = publication
+    assert File.read!(manifest_path) == selected
+    assert File.regular?(first.artifact)
+  end
+
+  test "serializes concurrent releases for the same target", %{root: root} do
+    first_tools = fake_tools(root, executable?: true, marker: "first")
+    assert {:ok, first} = build(root, first_tools)
+
+    second_tools = fake_tools(root, executable?: true, marker: "second")
+    assert {:ok, second} = build(root, second_tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_desktop_build_test, project_root: root)
+
+    parent = self()
+
+    tasks =
+      for candidate <- List.duplicate(first, 6) ++ List.duplicate(second, 6) do
+        Task.async(fn ->
+          send(parent, {:ready, self()})
+
+          receive do
+            :publish ->
+              Rekindle.Desktop.Release.publish(project, %{candidate | profile: :release})
+          end
+        end)
+      end
+
+    pids =
+      for _index <- 1..length(tasks) do
+        assert_receive {:ready, pid}
+        pid
+      end
+
+    Enum.each(pids, &send(&1, :publish))
+
+    assert Enum.all?(tasks, fn task ->
+             match?({:ok, %Rekindle.Build.Result{}}, Task.await(task, 10_000))
+           end)
+
+    release_root = Path.join([root, "dist", "rekindle", first_tools.target])
+    manifest = release_root |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
+    assert :ok = Rekindle.Desktop.Manifest.validate(release_root, manifest)
+    assert File.regular?(Path.join(release_root, manifest["executable"]))
+
+    assert release_root
+           |> File.ls!()
+           |> Enum.filter(&String.starts_with?(&1, "desktop-")) == [manifest["executable"]]
   end
 
   test "rejects changed bytes in an existing generation", %{root: root} do
@@ -185,6 +328,7 @@ defmodule Rekindle.DesktopBuildTest do
       })
 
     mode = if options[:executable?], do: "755", else: "644"
+    marker = Keyword.get(options, :marker, "fixture")
 
     write_executable(
       cargo,
@@ -195,7 +339,7 @@ defmodule Rekindle.DesktopBuildTest do
         exit 0
       fi
       mkdir -p '#{Path.dirname(artifact)}'
-      printf '#!/bin/sh\\ntouch \"%s\"\\n' '#{launched}' > '#{artifact}'
+      printf '#!/bin/sh\\n# #{marker}\\ntouch \"%s\"\\n' '#{launched}' > '#{artifact}'
       chmod #{mode} '#{artifact}'
       printf '%s\\n' '#{compiler_artifact}'
       """

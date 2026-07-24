@@ -24,22 +24,26 @@ defmodule Rekindle.Desktop.Builder do
                cargo.binary
              ),
            :ok <- write_manifest(temporary, manifest),
-           {:ok, generation} <- publish(project, profile, temporary, manifest) do
-        {:ok,
-         %Result{
-           target: :desktop,
-           profile: profile,
-           artifact: Path.join(generation, executable),
-           metadata: %{
-             generation: manifest["generation"],
-             manifest: Path.join(generation, "manifest.json"),
-             package: cargo.package,
-             binary: cargo.binary,
-             rust_target: cargo.target,
-             target_directory: cargo.target_directory,
-             diagnostics: cargo.diagnostics
-           }
-         }}
+           {:ok, generation} <- publish(project, profile, temporary, manifest),
+           {:ok, result} <-
+             finish(
+               project,
+               %Result{
+                 target: :desktop,
+                 profile: profile,
+                 artifact: Path.join(generation, executable),
+                 metadata: %{
+                   generation: manifest["generation"],
+                   manifest: Path.join(generation, "manifest.json"),
+                   package: cargo.package,
+                   binary: cargo.binary,
+                   rust_target: cargo.target,
+                   target_directory: cargo.target_directory,
+                   diagnostics: cargo.diagnostics
+                 }
+               }
+             ) do
+        {:ok, result}
       end
     after
       File.rm_rf(temporary)
@@ -128,6 +132,11 @@ defmodule Rekindle.Desktop.Builder do
         {:error, error}
     end
   end
+
+  defp finish(project, %Result{profile: :release} = result),
+    do: Rekindle.Desktop.Release.publish(project, result)
+
+  defp finish(_project, result), do: {:ok, result}
 
   defp temporary_path(project) do
     Path.join([
