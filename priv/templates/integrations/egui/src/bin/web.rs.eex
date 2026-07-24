@@ -2,14 +2,6 @@
 
 use wasm_bindgen::JsCast;
 
-#[wasm_bindgen::prelude::wasm_bindgen(
-    inline_js = "export function rekindleReady() { document.documentElement.dataset.rekindleStatus = 'ready'; }"
-)]
-unsafe extern "C" {
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = rekindleReady)]
-    fn rekindle_ready();
-}
-
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() {
     wasm_bindgen_futures::spawn_local(async {
@@ -27,7 +19,5 @@ pub fn start() {
             )
             .await
             .expect("failed to start the application");
-
-        unsafe { rekindle_ready() };
     });
 }

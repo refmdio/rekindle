@@ -1,26 +1,11 @@
 #![no_main]
 
-use std::cell::RefCell;
-
 use slint::ComponentHandle;
-
-thread_local! {
-    static APPLICATION: RefCell<Option<<%= @crate_name %>::RekindleApp>> = const { RefCell::new(None) };
-}
-
-#[wasm_bindgen::prelude::wasm_bindgen(
-    inline_js = "export function rekindleReady() { document.documentElement.dataset.rekindleStatus = 'ready'; }"
-)]
-unsafe extern "C" {
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = rekindleReady)]
-    fn rekindle_ready();
-}
 
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() {
-    let application =
-        <%= @crate_name %>::RekindleApp::new().expect("failed to create the application");
-    application.show().expect("failed to show the application");
-    APPLICATION.with(|slot| *slot.borrow_mut() = Some(application));
-    unsafe { rekindle_ready() };
+    <%= @crate_name %>::RekindleApp::new()
+        .expect("failed to create the application")
+        .run()
+        .expect("failed to run the application");
 }

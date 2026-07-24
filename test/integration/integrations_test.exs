@@ -2,6 +2,7 @@ defmodule Rekindle.IntegrationsTest do
   use ExUnit.Case, async: false
 
   alias Rekindle.Integration
+  alias Rekindle.Test.IntegrationBrowser
 
   @moduletag timeout: 600_000
 
@@ -39,6 +40,8 @@ defmodule Rekindle.IntegrationsTest do
                ~s(wasm-bindgen = "=#{Rekindle.Toolchain.wasm_bindgen_version()}")
 
       refute both["Cargo.toml"] =~ ~r/^rekindle(?:_|-|\s*=)/m
+      refute both["src/bin/web.rs"] =~ "rekindleReady"
+      refute both["src/bin/web.rs"] =~ "rekindleStatus"
       assert both["src/lib.rs"] != ""
       assert both["src/bin/web.rs"] =~ "sample_client"
       assert both["src/bin/desktop.rs"] =~ "sample_client"
@@ -129,7 +132,7 @@ defmodule Rekindle.IntegrationsTest do
       assert web.metadata.rust_target == "wasm32-unknown-unknown"
       assert File.regular?(web.artifact)
       assert File.regular?(web.metadata.manifest)
-      assert_web_starts!(web.artifact, name, root)
+      IntegrationBrowser.assert_starts!(web.artifact, name, root)
 
       assert {:ok, desktop} = Rekindle.build(:desktop, options)
       assert desktop.metadata.package == package
@@ -222,97 +225,6 @@ defmodule Rekindle.IntegrationsTest do
       {:error, reason} ->
         flunk("#{integration} desktop could not start: #{inspect(reason)}")
     end
-  end
-
-  defp assert_web_starts!(artifact, integration, root) do
-    browser = System.find_executable("chromium") || flunk("Chromium is required for Web startup")
-    host_root = Path.join(root, "browser")
-    profile = Path.join(root, "chromium-profile")
-    File.cp_r!(Path.dirname(artifact), host_root)
-
-    {:ok, %{host: host}} = Integration.fetch(integration)
-    File.write!(Path.join(host_root, "index.html"), browser_host(host))
-
-    {:ok, _applications} = Application.ensure_all_started(:inets)
-
-    {:ok, server} =
-      :inets.start(:httpd,
-        port: 0,
-        bind_address: {127, 0, 0, 1},
-        server_name: ~c"rekindle",
-        server_root: String.to_charlist(host_root),
-        document_root: String.to_charlist(host_root),
-        modules: [:mod_alias, :mod_dir, :mod_get, :mod_head],
-        directory_index: [~c"index.html"],
-        mime_types: [
-          {~c"html", ~c"text/html"},
-          {~c"js", ~c"text/javascript"},
-          {~c"wasm", ~c"application/wasm"}
-        ]
-      )
-
-    port = :httpd.info(server) |> Keyword.fetch!(:port)
-
-    try do
-      arguments = [
-        "--headless=new",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-dev-shm-usage",
-        "--user-data-dir=#{profile}",
-        "--virtual-time-budget=5000",
-        "--dump-dom",
-        "http://127.0.0.1:#{port}/"
-      ]
-
-      case Rekindle.Toolchain.Process.run(browser, arguments,
-             cd: host_root,
-             timeout: 30_000,
-             output_limit: 1_000_000
-           ) do
-        {:ok, %{status: 0, output: output}} ->
-          assert output =~ ~s(data-rekindle-status="ready"),
-                 "#{integration} Web startup failed:\n#{output}"
-
-        {:ok, result} ->
-          flunk("#{integration} Chromium exited with status #{result.status}:\n#{result.output}")
-
-        {:error, reason} ->
-          flunk("#{integration} Chromium startup failed: #{inspect(reason)}")
-      end
-    after
-      :inets.stop(:httpd, server)
-    end
-  end
-
-  defp browser_host(host) do
-    """
-    <!doctype html>
-    <html data-rekindle-status="pending">
-      <head><meta charset="utf-8"><title>Rekindle startup</title></head>
-      <body>
-        #{host}
-        <script type="module">
-          const root = document.documentElement;
-          const fail = (error) => {
-            const message = String(error?.reason ?? error?.error ?? error);
-            root.dataset.rekindleStatus = "error";
-            root.dataset.rekindleError = message;
-          };
-          window.addEventListener("error", fail);
-          window.addEventListener("unhandledrejection", fail);
-
-          try {
-            if (!window.isSecureContext) throw new Error("insecure context");
-            const module = await import("./app.js");
-            await module.default();
-          } catch (error) {
-            fail(error);
-          }
-        </script>
-      </body>
-    </html>
-    """
   end
 
   defp tmp_dir(name) do
