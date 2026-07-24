@@ -72,10 +72,10 @@ if Code.ensure_loaded?(Igniter) do
 
     defp copy_project(source, destination) do
       File.mkdir_p!(destination)
-      copy_entries(source, destination, "")
+      copy_entries(source, destination, "", source, destination)
     end
 
-    defp copy_entries(source, destination, relative) do
+    defp copy_entries(source, destination, relative, source_root, destination_root) do
       source
       |> File.ls!()
       |> Enum.each(fn name ->
@@ -85,18 +85,20 @@ if Code.ensure_loaded?(Igniter) do
           copy_entry(
             Path.join(source, name),
             Path.join(destination, name),
-            child_relative
+            child_relative,
+            source_root,
+            destination_root
           )
         end
       end)
     end
 
-    defp copy_entry(source, destination, relative) do
+    defp copy_entry(source, destination, relative, source_root, destination_root) do
       case File.lstat!(source) do
         %{type: :directory, mode: mode} ->
           File.mkdir_p!(destination)
           File.chmod!(destination, mode)
-          copy_entries(source, destination, relative)
+          copy_entries(source, destination, relative, source_root, destination_root)
 
         %{type: :regular, mode: mode} ->
           File.mkdir_p!(Path.dirname(destination))
@@ -104,11 +106,40 @@ if Code.ensure_loaded?(Igniter) do
           File.chmod!(destination, mode)
 
         %{type: :symlink} ->
-          File.mkdir_p!(Path.dirname(destination))
-          File.ln_s!(File.read_link!(source), destination)
+          copy_symlink(source, destination, relative, source_root, destination_root)
 
         _other ->
           :ok
+      end
+    end
+
+    defp copy_symlink(source, destination, relative, source_root, destination_root) do
+      target = File.read_link!(source)
+      resolved = Path.expand(target, Path.dirname(source))
+      relative_target = Path.relative_to(resolved, source_root)
+
+      if relative_target != ".." and not String.starts_with?(relative_target, "../") do
+        snapshot_target = Path.join(destination_root, relative_target)
+        copied_target = if Path.type(target) == :absolute, do: snapshot_target, else: target
+
+        File.mkdir_p!(Path.dirname(destination))
+        File.ln_s!(copied_target, destination)
+      else
+        copy_external_target(source, destination, relative, source_root, destination_root)
+      end
+    end
+
+    defp copy_external_target(source, destination, relative, source_root, destination_root) do
+      case File.stat!(source) do
+        %{type: :directory, mode: mode} ->
+          File.mkdir_p!(destination)
+          File.chmod!(destination, mode)
+          copy_entries(source, destination, relative, source_root, destination_root)
+
+        %{type: :regular, mode: mode} ->
+          File.mkdir_p!(Path.dirname(destination))
+          File.cp!(source, destination)
+          File.chmod!(destination, mode)
       end
     end
 

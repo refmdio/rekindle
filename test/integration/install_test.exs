@@ -461,6 +461,20 @@ defmodule Rekindle.InstallTest do
 
         assert locked.issues == []
         assert filesystem_tree("client") == locked_files
+
+        File.mkdir_p!("client/.state")
+        File.rename!("client/Cargo.lock", "client/.state/Cargo.lock")
+
+        File.ln_s!(
+          Path.expand("client/.state/Cargo.lock"),
+          "client/Cargo.lock"
+        )
+
+        symlinked_files = filesystem_tree("client")
+        symlinked = install(original, integration: "gpui", targets: ["web"])
+
+        assert symlinked.issues == []
+        assert filesystem_tree("client") == symlinked_files
         result
       end)
 
