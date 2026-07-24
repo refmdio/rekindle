@@ -121,15 +121,18 @@ defmodule Rekindle.Web.Manifest do
   end
 
   defp validate_members(root, members) do
-    Enum.reduce_while(members, {:ok, MapSet.new()}, fn member, {:ok, paths} ->
-      case validate_member(root, member, paths) do
-        {:ok, path} -> {:cont, {:ok, MapSet.put(paths, path)}}
-        {:error, %Error{} = error} -> {:halt, {:error, error}}
+    with :ok <- generation_root(root) do
+      members
+      |> Enum.reduce_while({:ok, MapSet.new()}, fn member, {:ok, paths} ->
+        case validate_member(root, member, paths) do
+          {:ok, path} -> {:cont, {:ok, MapSet.put(paths, path)}}
+          {:error, %Error{} = error} -> {:halt, {:error, error}}
+        end
+      end)
+      |> case do
+        {:ok, _paths} -> :ok
+        {:error, %Error{} = error} -> {:error, error}
       end
-    end)
-    |> case do
-      {:ok, _paths} -> :ok
-      {:error, %Error{} = error} -> {:error, error}
     end
   end
 
@@ -137,6 +140,7 @@ defmodule Rekindle.Web.Manifest do
        when is_binary(expected) do
     with :ok <- relative_path(path),
          false <- MapSet.member?(paths, path),
+         :ok <- member_ancestors(root, path),
          {:ok, %{type: :regular}} <- File.lstat(Path.join(root, path)),
          {:ok, contents} <- File.read(Path.join(root, path)),
          true <- sha256(contents) == expected do
@@ -164,6 +168,53 @@ defmodule Rekindle.Web.Manifest do
 
   defp validate_member(_root, _member, _paths),
     do: error(:invalid_manifest, "Web manifest contains an invalid member")
+
+  defp generation_root(root) do
+    case File.lstat(root) do
+      {:ok, %{type: :directory}} ->
+        :ok
+
+      {:ok, _stat} ->
+        error(:unsupported_member, "Web generation root is not a directory")
+
+      {:error, :enoent} ->
+        error(:missing_member, "Web generation root is missing")
+
+      {:error, reason} ->
+        file_error(:member_read, ".", reason)
+    end
+  end
+
+  defp member_ancestors(root, path) do
+    path
+    |> Path.split()
+    |> Enum.drop(-1)
+    |> Enum.reduce_while({:ok, root}, fn component, {:ok, parent} ->
+      ancestor = Path.join(parent, component)
+
+      case File.lstat(ancestor) do
+        {:ok, %{type: :directory}} ->
+          {:cont, {:ok, ancestor}}
+
+        {:ok, _stat} ->
+          {:halt,
+           error(
+             :unsupported_member,
+             "Web generation member ancestor is not a directory: #{Path.relative_to(ancestor, root)}"
+           )}
+
+        {:error, :enoent} ->
+          {:halt, error(:missing_member, "Web generation member is missing: #{path}")}
+
+        {:error, reason} ->
+          {:halt, file_error(:member_read, Path.relative_to(ancestor, root), reason)}
+      end
+    end)
+    |> case do
+      {:ok, _parent} -> :ok
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
 
   defp validate_membership(:canonical, root, declared), do: exact_members(root, declared)
   defp validate_membership(:deployment, _root, _declared), do: :ok

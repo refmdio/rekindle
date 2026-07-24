@@ -525,6 +525,88 @@ defmodule Rekindle.WebBuildTest do
     assert {:error, %Rekindle.Web.Error{kind: :copy_public}} = build(root, tools)
   end
 
+  test "rejects symbolic links in Web generation paths", %{root: root} do
+    tools = fake_tools(root, "success")
+    assert {:ok, result} = build(root, tools)
+
+    generation_root = Path.dirname(result.artifact)
+    manifest = generation_root |> Path.join("manifest.json") |> read_json()
+    linked_root = Path.join(root, "linked-generation")
+    File.ln_s!(generation_root, linked_root)
+
+    assert {:error, %Rekindle.Web.Error{kind: :unsupported_member}} =
+             Rekindle.Web.Manifest.validate(linked_root, manifest)
+
+    assert {:error, %Rekindle.Web.Error{kind: :unsupported_member}} =
+             Rekindle.Web.Manifest.validate_deployment(linked_root, manifest)
+
+    derivative = Path.join(generation_root, "snippets/helper-digested.js")
+    File.write!(derivative, "digest derivative")
+
+    assert :ok = Rekindle.Web.Manifest.validate_deployment(generation_root, manifest)
+
+    assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} =
+             Rekindle.Web.Manifest.validate(generation_root, manifest)
+
+    File.rm!(derivative)
+
+    external = Path.join(root, "external-snippets")
+    File.mkdir_p!(external)
+
+    File.cp!(
+      Path.join(generation_root, "snippets/helper.js"),
+      Path.join(external, "helper.js")
+    )
+
+    File.rm_rf!(Path.join(generation_root, "snippets"))
+    File.ln_s!(external, Path.join(generation_root, "snippets"))
+
+    assert {:error, %Rekindle.Web.Error{kind: :unsupported_member}} =
+             Rekindle.Web.Manifest.validate(generation_root, manifest)
+
+    assert {:error, %Rekindle.Web.Error{kind: :unsupported_member}} =
+             Rekindle.Web.Manifest.validate_deployment(generation_root, manifest)
+  end
+
+  test "preserves the selected release when reuse crosses a symbolic link", %{root: root} do
+    tools = fake_tools(root, "success-one")
+    assert {:ok, _selected_result} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, candidate} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-one")
+    assert {:ok, selected_result} = build(root, tools, profile: :release)
+
+    selector_path = Path.join(root, "priv/static/rekindle/entry.js")
+    selected = File.read!(selector_path)
+    selected_root = Path.dirname(selected_result.artifact)
+    selected_manifest = read_json(selected_result.metadata.manifest)
+    candidate_root = Path.dirname(candidate.artifact)
+    candidate_manifest = read_json(candidate.metadata.manifest)
+    external = Path.join(root, "external-release-snippets")
+    File.mkdir_p!(external)
+
+    File.cp!(
+      Path.join(candidate_root, "snippets/helper.js"),
+      Path.join(external, "helper.js")
+    )
+
+    File.rm_rf!(Path.join(candidate_root, "snippets"))
+    File.ln_s!(external, Path.join(candidate_root, "snippets"))
+
+    assert {:error, %Rekindle.Web.Error{kind: :unsupported_member}} =
+             Rekindle.Web.Manifest.validate_deployment(candidate_root, candidate_manifest)
+
+    File.write!(tools.mode, "success-two")
+
+    assert {:error, %Rekindle.Web.Error{kind: :unsupported_member}} =
+             build(root, tools, profile: :release)
+
+    assert File.read!(selector_path) == selected
+    assert :ok = Rekindle.Web.Manifest.validate_deployment(selected_root, selected_manifest)
+  end
+
   test "reports publication state failures without leaving a selector", %{root: root} do
     tools = fake_tools(root, "success")
     File.mkdir_p!(Path.join(root, ".rekindle"))
