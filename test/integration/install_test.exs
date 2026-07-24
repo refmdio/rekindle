@@ -58,7 +58,7 @@ defmodule Rekindle.InstallTest do
       assert installed.issues == []
       manifest = content(installed, "client/Cargo.toml")
       assert manifest =~ Rekindle.Integration.dependency(String.to_existing_atom(integration))
-      assert content(installed, "client/Cargo.lock") =~ ~s(name = "rekindle_client")
+      assert content(installed, "client/Cargo.lock") =~ ~s(name = "client")
 
       case integration do
         "gpui" ->
@@ -413,7 +413,7 @@ defmodule Rekindle.InstallTest do
 
     assert adopted.issues == []
     config = content(adopted, "config/config.exs")
-    assert config =~ ~s(package: "rekindle_client")
+    assert config =~ ~s(package: "client")
     assert config =~ ~s(binary: "browser")
     assert config =~ ~s(features: ["web", "canvas"])
   end
@@ -639,7 +639,7 @@ defmodule Rekindle.InstallTest do
     adopted = install(original, integration: "gpui", targets: ["web"])
 
     assert adopted.issues == []
-    assert content(adopted, "config/config.exs") =~ ~s(package: "rekindle_client")
+    assert content(adopted, "config/config.exs") =~ ~s(package: "client")
   end
 
   test "rejects invalid existing configuration before staging changes" do

@@ -48,7 +48,7 @@ defmodule Rekindle.Integration do
   @spec render(name(), [target()], keyword()) :: %{String.t() => String.t()}
   def render(name, targets, options \\ []) do
     integration = Map.fetch!(@integrations, name)
-    package_name = Keyword.get(options, :package_name, "rekindle_client")
+    package_name = Keyword.get(options, :package_name, "client")
     crate_name = String.replace(package_name, "-", "_")
 
     assigns = [

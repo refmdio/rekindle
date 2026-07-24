@@ -54,7 +54,10 @@ defmodule Rekindle.IntegrationsTest do
       assert both["Cargo.toml"] =~
                ~s(wasm-bindgen = "=#{Rekindle.Toolchain.wasm_bindgen_version()}")
 
-      refute Enum.any?(both, fn {_path, source} -> source =~ ~r/rekindle/i end)
+      for rendered <- [both, web, desktop] do
+        refute Enum.any?(rendered, fn {_path, source} -> source =~ ~r/rekindle/i end)
+      end
+
       assert both["src/lib.rs"] != ""
       assert both["src/bin/web.rs"] =~ "sample_client"
       assert both["src/bin/desktop.rs"] =~ "sample_client"
