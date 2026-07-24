@@ -39,23 +39,39 @@ if Code.ensure_loaded?(Igniter) do
       project_root = temporary_root()
 
       try do
-        if File.regular?(Path.join(client_root, "Cargo.toml")) do
-          copy_project(File.cwd!(), project_root)
+        with :ok <- maybe_copy_project(client_root, project_root),
+             :ok <- materialize(igniter, project_root) do
+          callback.(Path.join(project_root, "client"), false)
         end
-
-        :ok = materialize(igniter, project_root)
-        callback.(Path.join(project_root, "client"), false)
       after
         File.rm_rf(project_root)
       end
     end
 
+    defp maybe_copy_project(client_root, project_root) do
+      if File.regular?(Path.join(client_root, "Cargo.toml")) do
+        copy_project(File.cwd!(), project_root)
+      else
+        :ok
+      end
+    end
+
     defp materialize(igniter, project_root) do
       igniter.rewrite.sources
-      |> Enum.each(fn {relative, source} ->
+      |> Enum.reduce_while(:ok, fn {relative, source}, :ok ->
         path = Path.join(project_root, relative)
-        File.mkdir_p!(Path.dirname(path))
-        File.write!(path, Rewrite.Source.get(source, :content))
+
+        with :ok <- file_operation(File.mkdir_p(Path.dirname(path)), path, "create directory"),
+             :ok <-
+               file_operation(
+                 File.write(path, Rewrite.Source.get(source, :content)),
+                 path,
+                 "write file"
+               ) do
+          {:cont, :ok}
+        else
+          {:error, message} -> {:halt, {:error, message}}
+        end
       end)
     end
 
@@ -71,76 +87,122 @@ if Code.ensure_loaded?(Igniter) do
     ]
 
     defp copy_project(source, destination) do
-      File.mkdir_p!(destination)
-      copy_entries(source, destination, "", source, destination)
+      with :ok <- file_operation(File.mkdir_p(destination), destination, "create directory") do
+        copy_entries(source, destination, "", source, destination)
+      end
     end
 
     defp copy_entries(source, destination, relative, source_root, destination_root) do
-      source
-      |> File.ls!()
-      |> Enum.each(fn name ->
-        child_relative = Path.join(relative, name)
+      case File.ls(source) do
+        {:ok, names} ->
+          Enum.reduce_while(names, :ok, fn name, :ok ->
+            child_relative = Path.join(relative, name)
 
-        unless child_relative in @snapshot_ignored do
-          copy_entry(
-            Path.join(source, name),
-            Path.join(destination, name),
-            child_relative,
-            source_root,
-            destination_root
-          )
-        end
-      end)
+            result =
+              if child_relative in @snapshot_ignored do
+                :ok
+              else
+                copy_entry(
+                  Path.join(source, name),
+                  Path.join(destination, name),
+                  child_relative,
+                  source_root,
+                  destination_root
+                )
+              end
+
+            case result do
+              :ok -> {:cont, :ok}
+              {:error, _message} = error -> {:halt, error}
+            end
+          end)
+
+        {:error, reason} ->
+          snapshot_error(source, "list directory", reason)
+      end
     end
 
     defp copy_entry(source, destination, relative, source_root, destination_root) do
-      case File.lstat!(source) do
-        %{type: :directory, mode: mode} ->
-          File.mkdir_p!(destination)
-          File.chmod!(destination, mode)
-          copy_entries(source, destination, relative, source_root, destination_root)
+      case File.lstat(source) do
+        {:ok, %{type: :directory, mode: mode}} ->
+          with :ok <-
+                 file_operation(File.mkdir_p(destination), destination, "create directory"),
+               :ok <- file_operation(File.chmod(destination, mode), destination, "set mode") do
+            copy_entries(source, destination, relative, source_root, destination_root)
+          end
 
-        %{type: :regular, mode: mode} ->
-          File.mkdir_p!(Path.dirname(destination))
-          File.cp!(source, destination)
-          File.chmod!(destination, mode)
+        {:ok, %{type: :regular, mode: mode}} ->
+          with :ok <-
+                 file_operation(
+                   File.mkdir_p(Path.dirname(destination)),
+                   destination,
+                   "create parent directory"
+                 ),
+               :ok <- file_operation(File.cp(source, destination), source, "copy file"),
+               :ok <- file_operation(File.chmod(destination, mode), destination, "set mode") do
+            :ok
+          end
 
-        %{type: :symlink} ->
+        {:ok, %{type: :symlink}} ->
           copy_symlink(source, destination, relative, source_root, destination_root)
 
-        _other ->
-          :ok
+        {:ok, %{type: type}} ->
+          {:error,
+           "cannot adopt existing client: unsupported #{type} entry #{Path.relative_to(source, source_root)}"}
+
+        {:error, reason} ->
+          snapshot_error(source, "inspect entry", reason)
       end
     end
 
     defp copy_symlink(source, destination, relative, source_root, destination_root) do
-      target = File.read_link!(source)
-      resolved = Path.expand(target, Path.dirname(source))
-      relative_target = Path.relative_to(resolved, source_root)
+      case File.read_link(source) do
+        {:ok, target} ->
+          resolved = Path.expand(target, Path.dirname(source))
 
-      if relative_target != ".." and not String.starts_with?(relative_target, "../") do
-        snapshot_target = Path.join(destination_root, relative_target)
-        copied_target = if Path.type(target) == :absolute, do: snapshot_target, else: target
+          with {:ok, relative_target} <- relative_inside(resolved, source_root) do
+            snapshot_target = Path.join(destination_root, relative_target)
+            copied_target = if Path.type(target) == :absolute, do: snapshot_target, else: target
 
-        File.mkdir_p!(Path.dirname(destination))
-        File.ln_s!(copied_target, destination)
-      else
-        copy_external_target(source, destination, relative, source_root, destination_root)
+            with :ok <-
+                   file_operation(
+                     File.mkdir_p(Path.dirname(destination)),
+                     destination,
+                     "create parent directory"
+                   ) do
+              file_operation(File.ln_s(copied_target, destination), destination, "create symlink")
+            end
+          else
+            :error ->
+              {:error,
+               "cannot adopt existing client: symlink #{relative} points outside the application root"}
+          end
+
+        {:error, reason} ->
+          snapshot_error(source, "read symlink", reason)
       end
     end
 
-    defp copy_external_target(source, destination, relative, source_root, destination_root) do
-      case File.stat!(source) do
-        %{type: :directory, mode: mode} ->
-          File.mkdir_p!(destination)
-          File.chmod!(destination, mode)
-          copy_entries(source, destination, relative, source_root, destination_root)
+    defp relative_inside(path, root) do
+      root_parts = root |> Path.expand() |> Path.split()
+      path_parts = path |> Path.expand() |> Path.split()
 
-        %{type: :regular, mode: mode} ->
-          File.mkdir_p!(Path.dirname(destination))
-          File.cp!(source, destination)
-          File.chmod!(destination, mode)
+      case Enum.split(path_parts, length(root_parts)) do
+        {^root_parts, []} -> {:ok, "."}
+        {^root_parts, relative_parts} -> {:ok, Path.join(relative_parts)}
+        _outside -> :error
       end
+    end
+
+    defp file_operation(:ok, _path, _action), do: :ok
+
+    defp file_operation({:error, reason}, path, action) do
+      snapshot_error(path, action, reason)
+    end
+
+    defp snapshot_error(path, action, reason) do
+      {:error,
+       "cannot adopt existing client: could not #{action} #{path}: #{:file.format_error(reason)}"}
     end
 
     defp temporary_root do

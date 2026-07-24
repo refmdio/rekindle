@@ -528,6 +528,74 @@ defmodule Rekindle.InstallTest do
     assert client_contents(adopted) == before
   end
 
+  test "rejects an external symlink without inspecting its target tree" do
+    original = existing_client(:gpui, [:web])
+    root = tmp_dir()
+    external = tmp_dir()
+    write_project(root, original)
+    File.write!(Path.join(external, "sentinel"), "unchanged")
+    File.ln_s!(external, Path.join(external, "cycle"))
+    File.ln_s!(external, Path.join(root, "client/external"))
+
+    before = filesystem_tree(root)
+
+    rejected =
+      File.cd!(root, fn ->
+        install(original, integration: "gpui", targets: ["web"])
+      end)
+
+    assert Enum.any?(
+             rejected.issues,
+             &String.contains?(&1, "points outside the application root")
+           )
+
+    assert changed_contents(rejected) == changed_contents(original)
+    assert filesystem_tree(root) == before
+    assert File.read!(Path.join(external, "sentinel")) == "unchanged"
+    assert File.read_link!(Path.join(external, "cycle")) == external
+  end
+
+  test "rejects a broken external symlink without changing the project" do
+    original = existing_client(:gpui, [:web])
+    root = tmp_dir()
+    write_project(root, original)
+
+    missing =
+      Path.join(System.tmp_dir!(), "rekindle-missing-#{System.unique_integer([:positive])}")
+
+    File.ln_s!(missing, Path.join(root, "client/missing"))
+
+    rejected =
+      File.cd!(root, fn ->
+        install(original, integration: "gpui", targets: ["web"])
+      end)
+
+    assert Enum.any?(
+             rejected.issues,
+             &String.contains?(&1, "points outside the application root")
+           )
+
+    assert changed_contents(rejected) == changed_contents(original)
+    assert File.read_link!(Path.join(root, "client/missing")) == missing
+  end
+
+  test "rejects a special filesystem entry without changing the project" do
+    original = existing_client(:gpui, [:web])
+    root = tmp_dir()
+    pipe = Path.join(root, "client/events")
+    write_project(root, original)
+    assert {_output, 0} = System.cmd("mkfifo", [pipe], stderr_to_stdout: true)
+
+    rejected =
+      File.cd!(root, fn ->
+        install(original, integration: "gpui", targets: ["web"])
+      end)
+
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "unsupported other entry"))
+    assert changed_contents(rejected) == changed_contents(original)
+    assert File.lstat!(pipe).type == :other
+  end
+
   test "adopts the resolved root package from a multi-package workspace" do
     original =
       existing_client(:gpui, [:web], %{
