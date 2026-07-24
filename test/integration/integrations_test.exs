@@ -54,10 +54,7 @@ defmodule Rekindle.IntegrationsTest do
       assert both["Cargo.toml"] =~
                ~s(wasm-bindgen = "=#{Rekindle.Toolchain.wasm_bindgen_version()}")
 
-      refute both["Cargo.toml"] =~ ~r/^rekindle(?:_|-|\s*=)/m
-      refute both["src/bin/web.rs"] =~ "rekindleReady"
-      refute both["src/bin/web.rs"] =~ "rekindleStatus"
-      refute Enum.any?(both, fn {_path, source} -> source =~ "Rekindle" end)
+      refute Enum.any?(both, fn {_path, source} -> source =~ ~r/rekindle/i end)
       assert both["src/lib.rs"] != ""
       assert both["src/bin/web.rs"] =~ "sample_client"
       assert both["src/bin/desktop.rs"] =~ "sample_client"
@@ -70,12 +67,17 @@ defmodule Rekindle.IntegrationsTest do
     assert {:ok, %{graphics: %{web: :webgl2}, host: egui_host}} =
              Integration.fetch(:egui)
 
-    assert egui_host =~ ~s(id="rekindle-canvas")
+    assert egui_host == ~s(<canvas id="the_canvas_id"></canvas>)
 
     assert {:ok, %{graphics: %{web: :webgl2}, host: slint_host}} =
              Integration.fetch(:slint)
 
     assert slint_host =~ ~s(id="canvas")
+
+    for name <- Integration.names() do
+      assert {:ok, %{host: host}} = Integration.fetch(name)
+      refute host =~ ~r/rekindle/i
+    end
   end
 
   test "requires rendered surface pixels without browser failures" do

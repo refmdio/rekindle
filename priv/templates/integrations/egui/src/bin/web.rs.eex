@@ -9,9 +9,9 @@ pub fn start() {
     wasm_bindgen_futures::spawn_local(async {
         let canvas = web_sys::window()
             .and_then(|window| window.document())
-            .and_then(|document| document.get_element_by_id("rekindle-canvas"))
+            .and_then(|document| document.get_element_by_id("the_canvas_id"))
             .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
-            .expect("missing #rekindle-canvas");
+            .expect("missing #the_canvas_id");
 
         eframe::WebRunner::new()
             .start(

@@ -17,7 +17,7 @@ defmodule Rekindle.Integration do
       dependency: "eframe",
       files: ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "src/lib.rs", "src/app.rs"],
       graphics: %{web: :webgl2, desktop: :native},
-      host: ~s(<canvas id="rekindle-canvas"></canvas>),
+      host: ~s(<canvas id="the_canvas_id"></canvas>),
       template: "egui"
     },
     slint: %{

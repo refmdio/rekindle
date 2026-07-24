@@ -266,7 +266,7 @@ defmodule Rekindle.DevelopmentTest do
     runtime = request("/__rekindle/runtime.js", options)
 
     assert page.status == 200
-    assert page.resp_body =~ ~s(<canvas id="rekindle-canvas"></canvas>)
+    assert page.resp_body =~ ~s(<canvas id="the_canvas_id"></canvas>)
     assert runtime.resp_body =~ ~s|getContext("webgl2")|
     refute runtime.resp_body =~ "navigator.gpu"
   end
@@ -849,7 +849,7 @@ defmodule Rekindle.DevelopmentTest do
       """
       <!doctype html>
       <html><body>
-        <canvas id="rekindle-canvas"></canvas>
+        <canvas id="the_canvas_id"></canvas>
         <pre id="rekindle-error" hidden></pre>
         <script>
           #{setup}
