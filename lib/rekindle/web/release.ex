@@ -24,7 +24,7 @@ defmodule Rekindle.Web.Release do
          {:ok, manifest} <- read_manifest(source),
          :ok <- Manifest.validate(source, manifest),
          true <- manifest["generation"] == metadata.generation do
-      with_lock(project, fn -> publish_locked(namespace, source, manifest, result) end)
+      with_lock(project, fn -> publish_locked(project, namespace, source, manifest, result) end)
     else
       false ->
         error(:invalid_manifest, "Web release generation does not match its manifest")
@@ -34,11 +34,13 @@ defmodule Rekindle.Web.Release do
     end
   end
 
-  defp publish_locked(namespace, source, manifest, result) do
+  defp publish_locked(project, namespace, source, manifest, result) do
     destination = Path.join([namespace, "web", manifest["generation"]])
 
-    with {:ok, published?} <- publish_generation(source, destination, manifest) do
+    with :ok <- owned_directory(project, Path.join(namespace, "web")),
+         {:ok, published?} <- publish_generation(project, source, destination, manifest) do
       finish_publication(
+        project,
         namespace,
         destination,
         manifest,
@@ -48,11 +50,11 @@ defmodule Rekindle.Web.Release do
     end
   end
 
-  defp finish_publication(namespace, destination, manifest, result, published?) do
+  defp finish_publication(project, namespace, destination, manifest, result, published?) do
     previous = selected_generation(Path.join(namespace, "entry.js"))
 
-    with :ok <- select(namespace, manifest),
-         :ok <- cleanup(namespace, manifest["generation"], previous) do
+    with :ok <- select(project, namespace, manifest),
+         :ok <- cleanup(project, namespace, manifest["generation"], previous) do
       {:ok,
        %{
          result
@@ -61,12 +63,12 @@ defmodule Rekindle.Web.Release do
        }}
     else
       {:error, %Error{} = error} ->
-        if published?, do: remove(destination)
+        if published?, do: remove(project, destination)
         {:error, error}
     end
   end
 
-  defp publish_generation(source, destination, manifest) do
+  defp publish_generation(project, source, destination, manifest) do
     case File.lstat(destination) do
       {:ok, %{type: :directory}} ->
         with :ok <- validate_deployment(destination, manifest) do
@@ -77,21 +79,22 @@ defmodule Rekindle.Web.Release do
         error(:publish, "Web release generation path is not a directory: #{destination}")
 
       {:error, :enoent} ->
-        publish_new_generation(source, destination, manifest)
+        publish_new_generation(project, source, destination, manifest)
 
       {:error, reason} ->
         file_error(:publish, destination, reason)
     end
   end
 
-  defp publish_new_generation(source, destination, manifest) do
+  defp publish_new_generation(project, source, destination, manifest) do
     parent = Path.dirname(destination)
 
-    with :ok <- mkdir(parent),
+    with :ok <- owned_directory(project, parent),
          {:ok, temporary} <- Publication.temporary_directory(parent) do
       try do
-        with :ok <- copy_directory(source, temporary),
+        with :ok <- copy_directory(project, source, temporary),
              :ok <- validate_generation(temporary, manifest),
+             :ok <- owned_directory(project, parent),
              :ok <- File.rename(temporary, destination) do
           {:ok, true}
         else
@@ -99,7 +102,7 @@ defmodule Rekindle.Web.Release do
           {:error, reason} -> file_error(:publish, destination, reason)
         end
       after
-        File.rm_rf(temporary)
+        OwnedPath.remove_directory(project.root, temporary)
       end
     else
       {:error, %Error{} = error} -> {:error, error}
@@ -129,8 +132,8 @@ defmodule Rekindle.Web.Release do
     end
   end
 
-  defp copy_directory(source, destination) do
-    with :ok <- mkdir(destination),
+  defp copy_directory(project, source, destination) do
+    with :ok <- owned_directory(project, destination),
          {:ok, names} <- File.ls(source) do
       Enum.reduce_while(Enum.sort(names), :ok, fn name, :ok ->
         from = Path.join(source, name)
@@ -138,7 +141,7 @@ defmodule Rekindle.Web.Release do
 
         case File.lstat(from) do
           {:ok, %{type: :directory}} ->
-            case copy_directory(from, to) do
+            case copy_directory(project, from, to) do
               :ok -> {:cont, :ok}
               {:error, %Error{} = error} -> {:halt, {:error, error}}
             end
@@ -162,7 +165,7 @@ defmodule Rekindle.Web.Release do
     end
   end
 
-  defp select(namespace, manifest) do
+  defp select(project, namespace, manifest) do
     destination = Path.join(namespace, "entry.js")
 
     generation = manifest["generation"]
@@ -174,17 +177,18 @@ defmodule Rekindle.Web.Release do
     await init();
     """
 
-    with :ok <- mkdir(namespace),
+    with :ok <- owned_directory(project, namespace),
          {:ok, temporary} <- Publication.temporary_file(namespace, ".tmp-entry-") do
       try do
         with :ok <- File.write(temporary, selector),
+             :ok <- owned_directory(project, namespace),
              :ok <- File.rename(temporary, destination) do
           :ok
         else
           {:error, reason} -> file_error(:selector_write, destination, reason)
         end
       after
-        File.rm(temporary)
+        OwnedPath.remove_file(project.root, temporary)
       end
     else
       {:error, %Error{} = error} -> {:error, error}
@@ -202,23 +206,29 @@ defmodule Rekindle.Web.Release do
     end
   end
 
-  defp cleanup(namespace, selected, previous) do
+  defp cleanup(project, namespace, selected, previous) do
     root = Path.join(namespace, "web")
 
-    retained =
-      root
-      |> generation_directories()
-      |> Enum.sort_by(fn {_path, modified} -> modified end, :desc)
-      |> keep(selected, previous)
+    case OwnedPath.validate_directory(project.root, root) do
+      :ok ->
+        retained =
+          root
+          |> generation_directories()
+          |> Enum.sort_by(fn {_path, modified} -> modified end, :desc)
+          |> keep(selected, previous)
 
-    root
-    |> generation_directories()
-    |> Enum.map(&elem(&1, 0))
-    |> Enum.reject(&MapSet.member?(retained, &1))
-    |> Enum.each(&remove/1)
+        root
+        |> generation_directories()
+        |> Enum.map(&elem(&1, 0))
+        |> Enum.reject(&MapSet.member?(retained, &1))
+        |> Enum.each(&remove(project, &1))
 
-    remove_temporaries(root)
-    :ok
+        remove_temporaries(project, root)
+        :ok
+
+      {:error, reason} ->
+        file_error(:cleanup, root, reason)
+    end
   end
 
   defp generation_directories(root) do
@@ -255,12 +265,12 @@ defmodule Rekindle.Web.Release do
     |> MapSet.new(&elem(&1, 0))
   end
 
-  defp remove_temporaries(root) do
+  defp remove_temporaries(project, root) do
     case File.ls(root) do
       {:ok, names} ->
         names
         |> Enum.filter(&String.starts_with?(&1, ".tmp-"))
-        |> Enum.each(fn name -> remove(Path.join(root, name)) end)
+        |> Enum.each(fn name -> remove(project, Path.join(root, name)) end)
 
       _error ->
         :ok
@@ -303,17 +313,20 @@ defmodule Rekindle.Web.Release do
     end
   end
 
-  defp mkdir(path) do
-    case File.mkdir_p(path) do
+  defp owned_directory(project, path) do
+    case OwnedPath.ensure_directory(project.root, path) do
       :ok -> :ok
       {:error, reason} -> file_error(:mkdir, path, reason)
     end
   end
 
-  defp remove(path) do
-    case File.rm_rf(path) do
-      {:ok, _removed} -> :ok
-      {:error, reason, file} -> Logger.warning("could not remove #{file}: #{inspect(reason)}")
+  defp remove(project, path) do
+    case OwnedPath.remove_directory(project.root, path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("could not remove #{path}: #{OwnedPath.format_error(reason)}")
     end
   end
 

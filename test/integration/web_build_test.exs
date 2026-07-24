@@ -141,6 +141,79 @@ defmodule Rekindle.WebBuildTest do
     refute File.exists?(Path.join(root, "priv/static/rekindle/web-current.json"))
   end
 
+  test "rejects linked and special Web release namespace components", %{root: root} do
+    selected_tools = fake_tools(root, "success")
+    assert {:ok, selected} = build(root, selected_tools, profile: :release)
+    namespace = Path.join(root, "priv/static/rekindle")
+    web_root = Path.join(namespace, "web")
+    selected_entry = File.read!(Path.join(namespace, "entry.js"))
+    selected_manifest = File.read!(selected.metadata.manifest)
+    selected_artifact = File.read!(selected.artifact)
+
+    candidate_tools = fake_tools(root, "success-two")
+    assert {:ok, candidate} = build(root, candidate_tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    for {ancestor, index} <- Enum.with_index([namespace, web_root]),
+        kind <- [:symlink, :fifo] do
+      backup = Path.join(root, "web-release-backup-#{index}-#{kind}")
+
+      external =
+        Path.join(
+          System.tmp_dir!(),
+          "rekindle-web-release-external-#{System.unique_integer([:positive, :monotonic])}"
+        )
+
+      File.mkdir!(external)
+      on_exit(fn -> File.rm_rf!(external) end)
+      relative_web = Path.relative_to(web_root, ancestor)
+      external_web = if relative_web == ".", do: external, else: Path.join(external, relative_web)
+      File.mkdir_p!(external_web)
+      protected_generation = Path.join(external_web, String.duplicate("a", 64))
+      protected_temporary = Path.join(external_web, ".tmp-protected")
+      File.mkdir!(protected_generation)
+      File.write!(Path.join(protected_generation, "sentinel"), "generation")
+      File.mkdir!(protected_temporary)
+      File.write!(Path.join(protected_temporary, "sentinel"), "temporary")
+      File.write!(Path.join(external, "entry.js"), "external-entry")
+      external_root_names = external |> File.ls!() |> Enum.sort()
+      external_web_names = external_web |> File.ls!() |> Enum.sort()
+      relative_manifest = Path.relative_to(selected.metadata.manifest, ancestor)
+      relative_artifact = Path.relative_to(selected.artifact, ancestor)
+
+      retained_entry =
+        if ancestor == namespace,
+          do: Path.join(backup, "entry.js"),
+          else: Path.join(namespace, "entry.js")
+
+      File.rename!(ancestor, backup)
+
+      case kind do
+        :symlink -> File.ln_s!(external, ancestor)
+        :fifo -> assert {"", 0} = System.cmd("mkfifo", [ancestor])
+      end
+
+      try do
+        assert {:error, %Rekindle.Web.Error{kind: :mkdir}} =
+                 Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+        assert external |> File.ls!() |> Enum.sort() == external_root_names
+        assert external_web |> File.ls!() |> Enum.sort() == external_web_names
+        assert File.read!(Path.join(external, "entry.js")) == "external-entry"
+        assert File.read!(Path.join(protected_generation, "sentinel")) == "generation"
+        assert File.read!(Path.join(protected_temporary, "sentinel")) == "temporary"
+        assert File.read!(retained_entry) == selected_entry
+        assert File.read!(Path.join(backup, relative_manifest)) == selected_manifest
+        assert File.read!(Path.join(backup, relative_artifact)) == selected_artifact
+      after
+        File.rm!(ancestor)
+        File.rename!(backup, ancestor)
+      end
+    end
+  end
+
   test "retains the selected and previous Web releases without removing sibling files", %{
     root: root
   } do
