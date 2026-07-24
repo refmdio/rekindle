@@ -54,12 +54,67 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp locked?(root) do
-      lockfile = Path.join(root, "Cargo.lock")
+      snapshot_root = Path.dirname(root)
 
-      case File.lstat(lockfile) do
-        {:ok, _stat} -> {:ok, true}
-        {:error, :enoent} -> {:ok, false}
-        {:error, reason} -> snapshot_error(lockfile, "inspect client lockfile", reason)
+      with {:ok, workspace_manifest} <- workspace_manifest(root),
+           {:ok, _relative} <- relative_inside(workspace_manifest, snapshot_root) do
+        lockfile = workspace_manifest |> Path.dirname() |> Path.join("Cargo.lock")
+
+        case File.lstat(lockfile) do
+          {:ok, _stat} -> {:ok, true}
+          {:error, :enoent} -> {:ok, false}
+          {:error, reason} -> snapshot_error(lockfile, "inspect workspace lockfile", reason)
+        end
+      else
+        :error ->
+          {:error,
+           "cannot adopt existing client: Cargo workspace is outside the application root"}
+
+        {:error, _message} = error ->
+          error
+      end
+    end
+
+    defp workspace_manifest(root) do
+      arguments = [
+        "locate-project",
+        "--workspace",
+        "--message-format",
+        "json",
+        "--manifest-path",
+        Path.join(root, "Cargo.toml")
+      ]
+
+      case Process.run(Rekindle.Toolchain.cargo_path(), arguments,
+             cd: root,
+             timeout: 30_000,
+             output_limit: 1_000_000
+           ) do
+        {:ok, %{status: 0, truncated?: false, output: output}} ->
+          manifest =
+            output
+            |> String.split("\n", trim: true)
+            |> Enum.reverse()
+            |> Enum.find_value(fn line ->
+              case Jason.decode(line) do
+                {:ok, %{"root" => root}} when is_binary(root) -> Path.expand(root)
+                _ -> nil
+              end
+            end)
+
+          case manifest do
+            nil -> {:error, "cargo locate-project returned invalid JSON"}
+            manifest -> {:ok, manifest}
+          end
+
+        {:ok, %{truncated?: true}} ->
+          {:error, "cargo locate-project output exceeded the limit"}
+
+        {:ok, result} ->
+          {:error, "cargo locate-project failed with status #{result.status}: #{result.output}"}
+
+        {:error, reason} ->
+          {:error, "cargo locate-project could not run: #{inspect(reason)}"}
       end
     end
 

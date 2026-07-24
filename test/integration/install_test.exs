@@ -290,7 +290,7 @@ defmodule Rekindle.InstallTest do
     cases = [
       {gpui, [integration: "slint", targets: ["web"]], "does not match"},
       {ambiguous, [integration: "gpui", targets: ["web"]], "ambiguous"},
-      {malformed, [integration: "gpui", targets: ["web"]], "cargo metadata failed"},
+      {malformed, [integration: "gpui", targets: ["web"]], "cargo locate-project failed"},
       {incomplete, [integration: "gpui", targets: ["web"]], "is required"}
     ]
 
@@ -362,7 +362,7 @@ defmodule Rekindle.InstallTest do
 
     rejected = install(original, integration: "gpui", targets: ["web"])
 
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "cargo metadata failed"))
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "cargo locate-project failed"))
     assert changed_contents(rejected) == changed_contents(original)
   end
 
@@ -534,6 +534,37 @@ defmodule Rekindle.InstallTest do
   test "rejects a stale lockfile before staging application changes" do
     original =
       existing_client(:gpui, [:web])
+      |> update_content("client/Cargo.toml", fn manifest ->
+        String.replace(manifest, ~s(version = "0.1.0"), ~s(version = "0.2.0"), global: false)
+      end)
+
+    root = tmp_dir()
+    write_project(root, original)
+    before = filesystem_tree(root)
+
+    rejected =
+      File.cd!(root, fn ->
+        install(original, integration: "gpui", targets: ["web"])
+      end)
+
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "cargo metadata failed"))
+    assert changed_contents(rejected) == changed_contents(original)
+    assert filesystem_tree(root) == before
+  end
+
+  test "rejects a stale application workspace lock for a client member" do
+    root_lock = Rekindle.Integration.render(:gpui, [:web])["Cargo.lock"]
+
+    original =
+      existing_client(:gpui, [:web], %{
+        "Cargo.toml" => """
+        [workspace]
+        members = ["client"]
+        resolver = "3"
+        """,
+        "Cargo.lock" => root_lock
+      })
+      |> delete_file("client/Cargo.lock")
       |> update_content("client/Cargo.toml", fn manifest ->
         String.replace(manifest, ~s(version = "0.1.0"), ~s(version = "0.2.0"), global: false)
       end)
