@@ -43,6 +43,7 @@ defmodule Rekindle.Web.Manifest do
        )
        when is_binary(generation) and is_binary(entry) and is_list(members) do
     with :ok <- relative_path(entry),
+         :ok <- canonical_members(members),
          :ok <- entry_member(entry, members),
          :ok <- validate_members(root, members),
          :ok <- validate_membership(kind, root, members),
@@ -54,6 +55,18 @@ defmodule Rekindle.Web.Manifest do
 
   defp validate(_root, _manifest, _kind),
     do: error(:invalid_manifest, "Web manifest has an unsupported shape")
+
+  defp canonical_members(members) do
+    valid? =
+      Enum.all?(members, fn
+        %{"path" => path} when is_binary(path) -> true
+        _member -> false
+      end)
+
+    if valid? and members == Enum.sort_by(members, & &1["path"]),
+      do: :ok,
+      else: error(:invalid_manifest, "Web manifest members are not in canonical path order")
+  end
 
   defp members(root) do
     case collect(root, root, []) do
