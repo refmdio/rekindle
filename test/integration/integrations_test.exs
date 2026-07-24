@@ -125,6 +125,54 @@ defmodule Rekindle.IntegrationsTest do
     """
 
     assert {:error, _message} = DesktopWindow.classify_protocol(configured_without_buffer)
+
+    presentation_before_configure = """
+    -> xdg_wm_base#8.get_xdg_surface(new id xdg_surface#14, wl_surface#13)
+    -> xdg_surface#14.get_toplevel(new id xdg_toplevel#15)
+    -> wl_surface#13.attach(wl_buffer#20, 0, 0)
+    -> wl_surface#13.commit()
+    xdg_toplevel#15.configure(500, 500, array[0])
+    xdg_surface#14.configure(1)
+    -> xdg_surface#14.ack_configure(1)
+    """
+
+    assert {:error, _message} =
+             DesktopWindow.classify_protocol(presentation_before_configure)
+
+    reused_id = """
+    -> xdg_wm_base#8.get_xdg_surface(new id xdg_surface#14, wl_surface#13)
+    -> xdg_surface#14.get_toplevel(new id xdg_toplevel#15)
+    xdg_toplevel#15.configure(500, 500, array[0])
+    xdg_surface#14.configure(1)
+    -> xdg_surface#14.ack_configure(1)
+    -> xdg_toplevel#15.destroy()
+    -> xdg_surface#14.destroy()
+    -> wl_surface#13.destroy()
+    wl_display#1.delete_id(15)
+    wl_display#1.delete_id(14)
+    wl_display#1.delete_id(13)
+    -> wl_compositor#4.create_surface(new id wl_surface#13)
+    -> wl_surface#13.attach(wl_buffer#20, 0, 0)
+    -> wl_surface#13.commit()
+    """
+
+    assert {:error, _message} = DesktopWindow.classify_protocol(reused_id)
+
+    previous_debug = System.get_env("WAYLAND_DEBUG")
+    System.put_env("WAYLAND_DEBUG", "server")
+
+    try do
+      assert {:error, isolated_error} =
+               DesktopWindow.observe(sleep, ["10"], timeout: 250)
+
+      refute isolated_error =~ "wl_registry"
+    after
+      if previous_debug do
+        System.put_env("WAYLAND_DEBUG", previous_debug)
+      else
+        System.delete_env("WAYLAND_DEBUG")
+      end
+    end
   end
 
   test "generated clients compile for every target selection" do

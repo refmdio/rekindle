@@ -3,6 +3,18 @@ defmodule Rekindle.Test.DesktopWindow do
 
   @default_timeout 5_000
   @weston_timeout 8_000
+  @event_parsers [
+    {~r/get_xdg_surface\(new id xdg_surface#(\d+), wl_surface#(\d+)\)/, :xdg_surface},
+    {~r/xdg_surface#(\d+)\.get_toplevel\(new id xdg_toplevel#(\d+)\)/, :toplevel},
+    {~r/xdg_toplevel#(\d+)\.configure\(/, :toplevel_configure},
+    {~r/xdg_surface#(\d+)\.configure\((\d+)\)/, :surface_configure},
+    {~r/xdg_surface#(\d+)\.ack_configure\((\d+)\)/, :ack},
+    {~r/wl_surface#(\d+)\.attach\(wl_buffer#/, :attach},
+    {~r/wl_surface#(\d+)\.commit\(\)/, :commit},
+    {~r/(?:xdg_surface|xdg_toplevel|wl_surface)#(\d+)\.destroy\(\)/, :destroy},
+    {~r/wl_display#\d+\.delete_id\((\d+)\)/, :destroy},
+    {~r/create_surface\(new id wl_surface#(\d+)\)/, :destroy}
+  ]
 
   def assert_starts!(executable, integration) do
     case observe(executable) do
@@ -33,19 +45,79 @@ defmodule Rekindle.Test.DesktopWindow do
 
   def classify_protocol(output) do
     output
-    |> surfaces()
-    |> Enum.find_value(fn [xdg_surface, wl_surface] ->
-      with {:ok, toplevel} <- toplevel(output, xdg_surface),
-           true <- configured?(output, xdg_surface, toplevel),
-           true <- presented?(output, wl_surface) do
-        :ok
-      else
-        _ -> nil
+    |> String.split("\n")
+    |> Enum.reduce_while(%{}, fn line, surfaces ->
+      case event(line) do
+        {:xdg_surface, xdg_surface, wl_surface} ->
+          surfaces =
+            surfaces
+            |> drop_object(xdg_surface)
+            |> drop_object(wl_surface)
+            |> Map.put(xdg_surface, %{
+              wl_surface: wl_surface,
+              toplevel: nil,
+              configured_serial: nil,
+              acknowledged?: false,
+              attached?: false
+            })
+
+          {:cont, surfaces}
+
+        {:toplevel, xdg_surface, toplevel} ->
+          surfaces = drop_object(surfaces, toplevel)
+
+          {:cont,
+           update_surface(surfaces, xdg_surface, fn surface ->
+             %{surface | toplevel: toplevel}
+           end)}
+
+        {:toplevel_configure, toplevel} ->
+          {:cont,
+           update_matching(surfaces, :toplevel, toplevel, fn surface ->
+             %{surface | configured_serial: :waiting, acknowledged?: false, attached?: false}
+           end)}
+
+        {:surface_configure, xdg_surface, serial} ->
+          {:cont,
+           update_surface(surfaces, xdg_surface, fn
+             %{configured_serial: :waiting} = surface ->
+               %{surface | configured_serial: serial}
+
+             surface ->
+               surface
+           end)}
+
+        {:ack, xdg_surface, serial} ->
+          {:cont,
+           update_surface(surfaces, xdg_surface, fn surface ->
+             %{surface | acknowledged?: surface.configured_serial == serial, attached?: false}
+           end)}
+
+        {:attach, wl_surface} ->
+          {:cont,
+           update_matching(surfaces, :wl_surface, wl_surface, fn surface ->
+             %{surface | attached?: surface.acknowledged?}
+           end)}
+
+        {:commit, wl_surface} ->
+          if Enum.any?(surfaces, fn {_id, surface} ->
+               surface.wl_surface == wl_surface and surface.attached?
+             end) do
+            {:halt, :presented}
+          else
+            {:cont, surfaces}
+          end
+
+        {:destroy, object} ->
+          {:cont, drop_object(surfaces, object)}
+
+        :ignore ->
+          {:cont, surfaces}
       end
     end)
     |> case do
-      :ok -> :ok
-      nil -> {:error, "no configured top-level surface presented a buffer"}
+      :presented -> :ok
+      _surfaces -> {:error, "no configured top-level surface presented a buffer"}
     end
   end
 
@@ -77,7 +149,13 @@ defmodule Rekindle.Test.DesktopWindow do
 
     {output, status} =
       System.cmd(tools.timeout, command,
-        env: [{"XDG_RUNTIME_DIR", runtime}],
+        env: [
+          {"XDG_RUNTIME_DIR", runtime},
+          {"WAYLAND_DEBUG", nil},
+          {"WAYLAND_DISPLAY", nil},
+          {"WINIT_UNIX_BACKEND", nil},
+          {"DISPLAY", nil}
+        ],
         stderr_to_stdout: true
       )
 
@@ -90,42 +168,36 @@ defmodule Rekindle.Test.DesktopWindow do
     end
   end
 
-  defp surfaces(output) do
-    ~r/get_xdg_surface\(new id xdg_surface#(\d+), wl_surface#(\d+)\)/
-    |> Regex.scan(output, capture: :all_but_first)
-    |> Enum.uniq()
+  defp event(line) do
+    Enum.find_value(@event_parsers, :ignore, fn {regex, name} ->
+      case Regex.run(regex, line, capture: :all_but_first) do
+        nil -> nil
+        captures -> List.to_tuple([name | captures])
+      end
+    end)
   end
 
-  defp toplevel(output, xdg_surface) do
-    regex =
-      ~r/xdg_surface##{Regex.escape(xdg_surface)}\.get_toplevel\(new id xdg_toplevel#(\d+)\)/
-
-    case Regex.run(regex, output, capture: :all_but_first) do
-      [toplevel] -> {:ok, toplevel}
-      nil -> :error
+  defp update_surface(surfaces, id, update) do
+    case Map.fetch(surfaces, id) do
+      {:ok, surface} -> Map.put(surfaces, id, update.(surface))
+      :error -> surfaces
     end
   end
 
-  defp configured?(output, xdg_surface, toplevel) do
-    Regex.match?(~r/xdg_toplevel##{Regex.escape(toplevel)}\.configure\(/, output) and
-      Regex.match?(~r/xdg_surface##{Regex.escape(xdg_surface)}\.ack_configure\(/, output)
+  defp update_matching(surfaces, key, id, update) do
+    Map.new(surfaces, fn {xdg_surface, surface} ->
+      if Map.fetch!(surface, key) == id do
+        {xdg_surface, update.(surface)}
+      else
+        {xdg_surface, surface}
+      end
+    end)
   end
 
-  defp presented?(output, wl_surface) do
-    attach = ~r/wl_surface##{Regex.escape(wl_surface)}\.attach\(wl_buffer#/
-    commit = ~r/wl_surface##{Regex.escape(wl_surface)}\.commit\(\)/
-
-    with [{attach_index, attach_length}] <- Regex.run(attach, output, return: :index),
-         remainder <-
-           binary_part(
-             output,
-             attach_index + attach_length,
-             byte_size(output) - attach_index - attach_length
-           ) do
-      Regex.match?(commit, remainder)
-    else
-      _ -> false
-    end
+  defp drop_object(surfaces, id) do
+    Map.reject(surfaces, fn {xdg_surface, surface} ->
+      id in [xdg_surface, surface.wl_surface, surface.toplevel]
+    end)
   end
 
   defp tools do
