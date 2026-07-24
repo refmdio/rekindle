@@ -881,6 +881,52 @@ defmodule Rekindle.DevelopmentTest do
   end
 
   @tag capture_log: true
+  test "clears a ready desktop process after it exits and preserves its marker", %{root: root} do
+    supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+    launcher = start_launcher(root, supervisor)
+    result = desktop_result(root, "current-crash", :running)
+
+    DesktopDevelopment.replace(launcher, result)
+    assert_receive {DesktopDevelopment, {:ready, ^result}}, 1_000
+
+    assert %{current: %{pid: daemon}, candidate: nil} =
+             DesktopDevelopment.status(launcher)
+
+    Process.exit(daemon, :kill)
+
+    assert_receive {DesktopDevelopment, {:exited, ^result, :killed}}, 1_000
+    assert_until(fn -> not Process.alive?(daemon) end)
+    assert DesktopDevelopment.status(launcher) == %{current: nil, candidate: nil}
+    assert read_marker(root)["generation"] == result.metadata.generation
+    refute_receive {DesktopDevelopment, {:exited, ^result, _reason}}, 100
+    assert Process.alive?(launcher)
+  end
+
+  @tag capture_log: true
+  test "leaves no desktop state when the first process exits before readiness", %{root: root} do
+    supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+    launcher = start_launcher(root, supervisor)
+    broken = desktop_result(root, "first-launch-failure", :exit)
+    marker = Path.join(root, ".rekindle/dev/desktop-last-running.json")
+
+    DesktopDevelopment.replace(launcher, broken)
+
+    assert_receive {DesktopDevelopment, {:error, %Rekindle.Desktop.Error{kind: :readiness}}},
+                   1_000
+
+    assert_until(fn ->
+      DesktopDevelopment.status(launcher) == %{current: nil, candidate: nil}
+    end)
+
+    assert DynamicSupervisor.which_children(supervisor) == []
+    refute File.exists?(marker)
+    refute_receive {DesktopDevelopment, {:ready, _result}}, 100
+    refute_receive {DesktopDevelopment, {:exited, _result, _reason}}, 100
+    refute_receive {DesktopDevelopment, {:error, _error}}, 100
+    assert Process.alive?(launcher)
+  end
+
+  @tag capture_log: true
   test "restores the retained desktop process after the launcher restarts", %{root: root} do
     supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
     launcher = start_launcher(root, supervisor)
