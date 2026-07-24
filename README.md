@@ -14,6 +14,7 @@ desktop target.
 - Elixir 1.17 or later
 - A Phoenix application with an endpoint
 - Rust and Cargo
+- Igniter 0.8 or later as a development dependency
 - The Rust targets and native system libraries required by the selected UI
   integration
 
@@ -22,17 +23,17 @@ setup command. A global installation is not required.
 
 ## Installation
 
-Add Rekindle to the Phoenix application:
+Add Igniter to the Phoenix application's development dependencies:
 
 ```elixir
 def deps do
   [
-    {:rekindle, "~> 0.1.0-dev"}
+    {:igniter, "~> 0.8", only: [:dev, :test]}
   ]
 end
 ```
 
-Install Rekindle with Igniter:
+Fetch Igniter, then use it to add and install Rekindle:
 
 ```console
 mix deps.get
