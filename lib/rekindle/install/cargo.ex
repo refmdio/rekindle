@@ -36,23 +36,39 @@ if Code.ensure_loaded?(Igniter) do
 
     defp with_client_root(igniter, callback) do
       client_root = Path.expand("client")
-      project_root = temporary_root()
 
-      try do
-        with :ok <- maybe_copy_project(client_root, project_root),
-             :ok <- materialize(igniter, project_root) do
-          callback.(Path.join(project_root, "client"), false)
+      with {:ok, project_root} <- temporary_root() do
+        result =
+          with :ok <- maybe_copy_project(client_root, project_root),
+               :ok <- materialize(igniter, project_root) do
+            callback.(Path.join(project_root, "client"), false)
+          end
+
+        case remove_snapshot(project_root) do
+          :ok -> result
+          {:error, _message} = error -> error
         end
-      after
-        File.rm_rf(project_root)
       end
     end
 
     defp maybe_copy_project(client_root, project_root) do
-      if File.regular?(Path.join(client_root, "Cargo.toml")) do
-        copy_project(File.cwd!(), project_root)
-      else
-        :ok
+      manifest = Path.join(client_root, "Cargo.toml")
+
+      case File.lstat(manifest) do
+        {:ok, %{type: type}} when type in [:regular, :symlink] ->
+          case File.cwd() do
+            {:ok, source} -> copy_project(source, project_root)
+            {:error, reason} -> snapshot_error(".", "resolve application root", reason)
+          end
+
+        {:ok, _other} ->
+          :ok
+
+        {:error, :enoent} ->
+          :ok
+
+        {:error, reason} ->
+          snapshot_error(manifest, "inspect client manifest", reason)
       end
     end
 
@@ -206,21 +222,54 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp temporary_root do
+      case System.tmp_dir() do
+        nil ->
+          {:error, "cannot adopt existing client: no temporary directory is available"}
+
+        directory ->
+          temporary_root(directory)
+      end
+    end
+
+    defp temporary_root(directory) do
       name =
         "rekindle-adopt-" <> (:crypto.strong_rand_bytes(18) |> Base.url_encode64(padding: false))
 
-      path = Path.join(System.tmp_dir!(), name)
+      path = Path.join(directory, name)
 
       case File.mkdir(path) do
         :ok ->
-          File.chmod!(path, 0o700)
-          path
+          case File.chmod(path, 0o700) do
+            :ok ->
+              {:ok, path}
+
+            {:error, reason} ->
+              mode_error = snapshot_error(path, "set temporary snapshot mode", reason)
+
+              case File.rmdir(path) do
+                :ok ->
+                  mode_error
+
+                {:error, cleanup_reason} ->
+                  snapshot_error(path, "remove temporary snapshot", cleanup_reason)
+              end
+          end
 
         {:error, :eexist} ->
-          temporary_root()
+          temporary_root(directory)
 
         {:error, reason} ->
-          raise File.Error, reason: reason, action: "create directory", path: path
+          snapshot_error(path, "create temporary snapshot", reason)
+      end
+    end
+
+    defp remove_snapshot(path) do
+      case File.rm_rf(path) do
+        {:ok, _removed} ->
+          :ok
+
+        {:error, reason, failed_path} ->
+          snapshot_error(failed_path, "remove temporary snapshot", reason)
       end
     end
 

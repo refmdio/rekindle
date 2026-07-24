@@ -579,6 +579,31 @@ defmodule Rekindle.InstallTest do
     assert File.read_link!(Path.join(root, "client/missing")) == missing
   end
 
+  test "does not follow an external client manifest symlink" do
+    original = existing_client(:gpui, [:web])
+    root = tmp_dir()
+    external = tmp_dir()
+    manifest = Path.join(external, "Cargo.toml")
+    write_project(root, original)
+    File.write!(manifest, content(original, "client/Cargo.toml"))
+    File.rm!(Path.join(root, "client/Cargo.toml"))
+    File.ln_s!(manifest, Path.join(root, "client/Cargo.toml"))
+
+    rejected =
+      File.cd!(root, fn ->
+        install(original, integration: "gpui", targets: ["web"])
+      end)
+
+    assert Enum.any?(
+             rejected.issues,
+             &String.contains?(&1, "points outside the application root")
+           )
+
+    assert changed_contents(rejected) == changed_contents(original)
+    assert File.read_link!(Path.join(root, "client/Cargo.toml")) == manifest
+    assert File.read!(manifest) == content(original, "client/Cargo.toml")
+  end
+
   test "rejects a special filesystem entry without changing the project" do
     original = existing_client(:gpui, [:web])
     root = tmp_dir()
