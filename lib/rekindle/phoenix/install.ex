@@ -1,12 +1,12 @@
 if Code.ensure_loaded?(Igniter) do
-  defmodule Rekindle.Install do
+  defmodule Rekindle.Phoenix.Install do
     @moduledoc false
 
     alias Igniter.Code.{Common, Function}
     alias Igniter.Project.{Application, TaskAliases}
     alias Igniter.Project.Config, as: ProjectConfig
     alias Rekindle.{Config, Integration}
-    alias Rekindle.Install.Cargo, as: InstallCargo
+    alias Rekindle.Phoenix.Install.Cargo, as: InstallCargo
 
     @targets [:web, :desktop]
 
@@ -275,7 +275,7 @@ if Code.ensure_loaded?(Igniter) do
         {:ok, _zipper},
         Common.move_to(zipper, fn zipper ->
           Function.function_call?(zipper, :plug, 2) and
-            Function.argument_equals?(zipper, 0, Rekindle.Web.Development)
+            Function.argument_equals?(zipper, 0, Rekindle.Phoenix.Development)
         end)
       )
     end
@@ -292,7 +292,7 @@ if Code.ensure_loaded?(Igniter) do
     defp development_plug_source(app) do
       """
       if code_reloading? do
-        plug Rekindle.Web.Development, otp_app: #{inspect(app)}
+        plug Rekindle.Phoenix.Development, otp_app: #{inspect(app)}
       end
       """
     end

@@ -4,7 +4,7 @@ defmodule Rekindle.DevelopmentTest do
   alias Rekindle.Build.Result
   alias Rekindle.Development.Builder
   alias Rekindle.Desktop.Development, as: DesktopDevelopment
-  alias Rekindle.Web.Development
+  alias Rekindle.Phoenix.Development
 
   setup do
     root =

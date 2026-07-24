@@ -37,7 +37,7 @@ defmodule Rekindle.InstallTest do
     assert endpoint =~ "plug(Plug.Static"
     assert endpoint =~ ~s(at: "/rekindle")
     assert endpoint =~ ~s(from: {:demo, "priv/static/rekindle"})
-    assert endpoint =~ "plug(Rekindle.Web.Development, otp_app: :demo)"
+    assert endpoint =~ "plug(Rekindle.Phoenix.Development, otp_app: :demo)"
 
     mix = content(installed, "mix.exs")
     assert mix =~ ~s(setup: ["deps.get", "rekindle.setup"])
@@ -117,7 +117,7 @@ defmodule Rekindle.InstallTest do
             use Phoenix.Endpoint, otp_app: :demo
 
             if code_reloading? do
-              plug Rekindle.Web.Development, otp_app: :demo
+              plug Rekindle.Phoenix.Development, otp_app: :demo
             end
           end
           """
@@ -126,7 +126,7 @@ defmodule Rekindle.InstallTest do
 
     endpoint = content(installed, "lib/demo_web/endpoint.ex")
     assert endpoint =~ "plug(Plug.Static"
-    assert length(Regex.scan(~r/Rekindle\.Web\.Development/, endpoint)) == 1
+    assert length(Regex.scan(~r/Rekindle\.Phoenix\.Development/, endpoint)) == 1
   end
 
   test "does not stage installation when a generated client path already exists" do
@@ -605,7 +605,7 @@ defmodule Rekindle.InstallTest do
   test "does not install the browser plug for a desktop-only client" do
     installed = install(project(), integration: "gpui", targets: ["desktop"])
 
-    refute content(installed, "lib/demo_web/endpoint.ex") =~ "Rekindle.Web.Development"
+    refute content(installed, "lib/demo_web/endpoint.ex") =~ "Rekindle.Phoenix.Development"
   end
 
   defp project(extra_files \\ %{}) do

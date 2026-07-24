@@ -1,4 +1,4 @@
-defmodule Rekindle.Web.Development do
+defmodule Rekindle.Phoenix.Development do
   @moduledoc false
 
   @behaviour Plug

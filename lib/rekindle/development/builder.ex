@@ -297,12 +297,12 @@ defmodule Rekindle.Development.Builder do
     do: send(destination, {__MODULE__, target, result})
 
   defp report(project, :web, {:ok, _result}) do
-    Rekindle.Web.Development.clear_error(project)
+    Rekindle.Phoenix.Development.clear_error(project)
   end
 
   defp report(project, :web, {:error, error}) do
     Logger.error("Rekindle Web build failed: #{error_message(error)}")
-    Rekindle.Web.Development.put_error(project, error_message(error))
+    Rekindle.Phoenix.Development.put_error(project, error_message(error))
   end
 
   defp report(_project, :desktop, {:error, error}) do

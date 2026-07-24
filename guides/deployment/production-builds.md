@@ -34,3 +34,15 @@ result.metadata.manifest
 
 `Rekindle.build/2` returns typed errors for configuration, Cargo, toolchain, and
 publication failures.
+
+## Phoenix Web entry
+
+Use the configured endpoint when a Phoenix template or component needs the
+logical Web entry descriptor:
+
+```elixir
+Rekindle.Phoenix.web_entry_path(MyAppWeb.Endpoint)
+```
+
+Phoenix resolves the path through its static manifest after `phx.digest`. The
+descriptor identifies the selected immutable Web generation.

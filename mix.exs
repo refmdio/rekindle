@@ -61,7 +61,7 @@ defmodule Rekindle.MixProject do
         Reference: ~r"guides/reference/"
       ],
       groups_for_modules: [
-        Core: [Rekindle],
+        Core: [Rekindle, Rekindle.Phoenix],
         "Build results": [Rekindle.Build.Result, Rekindle.Diagnostic],
         Errors: [
           Rekindle.Build.Error,

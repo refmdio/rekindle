@@ -1,5 +1,5 @@
 if Code.ensure_loaded?(Igniter) do
-  defmodule Rekindle.Install.Cargo do
+  defmodule Rekindle.Phoenix.Install.Cargo do
     @moduledoc false
 
     alias Rekindle.Integration
