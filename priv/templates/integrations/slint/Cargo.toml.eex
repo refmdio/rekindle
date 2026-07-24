@@ -9,14 +9,14 @@ desktop = []
 web = []
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-slint = "1.16"
+slint = "=1.16.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-slint = { version = "1.16", default-features = false, features = ["compat-1-2", "renderer-femtovg", "backend-winit", "std"] }
+slint = { version = "=1.16.1", default-features = false, features = ["compat-1-2", "renderer-femtovg", "backend-winit", "std"] }
 wasm-bindgen = "=<%= @wasm_bindgen_version %>"
 
 [build-dependencies]
-slint-build = "1.16"
+slint-build = "=1.16.1"
 
 <%= if :web in @targets do %>
 [[bin]]

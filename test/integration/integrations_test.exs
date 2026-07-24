@@ -190,6 +190,11 @@ defmodule Rekindle.IntegrationsTest do
 
         assert Integration.dependency(name) in dependency_names
         refute Enum.any?(dependency_names, &String.starts_with?(&1, "rekindle"))
+
+        if name == :slint do
+          assert_slint_versions!(root)
+        end
+
         cargo_fmt!(root)
 
         if :web in targets,
@@ -300,7 +305,10 @@ defmodule Rekindle.IntegrationsTest do
     assert files["Cargo.toml"] =~
              ~s(features = ["compat-1-2", "renderer-femtovg", "backend-winit", "std"])
 
-    assert files["Cargo.toml"] =~ ~s(slint-build = "1.16")
+    assert files["Cargo.toml"] =~ ~s(slint = "=1.16.1")
+    assert files["Cargo.toml"] =~ ~s(slint-build = "=1.16.1")
+    assert files["Cargo.lock"] =~ ~r/name = "slint"\nversion = "1\.16\.1"/
+    assert files["Cargo.lock"] =~ ~r/name = "slint-build"\nversion = "1\.16\.1"/
     assert files["build.rs"] =~ ~S|slint_build::compile("ui/app-window.slint")|
     assert files["src/lib.rs"] =~ "slint::include_modules!();"
     assert files["src/lib.rs"] =~ "AppWindow::new()"
@@ -362,6 +370,30 @@ defmodule Rekindle.IntegrationsTest do
     |> List.first()
     |> Map.fetch!("dependencies")
     |> Enum.map(&Map.fetch!(&1, "name"))
+  end
+
+  defp assert_slint_versions!(root) do
+    {output, status} =
+      System.cmd(rustup_tool!(root, "cargo"), ["metadata", "--format-version", "1", "--locked"],
+        cd: root
+      )
+
+    assert status == 0, "cargo metadata failed for generated Slint client"
+
+    packages =
+      output
+      |> Jason.decode!()
+      |> Map.fetch!("packages")
+      |> Enum.filter(fn package ->
+        package["name"] in ["slint", "slint-build", "slint-macros"] or
+          String.starts_with?(package["name"], "i-slint-")
+      end)
+
+    assert Enum.any?(packages, &(&1["name"] == "slint"))
+    assert Enum.any?(packages, &(&1["name"] == "slint-build"))
+
+    assert Enum.all?(packages, &(&1["version"] == "1.16.1")),
+           "generated Slint client resolved unexpected versions: #{inspect(packages)}"
   end
 
   defp cargo_fmt!(root) do
