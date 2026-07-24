@@ -1,7 +1,10 @@
+Code.require_file("../support/desktop_window_helper.exs", __DIR__)
+
 defmodule Rekindle.IntegrationsTest do
   use ExUnit.Case, async: false
 
   alias Rekindle.Integration
+  alias Rekindle.Test.DesktopWindow
   alias Rekindle.Test.IntegrationBrowser
 
   @moduletag timeout: 600_000
@@ -103,6 +106,27 @@ defmodule Rekindle.IntegrationsTest do
              ])
   end
 
+  test "desktop startup requires a presented top-level surface" do
+    sleep = System.find_executable("sleep") || flunk("sleep is required")
+    true_executable = System.find_executable("true") || flunk("true is required")
+
+    assert {:error, sleep_error} = DesktopWindow.observe(sleep, ["10"], timeout: 250)
+    assert sleep_error =~ "no configured top-level surface presented a buffer"
+
+    assert {:error, exit_error} = DesktopWindow.observe(true_executable, [], timeout: 250)
+    assert exit_error =~ "no configured top-level surface presented a buffer"
+
+    configured_without_buffer = """
+    -> xdg_wm_base#8.get_xdg_surface(new id xdg_surface#14, wl_surface#13)
+    -> xdg_surface#14.get_toplevel(new id xdg_toplevel#15)
+    xdg_toplevel#15.configure(500, 500, array[0])
+    -> xdg_surface#14.ack_configure(1)
+    -> wl_surface#13.commit()
+    """
+
+    assert {:error, _message} = DesktopWindow.classify_protocol(configured_without_buffer)
+  end
+
   test "generated clients compile for every target selection" do
     for name <- Integration.names() do
       for targets <- [[:web], [:desktop], [:web, :desktop]] do
@@ -183,7 +207,7 @@ defmodule Rekindle.IntegrationsTest do
       assert desktop.metadata.rust_target == desktop_target!()
       assert File.regular?(desktop.artifact)
       assert File.regular?(desktop.metadata.manifest)
-      assert_desktop_starts!(desktop.artifact, name)
+      DesktopWindow.assert_starts!(desktop.artifact, name)
     end
   end
 
@@ -306,25 +330,6 @@ defmodule Rekindle.IntegrationsTest do
     target = Rekindle.Toolchain.desktop_target()
     assert {:ok, ^target} = Rekindle.Toolchain.target(:desktop)
     target
-  end
-
-  defp assert_desktop_starts!(artifact, integration) do
-    case Rekindle.Toolchain.Process.run(artifact, [],
-           cd: Path.dirname(artifact),
-           timeout: 1_000,
-           output_limit: 64_000
-         ) do
-      {:error, :timeout} ->
-        :ok
-
-      {:ok, result} ->
-        flunk(
-          "#{integration} desktop exited during startup with status #{result.status}:\n#{result.output}"
-        )
-
-      {:error, reason} ->
-        flunk("#{integration} desktop could not start: #{inspect(reason)}")
-    end
   end
 
   defp tmp_dir(name) do
