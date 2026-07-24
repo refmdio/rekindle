@@ -6,6 +6,14 @@ thread_local! {
     static APPLICATION: RefCell<Option<gpui::ApplicationHandle>> = const { RefCell::new(None) };
 }
 
+#[wasm_bindgen::prelude::wasm_bindgen(
+    inline_js = "export function rekindleReady() { document.documentElement.dataset.rekindleStatus = 'ready'; }"
+)]
+unsafe extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = rekindleReady)]
+    fn rekindle_ready();
+}
+
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() {
     gpui_platform::web_init();
@@ -13,4 +21,5 @@ pub fn start() {
     let application = gpui_platform::single_threaded_web().run_embedded(<%= @crate_name %>::open);
 
     APPLICATION.with(|slot| *slot.borrow_mut() = Some(application));
+    unsafe { rekindle_ready() };
 }

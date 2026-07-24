@@ -295,10 +295,8 @@ defmodule Rekindle.IntegrationsTest do
           const root = document.documentElement;
           const fail = (error) => {
             const message = String(error?.reason ?? error?.error ?? error);
-            if (message.includes("Using exceptions for control flow")) return false;
             root.dataset.rekindleStatus = "error";
             root.dataset.rekindleError = message;
-            return true;
           };
           window.addEventListener("error", fail);
           window.addEventListener("unhandledrejection", fail);
@@ -307,13 +305,8 @@ defmodule Rekindle.IntegrationsTest do
             if (!window.isSecureContext) throw new Error("insecure context");
             const module = await import("./app.js");
             await module.default();
-            setTimeout(() => {
-              if (root.dataset.rekindleStatus === "pending") {
-                root.dataset.rekindleStatus = "ready";
-              }
-            }, 2000);
           } catch (error) {
-            if (!fail(error)) root.dataset.rekindleStatus = "ready";
+            fail(error);
           }
         </script>
       </body>
