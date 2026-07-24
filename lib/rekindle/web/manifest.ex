@@ -32,8 +32,8 @@ defmodule Rekindle.Web.Manifest do
   def validate_deployment(root, manifest), do: validate(root, manifest, :deployment)
 
   @doc false
-  @spec validate_member(Path.t(), map(), String.t()) :: :ok | {:error, Error.t()}
-  def validate_member(
+  @spec read_member(Path.t(), map(), String.t()) :: {:ok, binary()} | {:error, Error.t()}
+  def read_member(
         root,
         %{
           "version" => @version,
@@ -51,15 +51,16 @@ defmodule Rekindle.Web.Manifest do
          :ok <- generation_identity(generation, entry, members),
          :ok <- generation_root(root),
          %{} = member <- Enum.find(members, &(&1["path"] == requested)),
-         {:ok, ^requested} <- validate_declared_member(root, member, MapSet.new()) do
-      :ok
+         {:ok, ^requested, contents} <-
+           validate_declared_member(root, member, MapSet.new()) do
+      {:ok, contents}
     else
       nil -> error(:missing_member, "Web generation member is missing: #{requested}")
       {:error, %Error{} = error} -> {:error, error}
     end
   end
 
-  def validate_member(_root, _manifest, _requested),
+  def read_member(_root, _manifest, _requested),
     do: error(:invalid_manifest, "Web manifest has an unsupported shape")
 
   defp validate(
@@ -157,7 +158,7 @@ defmodule Rekindle.Web.Manifest do
       members
       |> Enum.reduce_while({:ok, MapSet.new()}, fn member, {:ok, paths} ->
         case validate_declared_member(root, member, paths) do
-          {:ok, path} -> {:cont, {:ok, MapSet.put(paths, path)}}
+          {:ok, path, _contents} -> {:cont, {:ok, MapSet.put(paths, path)}}
           {:error, %Error{} = error} -> {:halt, {:error, error}}
         end
       end)
@@ -176,7 +177,7 @@ defmodule Rekindle.Web.Manifest do
          {:ok, %{type: :regular}} <- File.lstat(Path.join(root, path)),
          {:ok, contents} <- File.read(Path.join(root, path)),
          true <- sha256(contents) == expected do
-      {:ok, path}
+      {:ok, path, contents}
     else
       true ->
         error(:invalid_manifest, "Web manifest contains duplicate member #{path}")

@@ -489,6 +489,29 @@ defmodule Rekindle.DevelopmentTest do
     refute response.resp_body =~ "external member secret"
   end
 
+  test "serves the validated Web member when its path changes before sending", %{root: root} do
+    source = "export default 'validated';"
+    generation = publish_web(root, source)
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+    member = Path.join([root, ".rekindle", "dev", "web", generation, "app.js"])
+    external = external_path(root, "response-boundary")
+    File.write!(external, "external response secret")
+    on_exit(fn -> File.rm_rf!(external) end)
+
+    response =
+      Plug.Test.conn("GET", "/__rekindle/web/#{generation}/app.js")
+      |> Plug.Conn.register_before_send(fn conn ->
+        File.rm!(member)
+        File.ln_s!(external, member)
+        conn
+      end)
+      |> Development.call(options)
+
+    assert response.status == 200
+    assert response.resp_body == source
+    refute response.resp_body =~ "external response secret"
+  end
+
   test "does not serve a Web generation member through a linked ancestor", %{root: root} do
     generation =
       publish_web_members(root, %{

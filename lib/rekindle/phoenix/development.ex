@@ -82,13 +82,11 @@ defmodule Rekindle.Phoenix.Development do
          {:ok, project} <- project(options),
          {:ok, manifest} <- manifest(project, generation),
          root = Path.join([project.root, ".rekindle", "dev", "web", generation]),
-         :ok <- Manifest.validate_member(root, manifest, requested) do
-      file = Path.join(root, requested)
-
+         {:ok, contents} <- Manifest.read_member(root, manifest, requested) do
       conn
       |> put_resp_header("cache-control", "public, max-age=31536000, immutable")
       |> put_resp_content_type(MIME.from_path(requested))
-      |> send_file(200, file)
+      |> send_resp(200, contents)
       |> halt()
     else
       _error -> not_found(conn)
