@@ -600,6 +600,92 @@ defmodule Rekindle.DevelopmentTest do
     end)
   end
 
+  @tag timeout: 60_000
+  test "starts each browser integration once when its graphics capability is available", %{
+    root: root
+  } do
+    cases = [
+      {:gpui,
+       "Object.defineProperty(navigator, 'gpu', {value: {requestAdapter: async () => ({})}});",
+       &String.replace(&1, "window.isSecureContext", "true")},
+      {:egui, "HTMLCanvasElement.prototype.getContext = () => ({});", & &1},
+      {:slint, "HTMLCanvasElement.prototype.getContext = () => ({});", & &1}
+    ]
+
+    module =
+      """
+      export default async function initialize() {
+        const root = document.documentElement;
+        const initializers = Number(root.dataset.initializers || "0") + 1;
+        root.dataset.initializers = String(initializers);
+        root.dataset.applicationStarted = "true";
+      }
+      """
+
+    Enum.each(cases, fn {integration, setup, transform} ->
+      selector = browser_selector(String.duplicate("a", 64), module)
+      output = run_browser_responses(root, integration, setup, transform, [selector])
+
+      assert output =~ ~s(data-application-started="true")
+      assert output =~ ~s(data-initializers="1")
+      refute output =~ "data-rekindle-error-count"
+    end)
+  end
+
+  @tag timeout: 60_000
+  test "reports browser startup failures and recovers on a later selection", %{root: root} do
+    success =
+      browser_selector(
+        String.duplicate("b", 64),
+        """
+        export default async function initialize() {
+          const root = document.documentElement;
+          const initializers = Number(root.dataset.initializers || "0") + 1;
+          root.dataset.initializers = String(initializers);
+          root.dataset.applicationStarted = "true";
+        }
+        """
+      )
+
+    cases = [
+      {"malformed", ["{", success], "SyntaxError"},
+      {"missing-initializer",
+       [
+         browser_selector(String.duplicate("a", 64), "export const value = 1;"),
+         success
+       ], "does not export a wasm-bindgen initializer"},
+      {"throwing-initializer",
+       [
+         browser_selector(
+           String.duplicate("a", 64),
+           """
+           export default async function initialize() {
+             document.documentElement.dataset.failedInitializerCalled = "true";
+             throw new Error("initializer exploded");
+           }
+           """
+         ),
+         success
+       ], "initializer exploded"}
+    ]
+
+    Enum.each(cases, fn {_name, responses, expected_error} ->
+      output =
+        run_browser_responses(
+          root,
+          :egui,
+          "HTMLCanvasElement.prototype.getContext = () => ({});",
+          & &1,
+          responses
+        )
+
+      assert output =~ ~s(data-application-started="true")
+      assert output =~ ~s(data-initializers="1")
+      assert output =~ ~s(data-rekindle-error-count="1")
+      assert output =~ expected_error
+    end)
+  end
+
   test "does not expose unselected or malformed Web paths", %{root: root} do
     generation = publish_web(root, "export default 'ready';")
     options = Development.init(otp_app: :rekindle_development_test, project_root: root)
@@ -1393,6 +1479,99 @@ defmodule Rekindle.DevelopmentTest do
       document.documentElement.dataset.rekindleLoads = String(loads);
     }
     """
+  end
+
+  defp browser_selector(generation, module) do
+    Jason.encode!(%{
+      generation: generation,
+      entry: "data:text/javascript,#{URI.encode(module)}"
+    })
+  end
+
+  defp run_browser_responses(root, integration, setup, transform, responses) do
+    browser = System.find_executable("chromium") || flunk("Chromium is required")
+
+    Application.put_env(:rekindle_development_test, Rekindle,
+      integration: integration,
+      targets: [web: []]
+    )
+
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+
+    runtime =
+      options
+      |> then(&request("/__rekindle/runtime.js", &1).resp_body)
+      |> transform.()
+
+    page =
+      """
+      <!doctype html>
+      <html><body>
+        <canvas id="the_canvas_id"></canvas>
+        <canvas id="canvas"></canvas>
+        <pre id="rekindle-error" hidden></pre>
+        <script>
+          #{setup}
+          const responses = #{Jason.encode!(responses)};
+          let requests = 0;
+          const originalConsoleError = console.error.bind(console);
+          console.error = (...values) => {
+            const error = values.find((value) => value instanceof Error);
+            const message = error ? `${error.name}: ${error.message}` : values.join(" ");
+            const root = document.documentElement;
+            root.dataset.rekindleErrorCount =
+              String(Number(root.dataset.rekindleErrorCount || "0") + 1);
+            root.dataset.rekindleErrors =
+              [root.dataset.rekindleErrors, message].filter(Boolean).join(" | ");
+            originalConsoleError(...values);
+          };
+          window.fetch = () => {
+            const index = Math.min(requests, responses.length - 1);
+            requests += 1;
+            document.documentElement.dataset.requests = String(requests);
+            return Promise.resolve(
+              new Response(responses[index], {
+                status: 200,
+                headers: {"content-type": "application/json"}
+              })
+            );
+          };
+        </script>
+        <script type="module">#{runtime}</script>
+      </body></html>
+      """
+
+    directory =
+      Path.join(
+        root,
+        "browser-responses-#{integration}-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    profile = Path.join(directory, "profile")
+    File.mkdir_p!(directory)
+    page_path = Path.join(directory, "index.html")
+    File.write!(page_path, page)
+
+    arguments = [
+      "--headless=new",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-dev-shm-usage",
+      "--allow-file-access-from-files",
+      "--user-data-dir=#{profile}",
+      "--virtual-time-budget=1250",
+      "--dump-dom",
+      "file://#{page_path}"
+    ]
+
+    assert {:ok, %{status: 0, output: output}} =
+             Rekindle.Toolchain.Process.run(browser, arguments,
+               cd: directory,
+               timeout: 20_000,
+               output_limit: 1_000_000
+             )
+
+    output
   end
 
   defp run_browser_failure(root, integration, setup, transform) do
