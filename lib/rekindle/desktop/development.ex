@@ -8,7 +8,7 @@ defmodule Rekindle.Desktop.Development do
   alias Rekindle.Build.Result
   alias Rekindle.Development.Cleanup
   alias Rekindle.Desktop.{Error, Manifest}
-  alias Rekindle.State
+  alias Rekindle.OwnedPath
 
   @generation ~r/\A[0-9a-f]{64}\z/
 
@@ -241,7 +241,7 @@ defmodule Rekindle.Desktop.Development do
          %Result{target: :desktop, profile: :dev, metadata: metadata} = result
        ) do
     with manifest_path when is_binary(manifest_path) <- metadata[:manifest],
-         :ok <- State.validate_parent(root, manifest_path),
+         :ok <- OwnedPath.validate_parent(root, manifest_path),
          {:ok, contents} <- File.read(manifest_path),
          {:ok, manifest} <- Jason.decode(contents),
          true <- manifest["generation"] == metadata[:generation],
@@ -262,7 +262,7 @@ defmodule Rekindle.Desktop.Development do
     directory = Path.join([root, ".rekindle", "dev"])
     marker_path = Path.join(directory, "desktop-last-running.json")
 
-    with :ok <- State.validate_directory(root, directory),
+    with :ok <- OwnedPath.validate_directory(root, directory),
          {:ok, contents} <- File.read(marker_path),
          {:ok,
           %{
@@ -307,18 +307,18 @@ defmodule Rekindle.Desktop.Development do
         "manifest" => Path.relative_to(result.metadata.manifest, directory)
       })
 
-    with :ok <- State.ensure_directory(root, directory),
+    with :ok <- OwnedPath.ensure_directory(root, directory),
          :ok <- File.write(temporary, marker),
          :ok <- File.rename(temporary, destination) do
       :ok
     else
       {:error, reason} ->
-        State.remove_file(root, temporary)
+        OwnedPath.remove_file(root, temporary)
 
         {:error,
          Error.new(
            :marker_write,
-           "desktop launch state could not be updated: #{State.format_error(reason)}"
+           "desktop launch state could not be updated: #{OwnedPath.format_error(reason)}"
          )}
     end
   end

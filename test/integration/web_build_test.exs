@@ -87,7 +87,7 @@ defmodule Rekindle.WebBuildTest do
     assert {:error, %Rekindle.Web.Error{kind: :mkdir, message: message}} =
              build(root, tools)
 
-    assert message =~ "project state path"
+    assert message =~ "project-owned path"
     refute File.exists?(Path.join(external, "tmp"))
     assert File.read!(Path.join(external, "sentinel")) == "unchanged"
 

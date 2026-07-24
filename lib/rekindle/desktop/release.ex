@@ -6,7 +6,7 @@ defmodule Rekindle.Desktop.Release do
   alias Rekindle.Build.Result
   alias Rekindle.Desktop.{Error, Manifest}
   alias Rekindle.Publication
-  alias Rekindle.State
+  alias Rekindle.OwnedPath
 
   @release_executable ~r/\Aapplication-[0-9a-f]{64}\z/
 
@@ -28,7 +28,7 @@ defmodule Rekindle.Desktop.Release do
          true <- source_manifest["target"] == metadata.rust_target,
          true <- source_manifest["integration"] == Atom.to_string(project.integration) do
       with_lock(project, destination_root, fn ->
-        publish_locked(destination_root, source_root, source_manifest, result)
+        publish_locked(project, destination_root, source_root, source_manifest, result)
       end)
     else
       false ->
@@ -39,16 +39,19 @@ defmodule Rekindle.Desktop.Release do
     end
   end
 
-  defp publish_locked(root, source_root, source_manifest, result) do
+  defp publish_locked(project, root, source_root, source_manifest, result) do
     executable = content_name(source_manifest)
 
-    with {:ok, published?} <-
+    with :ok <- owned_directory(project, root),
+         {:ok, published?} <-
            publish_executable(
+             project,
              Path.join(source_root, source_manifest["executable"]),
              Path.join(root, executable),
              source_manifest["sha256"]
            ) do
       prepare_publication(
+        project,
         root,
         executable,
         source_manifest,
@@ -58,7 +61,7 @@ defmodule Rekindle.Desktop.Release do
     end
   end
 
-  defp prepare_publication(root, executable, source_manifest, result, published?) do
+  defp prepare_publication(project, root, executable, source_manifest, result, published?) do
     expected_hash = source_manifest["sha256"]
 
     case Manifest.create(
@@ -70,22 +73,22 @@ defmodule Rekindle.Desktop.Release do
            source_manifest["integration"]
          ) do
       {:ok, %{"sha256" => hash} = manifest} when hash == expected_hash ->
-        finish_publication(root, manifest, result, published?)
+        finish_publication(project, root, manifest, result, published?)
 
       {:ok, _manifest} ->
-        rollback(root, executable, published?)
+        rollback(project, root, executable, published?)
         error(:executable_hash, "desktop release executable changed during publication")
 
       {:error, %Error{} = error} ->
-        rollback(root, executable, published?)
+        rollback(project, root, executable, published?)
         {:error, error}
     end
   end
 
-  defp finish_publication(root, manifest, result, published?) do
-    case write_manifest(root, manifest) do
+  defp finish_publication(project, root, manifest, result, published?) do
+    case write_manifest(project, root, manifest) do
       :ok ->
-        cleanup(root, manifest["executable"])
+        cleanup(project, root, manifest["executable"])
 
         {:ok,
          %{
@@ -99,12 +102,12 @@ defmodule Rekindle.Desktop.Release do
          }}
 
       {:error, %Error{} = error} ->
-        if published?, do: remove_regular(Path.join(root, manifest["executable"]))
+        if published?, do: remove_regular(project, Path.join(root, manifest["executable"]))
         {:error, error}
     end
   end
 
-  defp publish_executable(source, destination, expected_hash) do
+  defp publish_executable(project, source, destination, expected_hash) do
     case File.lstat(destination) do
       {:ok, %{type: :regular}} ->
         with :ok <- validate_executable(destination, expected_hash) do
@@ -115,17 +118,18 @@ defmodule Rekindle.Desktop.Release do
         error(:publish, "desktop release path is not a regular file: #{destination}")
 
       {:error, :enoent} ->
-        with :ok <- mkdir(Path.dirname(destination)),
+        with :ok <- owned_directory(project, Path.dirname(destination)),
              {:ok, temporary} <-
                temporary_file(Path.dirname(destination), ".tmp-executable-", :publish) do
           try do
             with :ok <- copy_executable(source, temporary),
                  :ok <- validate_executable(temporary, expected_hash),
-                 {:ok, published?} <- link_executable(temporary, destination, expected_hash) do
+                 {:ok, published?} <-
+                   link_executable(project, temporary, destination, expected_hash) do
               {:ok, published?}
             end
           after
-            File.rm(temporary)
+            OwnedPath.remove_file(project.root, temporary)
           end
         end
 
@@ -134,18 +138,20 @@ defmodule Rekindle.Desktop.Release do
     end
   end
 
-  defp link_executable(temporary, destination, expected_hash) do
-    case File.ln(temporary, destination) do
-      :ok ->
-        {:ok, true}
+  defp link_executable(project, temporary, destination, expected_hash) do
+    with :ok <- owned_parent(project, destination) do
+      case File.ln(temporary, destination) do
+        :ok ->
+          {:ok, true}
 
-      {:error, :eexist} ->
-        with :ok <- validate_executable(destination, expected_hash) do
-          {:ok, false}
-        end
+        {:error, :eexist} ->
+          with :ok <- validate_executable(destination, expected_hash) do
+            {:ok, false}
+          end
 
-      {:error, reason} ->
-        file_error(:publish, destination, reason)
+        {:error, reason} ->
+          file_error(:publish, destination, reason)
+      end
     end
   end
 
@@ -180,13 +186,15 @@ defmodule Rekindle.Desktop.Release do
     end
   end
 
-  defp write_manifest(root, manifest) do
+  defp write_manifest(project, root, manifest) do
     destination = Path.join(root, "manifest.json")
 
-    with {:ok, temporary} <- temporary_file(root, ".tmp-manifest-", :manifest_write) do
+    with :ok <- owned_directory(project, root),
+         {:ok, temporary} <- temporary_file(root, ".tmp-manifest-", :manifest_write) do
       try do
         with :ok <- File.write(temporary, Jason.encode!(manifest)),
              :ok <- Manifest.validate_deployment(root, manifest),
+             :ok <- owned_directory(project, root),
              :ok <- File.rename(temporary, destination) do
           :ok
         else
@@ -197,43 +205,51 @@ defmodule Rekindle.Desktop.Release do
             file_error(:manifest_write, destination, reason)
         end
       after
-        File.rm(temporary)
+        OwnedPath.remove_file(project.root, temporary)
       end
     end
   end
 
-  defp cleanup(root, selected) do
-    remove_unreferenced(root, selected)
-    remove_temporaries(root)
+  defp cleanup(project, root, selected) do
+    case OwnedPath.validate_directory(project.root, root) do
+      :ok ->
+        remove_unreferenced(project, root, selected)
+        remove_temporaries(project, root)
+
+      {:error, reason} ->
+        Logger.warning("could not clean #{root}: #{OwnedPath.format_error(reason)}")
+    end
   end
 
-  defp remove_unreferenced(root, selected) do
+  defp remove_unreferenced(project, root, selected) do
     case File.ls(root) do
       {:ok, names} ->
         names
         |> Enum.filter(&Regex.match?(@release_executable, &1))
         |> Enum.reject(&(&1 == selected))
-        |> Enum.each(fn name -> remove_regular(Path.join(root, name)) end)
+        |> Enum.each(fn name -> remove_regular(project, Path.join(root, name)) end)
 
       _error ->
         :ok
     end
   end
 
-  defp remove_temporaries(root) do
+  defp remove_temporaries(project, root) do
     case File.ls(root) do
       {:ok, names} ->
         names
         |> Enum.filter(&String.starts_with?(&1, ".tmp-"))
-        |> Enum.each(fn name -> remove_regular(Path.join(root, name)) end)
+        |> Enum.each(fn name -> remove_regular(project, Path.join(root, name)) end)
 
       _error ->
         :ok
     end
   end
 
-  defp rollback(root, executable, true), do: remove_regular(Path.join(root, executable))
-  defp rollback(_root, _executable, false), do: :ok
+  defp rollback(project, root, executable, true),
+    do: remove_regular(project, Path.join(root, executable))
+
+  defp rollback(_project, _root, _executable, false), do: :ok
 
   defp content_name(manifest), do: "application-" <> manifest["sha256"]
 
@@ -254,16 +270,23 @@ defmodule Rekindle.Desktop.Release do
   end
 
   defp validate_source(project, source) do
-    case State.validate_directory(project.root, source) do
+    case OwnedPath.validate_directory(project.root, source) do
       :ok -> :ok
       {:error, reason} -> file_error(:manifest_read, source, reason)
     end
   end
 
-  defp mkdir(path) do
-    case File.mkdir_p(path) do
+  defp owned_directory(project, path) do
+    case OwnedPath.ensure_directory(project.root, path) do
       :ok -> :ok
       {:error, reason} -> file_error(:mkdir, path, reason)
+    end
+  end
+
+  defp owned_parent(project, path) do
+    case OwnedPath.validate_parent(project.root, path) do
+      :ok -> :ok
+      {:error, reason} -> file_error(:publish, path, reason)
     end
   end
 
@@ -284,14 +307,17 @@ defmodule Rekindle.Desktop.Release do
     end
   end
 
-  defp remove_regular(path) do
-    case File.lstat(path) do
-      {:ok, %{type: :regular}} ->
-        case File.rm(path) do
-          :ok -> :ok
-          {:error, reason} -> Logger.warning("could not remove #{path}: #{inspect(reason)}")
-        end
+  defp remove_regular(project, path) do
+    with :ok <- OwnedPath.validate_parent(project.root, path),
+         {:ok, %{type: :regular}} <- File.lstat(path) do
+      case OwnedPath.remove_file(project.root, path) do
+        :ok ->
+          :ok
 
+        {:error, reason} ->
+          Logger.warning("could not remove #{path}: #{OwnedPath.format_error(reason)}")
+      end
+    else
       {:ok, _stat} ->
         :ok
 
@@ -299,7 +325,7 @@ defmodule Rekindle.Desktop.Release do
         :ok
 
       {:error, reason} ->
-        Logger.warning("could not inspect #{path}: #{inspect(reason)}")
+        Logger.warning("could not inspect #{path}: #{OwnedPath.format_error(reason)}")
     end
   end
 
@@ -307,7 +333,7 @@ defmodule Rekindle.Desktop.Release do
     do: contents |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
 
   defp file_error(kind, path, reason),
-    do: error(kind, "cannot update #{path}: #{State.format_error(reason)}")
+    do: error(kind, "cannot update #{path}: #{OwnedPath.format_error(reason)}")
 
   defp error(kind, message), do: {:error, Error.new(kind, message)}
 end

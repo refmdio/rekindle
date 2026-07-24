@@ -80,7 +80,7 @@ defmodule Rekindle.DesktopBuildTest do
     assert {:error, %Rekindle.Desktop.Error{kind: :mkdir, message: message}} =
              build(root, tools)
 
-    assert message =~ "project state path"
+    assert message =~ "project-owned path"
     refute File.exists?(Path.join(external, "tmp"))
     assert File.read!(Path.join(external, "sentinel")) == "unchanged"
 
@@ -155,6 +155,73 @@ defmodule Rekindle.DesktopBuildTest do
     refute File.exists?(Path.join(root, ".rekindle/release/desktop-last-running.json"))
     refute File.exists?(Path.join(root, ".rekindle/dev/desktop-current.json"))
     refute File.exists?(tools.launched)
+  end
+
+  test "rejects linked and special desktop release destination ancestors", %{root: root} do
+    selected_tools = fake_tools(root, executable?: true, marker: "selected")
+    assert {:ok, selected} = build(root, selected_tools, profile: :release)
+    selected_manifest = File.read!(selected.metadata.manifest)
+    selected_executable = File.read!(selected.artifact)
+
+    candidate_tools = fake_tools(root, executable?: true, marker: "candidate")
+    assert {:ok, candidate} = build(root, candidate_tools)
+
+    target_root = Path.dirname(selected.metadata.manifest)
+
+    ancestors = [
+      Path.join(root, "dist"),
+      Path.join([root, "dist", "rekindle"]),
+      Path.join([root, "dist", "rekindle", "desktop"]),
+      target_root
+    ]
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_desktop_build_test, project_root: root)
+
+    for {ancestor, index} <- Enum.with_index(ancestors),
+        kind <- [:symlink, :fifo] do
+      backup = Path.join(root, "release-backup-#{index}-#{kind}")
+      external = Path.join(root, "release-external-#{index}-#{kind}")
+      File.mkdir!(external)
+      File.write!(Path.join(external, "sentinel"), "unchanged")
+      relative_target = Path.relative_to(target_root, ancestor)
+
+      external_target =
+        if relative_target == ".", do: external, else: Path.join(external, relative_target)
+
+      File.mkdir_p!(external_target)
+      protected = Path.join(external_target, "application-#{String.duplicate("a", 64)}")
+      protected_temporary = Path.join(external_target, ".tmp-protected")
+      File.write!(protected, "protected")
+      File.write!(protected_temporary, "temporary")
+      external_root_names = external |> File.ls!() |> Enum.sort()
+      external_target_names = external_target |> File.ls!() |> Enum.sort()
+      relative_manifest = Path.relative_to(selected.metadata.manifest, ancestor)
+      relative_executable = Path.relative_to(selected.artifact, ancestor)
+      File.rename!(ancestor, backup)
+
+      case kind do
+        :symlink -> File.ln_s!(external, ancestor)
+        :fifo -> assert {"", 0} = System.cmd("mkfifo", [ancestor])
+      end
+
+      try do
+        assert {:error, %Rekindle.Desktop.Error{kind: :mkdir}} =
+                 Rekindle.Desktop.Release.publish(project, %{candidate | profile: :release})
+
+        assert external |> File.ls!() |> Enum.sort() == external_root_names
+        assert external_target |> File.ls!() |> Enum.sort() == external_target_names
+        assert File.read!(Path.join(external, "sentinel")) == "unchanged"
+        assert File.read!(protected) == "protected"
+        assert File.read!(protected_temporary) == "temporary"
+        refute File.exists?(Path.join(external_target, "manifest.json"))
+        assert File.read!(Path.join(backup, relative_manifest)) == selected_manifest
+        assert File.read!(Path.join(backup, relative_executable)) == selected_executable
+      after
+        File.rm!(ancestor)
+        File.rename!(backup, ancestor)
+      end
+    end
   end
 
   test "preserves the prior release when the next manifest cannot be published", %{root: root} do

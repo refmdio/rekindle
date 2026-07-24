@@ -1,12 +1,10 @@
-defmodule Rekindle.State do
+defmodule Rekindle.OwnedPath do
   @moduledoc false
-
-  @state_directory ".rekindle"
 
   @type reason ::
           File.posix()
-          | {:outside_state, Path.t()}
-          | {:unsafe_state_path, Path.t(), File.Stat.type()}
+          | {:outside_root, Path.t()}
+          | {:unsafe_owned_path, Path.t(), File.Stat.type()}
 
   @spec ensure_directory(Path.t(), Path.t()) :: :ok | {:error, reason()}
   def ensure_directory(project_root, path) do
@@ -38,7 +36,7 @@ defmodule Rekindle.State do
           end
 
         {:ok, %{type: type}} ->
-          {:error, {:unsafe_state_path, path, type}}
+          {:error, {:unsafe_owned_path, path, type}}
 
         {:error, :enoent} ->
           :ok
@@ -54,7 +52,7 @@ defmodule Rekindle.State do
     with :ok <- validate_parent(project_root, path) do
       case File.lstat(path) do
         {:ok, %{type: :regular}} -> File.rm(path)
-        {:ok, %{type: type}} -> {:error, {:unsafe_state_path, path, type}}
+        {:ok, %{type: type}} -> {:error, {:unsafe_owned_path, path, type}}
         {:error, :enoent} -> :ok
         {:error, reason} -> {:error, reason}
       end
@@ -62,11 +60,11 @@ defmodule Rekindle.State do
   end
 
   @spec format_error(reason()) :: String.t()
-  def format_error({:outside_state, path}),
-    do: "path is outside the project state directory: #{path}"
+  def format_error({:outside_root, path}),
+    do: "path is outside the project root: #{path}"
 
-  def format_error({:unsafe_state_path, path, type}),
-    do: "project state path is not a real directory or file: #{path} (#{type})"
+  def format_error({:unsafe_owned_path, path, type}),
+    do: "project-owned path is not a real directory or file: #{path} (#{type})"
 
   def format_error(reason) when is_atom(reason), do: List.to_string(:file.format_error(reason))
 
@@ -76,11 +74,11 @@ defmodule Rekindle.State do
     relative = Path.relative_to(path, project_root)
     components = Path.split(relative)
 
-    if components != [] and hd(components) == @state_directory and
+    if Path.type(relative) == :relative and components != [] and
          Enum.all?(components, &safe_component?/1) do
       {:ok, project_root, components}
     else
-      {:error, {:outside_state, path}}
+      {:error, {:outside_root, path}}
     end
   end
 
@@ -126,7 +124,7 @@ defmodule Rekindle.State do
         :ok
 
       {:ok, %{type: type}} ->
-        {:error, {:unsafe_state_path, path, type}}
+        {:error, {:unsafe_owned_path, path, type}}
 
       {:error, :enoent} ->
         case File.mkdir(path) do
@@ -143,7 +141,7 @@ defmodule Rekindle.State do
   defp real_directory(path) do
     case File.lstat(path) do
       {:ok, %{type: :directory}} -> :ok
-      {:ok, %{type: type}} -> {:error, {:unsafe_state_path, path, type}}
+      {:ok, %{type: type}} -> {:error, {:unsafe_owned_path, path, type}}
       {:error, reason} -> {:error, reason}
     end
   end

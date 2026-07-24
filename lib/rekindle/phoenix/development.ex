@@ -6,7 +6,7 @@ defmodule Rekindle.Phoenix.Development do
   import Plug.Conn
 
   alias Rekindle.Config
-  alias Rekindle.State
+  alias Rekindle.OwnedPath
 
   @prefix ["__rekindle"]
   @generation ~r/\A[0-9a-f]{64}\z/
@@ -101,13 +101,13 @@ defmodule Rekindle.Phoenix.Development do
     path = error_path(project)
     temporary = path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
 
-    with :ok <- State.ensure_directory(project.root, Path.dirname(path)),
+    with :ok <- OwnedPath.ensure_directory(project.root, Path.dirname(path)),
          :ok <- File.write(temporary, Jason.encode!(%{"error" => message})),
          :ok <- File.rename(temporary, path) do
       :ok
     else
       {:error, _reason} ->
-        State.remove_file(project.root, temporary)
+        OwnedPath.remove_file(project.root, temporary)
         :ok
     end
   end
@@ -115,7 +115,7 @@ defmodule Rekindle.Phoenix.Development do
   @doc false
   @spec clear_error(Config.t()) :: :ok
   def clear_error(project) do
-    case State.remove_file(project.root, error_path(project)) do
+    case OwnedPath.remove_file(project.root, error_path(project)) do
       :ok -> :ok
       {:error, _reason} -> :ok
     end
@@ -131,7 +131,7 @@ defmodule Rekindle.Phoenix.Development do
   defp current(project) do
     selector_path = Path.join([project.root, ".rekindle", "dev", "web-current.json"])
 
-    with :ok <- State.validate_parent(project.root, selector_path),
+    with :ok <- OwnedPath.validate_parent(project.root, selector_path),
          {:ok, contents} <- File.read(selector_path),
          {:ok, %{"generation" => generation}} <- Jason.decode(contents),
          true <- Regex.match?(@generation, generation),
@@ -144,7 +144,7 @@ defmodule Rekindle.Phoenix.Development do
     root = Path.join([project.root, ".rekindle", "dev", "web", generation])
     path = Path.join(root, "manifest.json")
 
-    with :ok <- State.validate_directory(project.root, root),
+    with :ok <- OwnedPath.validate_directory(project.root, root),
          {:ok, contents} <- File.read(path),
          {:ok,
           %{
@@ -173,7 +173,7 @@ defmodule Rekindle.Phoenix.Development do
   defp build_error(project) do
     path = error_path(project)
 
-    with :ok <- State.validate_parent(project.root, path),
+    with :ok <- OwnedPath.validate_parent(project.root, path),
          {:ok, contents} <- File.read(path),
          {:ok, %{"error" => message}} when is_binary(message) <- Jason.decode(contents) do
       {:ok, message}

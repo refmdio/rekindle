@@ -3,7 +3,7 @@ defmodule Rekindle.Web.Builder do
 
   alias Rekindle.Build.Result
   alias Rekindle.Publication
-  alias Rekindle.State
+  alias Rekindle.OwnedPath
   alias Rekindle.Toolchain.Process
   alias Rekindle.Web.{Error, Manifest}
 
@@ -56,7 +56,7 @@ defmodule Rekindle.Web.Builder do
           {:ok, result}
         end
       after
-        State.remove_directory(project.root, temporary)
+        OwnedPath.remove_directory(project.root, temporary)
       end
     end
   end
@@ -265,7 +265,7 @@ defmodule Rekindle.Web.Builder do
           {:error, reason} -> file_error(:selector_write, destination, reason)
         end
       after
-        State.remove_file(project.root, temporary)
+        OwnedPath.remove_file(project.root, temporary)
       end
     else
       {:error, %Error{} = error} -> {:error, error}
@@ -331,14 +331,14 @@ defmodule Rekindle.Web.Builder do
     do: Keyword.take(options, [:timeout, :env])
 
   defp state_directory(project, path) do
-    case State.ensure_directory(project.root, path) do
+    case OwnedPath.ensure_directory(project.root, path) do
       :ok -> :ok
       {:error, reason} -> file_error(:mkdir, path, reason)
     end
   end
 
   defp file_error(kind, path, reason),
-    do: error(kind, "cannot update #{path}: #{State.format_error(reason)}")
+    do: error(kind, "cannot update #{path}: #{OwnedPath.format_error(reason)}")
 
   defp error(kind, message, options \\ []),
     do: {:error, Error.new(kind, message, options)}

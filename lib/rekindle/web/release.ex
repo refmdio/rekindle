@@ -5,7 +5,7 @@ defmodule Rekindle.Web.Release do
 
   alias Rekindle.Build.Result
   alias Rekindle.Publication
-  alias Rekindle.State
+  alias Rekindle.OwnedPath
   alias Rekindle.Web.{Error, Manifest}
 
   @retained 2
@@ -297,7 +297,7 @@ defmodule Rekindle.Web.Release do
   end
 
   defp validate_source(project, source) do
-    case State.validate_directory(project.root, source) do
+    case OwnedPath.validate_directory(project.root, source) do
       :ok -> :ok
       {:error, reason} -> file_error(:manifest_read, source, reason)
     end
@@ -318,7 +318,7 @@ defmodule Rekindle.Web.Release do
   end
 
   defp file_error(kind, path, reason),
-    do: error(kind, "cannot update #{path}: #{State.format_error(reason)}")
+    do: error(kind, "cannot update #{path}: #{OwnedPath.format_error(reason)}")
 
   defp error(kind, message), do: {:error, Error.new(kind, message)}
 end

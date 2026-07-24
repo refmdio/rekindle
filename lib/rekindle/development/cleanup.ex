@@ -4,7 +4,7 @@ defmodule Rekindle.Development.Cleanup do
   require Logger
 
   alias Rekindle.Publication
-  alias Rekindle.State
+  alias Rekindle.OwnedPath
 
   @retained 2
   @generation ~r/\A[0-9a-f]{64}\z/
@@ -13,7 +13,7 @@ defmodule Rekindle.Development.Cleanup do
   def startup(project) do
     state_root = Path.join(project.root, ".rekindle")
 
-    case State.validate_directory(project.root, state_root) do
+    case OwnedPath.validate_directory(project.root, state_root) do
       :ok -> startup_owned(project)
       {:error, :enoent} -> :ok
       {:error, reason} -> warn_unsafe(reason)
@@ -122,7 +122,7 @@ defmodule Rekindle.Development.Cleanup do
   end
 
   defp prune(root, directory, selected) do
-    case State.validate_directory(root, directory) do
+    case OwnedPath.validate_directory(root, directory) do
       :ok ->
         directory
         |> generations()
@@ -176,19 +176,19 @@ defmodule Rekindle.Development.Cleanup do
   end
 
   defp remove(root, path) do
-    case State.remove_directory(root, path) do
+    case OwnedPath.remove_directory(root, path) do
       :ok ->
         :ok
 
       {:error, reason} ->
-        Logger.warning("could not remove #{path}: #{State.format_error(reason)}")
+        Logger.warning("could not remove #{path}: #{OwnedPath.format_error(reason)}")
     end
   end
 
   defp selected_web(root) do
     path = Path.join([root, ".rekindle", "dev", "web-current.json"])
 
-    case State.validate_parent(root, path) do
+    case OwnedPath.validate_parent(root, path) do
       :ok -> read_generation(path)
       {:error, _reason} -> nil
     end
@@ -197,7 +197,7 @@ defmodule Rekindle.Development.Cleanup do
   defp selected_desktop(root) do
     path = Path.join([root, ".rekindle", "dev", "desktop-last-running.json"])
 
-    case State.validate_parent(root, path) do
+    case OwnedPath.validate_parent(root, path) do
       :ok -> read_desktop_generation(path)
       {:error, _reason} -> %{}
     end
@@ -236,7 +236,7 @@ defmodule Rekindle.Development.Cleanup do
   end
 
   defp child_directories(path, root) do
-    case State.validate_directory(root, path) do
+    case OwnedPath.validate_directory(root, path) do
       :ok -> real_child_directories(path)
       {:error, _reason} -> []
     end
@@ -256,12 +256,12 @@ defmodule Rekindle.Development.Cleanup do
   end
 
   defp remove_owned_directory(root, path) do
-    case State.remove_directory(root, path) do
+    case OwnedPath.remove_directory(root, path) do
       :ok ->
         :ok
 
       {:error, reason} ->
-        Logger.warning("could not remove #{path}: #{State.format_error(reason)}")
+        Logger.warning("could not remove #{path}: #{OwnedPath.format_error(reason)}")
     end
   end
 
@@ -274,7 +274,7 @@ defmodule Rekindle.Development.Cleanup do
         |> Enum.filter(&String.starts_with?(&1, ".tmp-web-current-"))
         |> Enum.each(fn name ->
           path = Path.join(directory, name)
-          State.remove_file(root, path)
+          OwnedPath.remove_file(root, path)
         end)
 
       {:error, _reason} ->
@@ -285,7 +285,7 @@ defmodule Rekindle.Development.Cleanup do
   defp remove_empty_tmp_root(root) do
     path = Path.join([root, ".rekindle", "tmp"])
 
-    with :ok <- State.validate_directory(root, path) do
+    with :ok <- OwnedPath.validate_directory(root, path) do
       case File.rmdir(path) do
         :ok -> :ok
         {:error, _reason} -> :ok
@@ -296,7 +296,7 @@ defmodule Rekindle.Development.Cleanup do
   end
 
   defp warn_unsafe(reason) do
-    Logger.warning("could not inspect project state: #{State.format_error(reason)}")
+    Logger.warning("could not inspect project state: #{OwnedPath.format_error(reason)}")
     :ok
   end
 end
