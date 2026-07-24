@@ -3,6 +3,7 @@ defmodule Rekindle.MixProject do
 
   @version "0.1.0-dev"
   @source_url "https://github.com/refmdio/rekindle"
+  @docs_url "https://rekindle.hexdocs.pm"
 
   def project do
     [
@@ -13,6 +14,7 @@ defmodule Rekindle.MixProject do
       deps: deps(),
       name: "Rekindle",
       description: "Mix-first build system and development runtime for Rust UI applications.",
+      homepage_url: @docs_url,
       source_url: @source_url,
       docs: docs(),
       package: package()
@@ -37,16 +39,54 @@ defmodule Rekindle.MixProject do
   defp docs do
     [
       main: "readme",
-      extras: ["README.md"],
-      source_url: @source_url
+      source_ref: "v#{@version}",
+      extras: [
+        "README.md",
+        "CHANGELOG.md",
+        "guides/introduction/getting-started.md",
+        "guides/introduction/how-rekindle-works.md",
+        "guides/features/integrations.md",
+        "guides/features/configuration.md",
+        "guides/features/development.md",
+        "guides/features/web-target.md",
+        "guides/features/desktop-target.md",
+        "guides/deployment/production-builds.md",
+        "guides/reference/troubleshooting.md",
+        "guides/reference/cli.cheatmd"
+      ],
+      groups_for_extras: [
+        Introduction: ~r"guides/introduction/",
+        Features: ~r"guides/features/",
+        Deployment: ~r"guides/deployment/",
+        Reference: ~r"guides/reference/"
+      ],
+      groups_for_modules: [
+        Core: [Rekindle],
+        "Build results": [Rekindle.Build.Result, Rekindle.Diagnostic],
+        Errors: [
+          Rekindle.Build.Error,
+          Rekindle.Cargo.Error,
+          Rekindle.Config.Error,
+          Rekindle.Desktop.Error,
+          Rekindle.Toolchain.Error,
+          Rekindle.Web.Error
+        ],
+        "Mix Tasks": [
+          Mix.Tasks.Rekindle.Build,
+          Mix.Tasks.Rekindle.Dev,
+          Mix.Tasks.Rekindle.Doctor,
+          Mix.Tasks.Rekindle.Install,
+          Mix.Tasks.Rekindle.Setup
+        ]
+      ]
     ]
   end
 
   defp package do
     [
       licenses: ["MIT"],
-      links: %{"GitHub" => @source_url},
-      files: ~w[lib priv/templates mix.exs README.md LICENSE]
+      links: %{"Documentation" => @docs_url, "GitHub" => @source_url},
+      files: ~w[lib priv/templates guides .formatter.exs mix.exs README.md CHANGELOG.md LICENSE]
     ]
   end
 end

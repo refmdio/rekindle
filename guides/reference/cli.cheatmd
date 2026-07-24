@@ -1,0 +1,32 @@
+% Rekindle CLI
+
+## Install
+
+```console
+mix igniter.install rekindle --integration gpui --targets web,desktop
+```
+
+## Tooling
+
+```console
+mix rekindle.setup
+mix rekindle.setup web
+mix rekindle.setup desktop
+mix rekindle.doctor
+```
+
+## Development
+
+```console
+mix rekindle.dev
+mix rekindle.build web
+mix rekindle.build desktop
+```
+
+## Production
+
+```console
+mix rekindle.build web --release
+mix rekindle.build desktop --release
+mix assets.deploy
+```
