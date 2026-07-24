@@ -303,6 +303,37 @@ defmodule Rekindle.WebBuildTest do
     assert Path.wildcard(Path.join(root, ".rekindle/tmp/web/*")) == []
   end
 
+  test "does not select a generation pruned by another activation", %{root: root} do
+    tools = fake_tools(root, "success-one")
+
+    candidates =
+      for {mode, second} <-
+            Enum.zip(["success-one", "success-two", "success-three"], [1, 2, 3]) do
+        File.write!(tools.mode, mode)
+        assert {:ok, candidate} = build(root, tools, activate: false)
+        File.touch!(Path.dirname(candidate.artifact), {{2026, 1, 1}, {0, 0, second}})
+        candidate
+      end
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    assert :ok = Rekindle.Web.Builder.activate(project, Enum.at(candidates, 0))
+    refute File.exists?(Enum.at(candidates, 1).artifact)
+    assert File.exists?(Enum.at(candidates, 2).artifact)
+
+    selector_path = Path.join(root, ".rekindle/dev/web-current.json")
+    selected = File.read!(selector_path)
+
+    assert {:error, %Rekindle.Web.Error{kind: :manifest_read}} =
+             Rekindle.Web.Builder.activate(project, Enum.at(candidates, 1))
+
+    assert File.read!(selector_path) == selected
+
+    selected_generation = read_json(selector_path)["generation"]
+    assert File.dir?(Path.join([root, ".rekindle", "dev", "web", selected_generation]))
+  end
+
   test "rejects an unlisted member when reusing a development generation", %{root: root} do
     tools = fake_tools(root, "success")
     assert {:ok, result} = build(root, tools)

@@ -58,7 +58,7 @@ defmodule Rekindle.Web.Builder do
   @spec activate(Rekindle.Config.t(), Result.t()) :: :ok | {:error, Error.t()}
   def activate(project, %Result{target: :web, profile: profile, metadata: metadata}) do
     with_lock(project, {:web, profile}, fn ->
-      with :ok <- select(project, profile, %{"generation" => metadata.generation}) do
+      with :ok <- activate_generation(project, profile, metadata.generation) do
         if profile == :dev, do: Rekindle.Development.Cleanup.web(project, metadata.generation)
         :ok
       end
@@ -270,13 +270,22 @@ defmodule Rekindle.Web.Builder do
   defp finish(project, result, manifest, options) do
     if Keyword.get(options, :activate, true) do
       with_lock(project, {:web, result.profile}, fn ->
-        case select(project, result.profile, manifest) do
+        case activate_generation(project, result.profile, manifest["generation"]) do
           :ok -> {:ok, result}
           {:error, %Error{} = error} -> {:error, error}
         end
       end)
     else
       {:ok, result}
+    end
+  end
+
+  defp activate_generation(project, profile, generation) do
+    root = Path.join(generation_parent(project, profile), generation)
+
+    with :ok <- validate_published(root, generation),
+         :ok <- select(project, profile, %{"generation" => generation}) do
+      :ok
     end
   end
 
