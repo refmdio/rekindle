@@ -26,10 +26,11 @@ By default, generations are published below:
 
 ```text
 priv/static/rekindle/web/<generation>/
-priv/static/rekindle/web-current.json
+priv/static/rekindle/entry.js
 ```
 
-The selector identifies the current complete generation. The installer adds a
+The entry module imports and starts the selected complete generation. It is
+replaced only after that generation has been published. The installer adds a
 static endpoint at `/rekindle` and prepends the release build to
 `assets.deploy`, before `phx.digest`.
 

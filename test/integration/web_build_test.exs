@@ -84,10 +84,9 @@ defmodule Rekindle.WebBuildTest do
     assert result.artifact =~ "/priv/static/rekindle/web/"
     assert File.regular?(result.artifact)
 
-    selector = root |> Path.join("priv/static/rekindle/web-current.json") |> read_json()
-    assert selector["generation"] == result.metadata.generation
-    assert selector["entry"] == "web/#{result.metadata.generation}/app.js"
-    assert selector["manifest"] == "web/#{result.metadata.generation}/manifest.json"
+    entry = root |> Path.join("priv/static/rekindle/entry.js") |> read_entry()
+    assert entry.generation == result.metadata.generation
+    assert entry.module == "./web/#{result.metadata.generation}/app.js"
 
     assert result.metadata.manifest ==
              Path.join([
@@ -108,6 +107,7 @@ defmodule Rekindle.WebBuildTest do
 
     refute File.exists?(Path.join(root, ".rekindle/dev/web-current.json"))
     refute File.exists?(Path.join(root, ".rekindle/release/web-current.json"))
+    refute File.exists?(Path.join(root, "priv/static/rekindle/web-current.json"))
   end
 
   test "retains the selected and previous Web releases without removing sibling files", %{
@@ -146,8 +146,8 @@ defmodule Rekindle.WebBuildTest do
     tools = fake_tools(root, "success")
     assert {:ok, result} = build(root, tools, profile: :release)
 
-    selector_path = Path.join(root, "priv/static/rekindle/web-current.json")
-    selector = File.read!(selector_path)
+    entry_path = Path.join(root, "priv/static/rekindle/entry.js")
+    entry = File.read!(entry_path)
     manifest_path = result.metadata.manifest
     manifest = File.read!(manifest_path)
 
@@ -156,7 +156,7 @@ defmodule Rekindle.WebBuildTest do
     assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} =
              build(root, tools, profile: :release)
 
-    assert File.read!(selector_path) == selector
+    assert File.read!(entry_path) == entry
 
     File.write!(manifest_path, manifest)
     File.rm!(manifest_path)
@@ -164,7 +164,7 @@ defmodule Rekindle.WebBuildTest do
     assert {:error, %Rekindle.Web.Error{kind: :manifest_read}} =
              build(root, tools, profile: :release)
 
-    assert File.read!(selector_path) == selector
+    assert File.read!(entry_path) == entry
   end
 
   test "rolls back a new generation when the release selector cannot be replaced", %{
@@ -174,8 +174,8 @@ defmodule Rekindle.WebBuildTest do
     assert {:ok, first} = build(root, tools, profile: :release)
 
     namespace = Path.join(root, "priv/static/rekindle")
-    selector = Path.join(namespace, "web-current.json")
-    selected = File.read!(selector)
+    entry = Path.join(namespace, "entry.js")
+    selected = File.read!(entry)
 
     File.write!(tools.mode, "success-two")
     assert {:ok, candidate} = build(root, tools)
@@ -200,7 +200,7 @@ defmodule Rekindle.WebBuildTest do
       end
 
     assert {:error, %Rekindle.Web.Error{kind: :selector_write}} = publication
-    assert File.read!(selector) == selected
+    assert File.read!(entry) == selected
     assert File.regular?(first.artifact)
     refute File.exists?(destination)
   end
@@ -254,12 +254,12 @@ defmodule Rekindle.WebBuildTest do
              match?({:ok, %Rekindle.Build.Result{}}, Task.await(task, 10_000))
            end)
 
-    selector = namespace |> Path.join("web-current.json") |> read_json()
-    generation_root = Path.join([namespace, "web", selector["generation"]])
+    entry = namespace |> Path.join("entry.js") |> read_entry()
+    generation_root = Path.join([namespace, "web", entry.generation])
     manifest = generation_root |> Path.join("manifest.json") |> read_json()
 
-    assert File.regular?(Path.join(namespace, selector["entry"]))
-    assert File.regular?(Path.join(namespace, selector["manifest"]))
+    assert File.regular?(Path.join(namespace, String.trim_leading(entry.module, "./")))
+    assert File.regular?(Path.join(generation_root, "manifest.json"))
     assert :ok = Rekindle.Web.Manifest.validate(generation_root, manifest)
 
     assert namespace
@@ -461,7 +461,7 @@ defmodule Rekindle.WebBuildTest do
       case "$mode" in
         success*)
           mkdir -p "$output/snippets"
-          printf "/* %s */\\nimport './snippets/helper.js';\\nconst imports = {'./app_bg.js': {}};\\nconst wasm = new URL('app_bg.wasm', import.meta.url);\\n" "$mode" > "$output/app.js"
+          printf "/* %s */\\nimport './snippets/helper.js';\\nconst imports = {'./app_bg.js': {}};\\nconst wasm = new URL('app_bg.wasm', import.meta.url);\\nexport default async function init() { return wasm; }\\n" "$mode" > "$output/app.js"
           printf 'wasm-%s' "$mode" > "$output/app_bg.wasm"
           printf 'export const mode = "%s";\\n' "$mode" > "$output/snippets/helper.js"
           ;;
@@ -488,6 +488,19 @@ defmodule Rekindle.WebBuildTest do
   end
 
   defp read_json(path), do: path |> File.read!() |> Jason.decode!()
+
+  defp read_entry(path) do
+    contents = File.read!(path)
+
+    assert [generation, module] =
+             Regex.run(
+               ~r/\A\/\/ Rekindle generation: ([0-9a-f]{64})\nimport init from "([^"]+)";\nawait init\(\);\n\z/,
+               contents,
+               capture: :all_but_first
+             )
+
+    %{generation: generation, module: module}
+  end
 
   defp sha256(contents),
     do: contents |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)

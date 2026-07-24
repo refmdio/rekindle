@@ -49,7 +49,7 @@ defmodule Rekindle.Web.Release do
   end
 
   defp finish_publication(namespace, destination, manifest, result, published?) do
-    previous = selected_generation(Path.join(namespace, "web-current.json"))
+    previous = selected_generation(Path.join(namespace, "entry.js"))
 
     with :ok <- select(namespace, manifest),
          :ok <- cleanup(namespace, manifest["generation"], previous) do
@@ -151,15 +151,17 @@ defmodule Rekindle.Web.Release do
   end
 
   defp select(namespace, manifest) do
-    destination = Path.join(namespace, "web-current.json")
+    destination = Path.join(namespace, "entry.js")
     temporary = destination <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
 
-    selector =
-      Jason.encode!(%{
-        "generation" => manifest["generation"],
-        "entry" => Path.join(["web", manifest["generation"], manifest["entry"]]),
-        "manifest" => Path.join(["web", manifest["generation"], "manifest.json"])
-      })
+    generation = manifest["generation"]
+    module = Jason.encode!("./web/#{generation}/#{manifest["entry"]}")
+
+    selector = """
+    // Rekindle generation: #{generation}
+    import init from #{module};
+    await init();
+    """
 
     with :ok <- mkdir(namespace),
          :ok <- File.write(temporary, selector),
@@ -239,9 +241,12 @@ defmodule Rekindle.Web.Release do
 
   defp selected_generation(path) do
     with {:ok, contents} <- File.read(path),
-         {:ok, %{"generation" => generation}} <- Jason.decode(contents),
-         true <- is_binary(generation),
-         true <- Regex.match?(@generation, generation) do
+         [generation] <-
+           Regex.run(
+             ~r/\A\/\/ Rekindle generation: ([0-9a-f]{64})\n/,
+             contents,
+             capture: :all_but_first
+           ) do
       generation
     else
       _error -> nil

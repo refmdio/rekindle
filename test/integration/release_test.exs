@@ -20,18 +20,26 @@ defmodule Rekindle.ReleaseTest do
     assert File.read!(tools.order) |> String.split("\n", trim: true) == ["web-release"]
 
     web_root = Path.join(root, "priv/static/rekindle")
-    web_selector_path = Path.join(web_root, "web-current.json")
-    web_selector = read_json(web_selector_path)
-    web_manifest_path = Path.join(web_root, web_selector["manifest"])
+    web_entry_path = Path.join(web_root, "entry.js")
+    web_entry = read_entry(web_entry_path)
+    web_generation_root = Path.join([web_root, "web", web_entry.generation])
+    web_manifest_path = Path.join(web_generation_root, "manifest.json")
     web_manifest = read_json(web_manifest_path)
 
-    assert File.regular?(Path.join(web_root, web_selector["entry"]))
-    assert :ok = Rekindle.Web.Manifest.validate(Path.dirname(web_manifest_path), web_manifest)
-    digest_manifest = File.read!(Path.join(root, "priv/static/cache_manifest.json"))
-    assert digest_manifest =~ "rekindle/web-current.json"
+    assert web_entry.module == "./web/#{web_entry.generation}/app.js"
+    assert File.regular?(Path.join(web_root, String.trim_leading(web_entry.module, "./")))
+    assert :ok = Rekindle.Web.Manifest.validate(web_generation_root, web_manifest)
+
+    digest_manifest = read_json(Path.join(root, "priv/static/cache_manifest.json"))
+    digested_entry = digest_manifest["latest"]["rekindle/entry.js"]
+    assert is_binary(digested_entry)
+
+    assert File.read!(Path.join(root, "priv/static/#{digested_entry}")) ==
+             File.read!(web_entry_path)
+
     assert File.read!(Path.join(root, "priv/static/sibling.txt")) == "web-sibling"
 
-    selected_web = File.read!(web_selector_path)
+    selected_web = File.read!(web_entry_path)
     File.write!(tools.mode, "second")
     File.chmod!(web_root, 0o555)
 
@@ -44,8 +52,8 @@ defmodule Rekindle.ReleaseTest do
 
     assert status != 0
     assert failed_web =~ "cannot update"
-    assert File.read!(web_selector_path) == selected_web
-    assert File.regular?(Path.join(web_root, web_selector["entry"]))
+    assert File.read!(web_entry_path) == selected_web
+    assert File.regular?(Path.join(web_root, String.trim_leading(web_entry.module, "./")))
     assert File.read!(Path.join(root, "priv/static/sibling.txt")) == "web-sibling"
 
     assert {_output, 0} = mix(root, tools, ["rekindle.build", "desktop", "--release"])
@@ -318,6 +326,19 @@ defmodule Rekindle.ReleaseTest do
   end
 
   defp read_json(path), do: path |> File.read!() |> Jason.decode!()
+
+  defp read_entry(path) do
+    contents = File.read!(path)
+
+    assert [generation, module] =
+             Regex.run(
+               ~r/\A\/\/ Rekindle generation: ([0-9a-f]{64})\nimport init from "([^"]+)";\nawait init\(\);\n\z/,
+               contents,
+               capture: :all_but_first
+             )
+
+    %{generation: generation, module: module}
+  end
 
   defp executable?(path) do
     {:ok, %{mode: mode}} = File.stat(path)

@@ -38,11 +38,12 @@ publication failures.
 ## Phoenix Web entry
 
 Use the configured endpoint when a Phoenix template or component needs the
-logical Web entry descriptor:
+logical Web entry module:
 
 ```elixir
 Rekindle.Phoenix.web_entry_path(MyAppWeb.Endpoint)
 ```
 
 Phoenix resolves the path through its static manifest after `phx.digest`. The
-descriptor identifies the selected immutable Web generation.
+module loads and starts the selected immutable Web generation. Include it as a
+module script after the host element required by the selected UI integration.
