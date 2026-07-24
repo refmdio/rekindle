@@ -46,9 +46,6 @@ defmodule Rekindle.Test.IntegrationBrowser do
           %{"url" => "http://127.0.0.1:#{port}/"}
         )
 
-        baseline =
-          webdriver_request!(:get, webdriver_port, "/session/#{session}/screenshot", nil)["value"]
-
         webdriver_request!(
           :post,
           webdriver_port,
@@ -56,7 +53,7 @@ defmodule Rekindle.Test.IntegrationBrowser do
           %{"script" => "window.startRekindle(); return null;", "args" => []}
         )
 
-        assert_browser_ready!(webdriver_port, session, integration, baseline)
+        assert_browser_ready!(webdriver_port, session, integration)
       end)
     after
       :inets.stop(:httpd, server)
@@ -103,7 +100,8 @@ defmodule Rekindle.Test.IntegrationBrowser do
         webdriver_request(:delete, port, "/session/#{session}", nil)
       end
     after
-      Port.close(driver_port)
+      webdriver_request(:get, port, "/shutdown", nil)
+      if Port.info(driver_port), do: Port.close(driver_port)
     end
   end
 
@@ -140,7 +138,25 @@ defmodule Rekindle.Test.IntegrationBrowser do
     ]
   end
 
-  defp assert_browser_ready!(port, session, integration, baseline) do
+  @doc false
+  def classify_observation(state, logs) do
+    cond do
+      error = state["error"] ->
+        {:error, "startup error: #{error}"}
+
+      severe = Enum.find(logs, &(&1["level"] == "SEVERE")) ->
+        {:error, "severe browser log: #{severe["message"]}"}
+
+      get_in(state, ["surface", "visible"]) == true and
+          get_in(state, ["surface", "varied"]) == true ->
+        {:ok, :ready}
+
+      true ->
+        {:pending, state}
+    end
+  end
+
+  defp assert_browser_ready!(port, session, integration) do
     result =
       try do
         wait_until!(
@@ -152,18 +168,23 @@ defmodule Rekindle.Test.IntegrationBrowser do
                 port,
                 "/session/#{session}/execute/sync",
                 %{
-                  "script" => "return {error: window.rekindleError};",
+                  "script" => surface_observer(),
                   "args" => []
                 }
               )["value"]
+              |> Map.put("surface", rendered_surface(port, session))
 
-            screenshot =
-              webdriver_request!(:get, port, "/session/#{session}/screenshot", nil)["value"]
+            logs =
+              webdriver_request!(
+                :post,
+                port,
+                "/session/#{session}/se/log",
+                %{"type" => "browser"}
+              )["value"]
 
-            if screenshot != baseline do
-              {:ok, :ready}
-            else
-              {:pending, state}
+            case classify_observation(state, logs) do
+              {:error, reason} -> flunk("#{integration} Web startup failed: #{reason}")
+              observation -> observation
             end
           end,
           "#{integration} Web startup timed out"
@@ -183,6 +204,174 @@ defmodule Rekindle.Test.IntegrationBrowser do
 
     assert result == :ready
   end
+
+  defp surface_observer do
+    "return {error: window.rekindleError ?? null};"
+  end
+
+  defp rendered_surface(port, session) do
+    rectangles =
+      webdriver_request!(
+        :post,
+        port,
+        "/session/#{session}/execute/sync",
+        %{
+          "script" => """
+          return Array.from(document.querySelectorAll("canvas"))
+            .map((canvas) => {
+              const bounds = canvas.getBoundingClientRect();
+              return {
+                x: bounds.left + window.scrollX,
+                y: bounds.top + window.scrollY,
+                width: bounds.width,
+                height: bounds.height
+              };
+            })
+            .filter((bounds) => bounds.width > 0 && bounds.height > 0);
+          """,
+          "args" => []
+        }
+      )["value"]
+
+    observations =
+      Enum.map(rectangles, fn rectangle ->
+        screenshot =
+          webdriver_request!(
+            :post,
+            port,
+            "/session/#{session}/goog/cdp/execute",
+            %{
+              "cmd" => "Page.captureScreenshot",
+              "params" => %{
+                "format" => "png",
+                "fromSurface" => true,
+                "clip" => Map.put(rectangle, "scale", 1)
+              }
+            }
+          )
+          |> get_in(["value", "data"])
+
+        screenshot
+        |> Base.decode64!()
+        |> inspect_png()
+      end)
+
+    %{
+      "present" => rectangles != [],
+      "visible" => Enum.any?(observations, & &1.visible),
+      "varied" => Enum.any?(observations, &(&1.visible and &1.varied))
+    }
+  end
+
+  defp inspect_png(<<137, 80, 78, 71, 13, 10, 26, 10, chunks::binary>>) do
+    %{header: header, data: data} = png_chunks(chunks, %{header: nil, data: []})
+    <<width::32, height::32, 8, color_type, 0, 0, 0>> = header
+    channels = png_channels(color_type)
+    row_size = width * channels
+    inflated = data |> Enum.reverse() |> IO.iodata_to_binary() |> :zlib.uncompress()
+
+    {_rest, _previous, observation} =
+      Enum.reduce(1..height, {inflated, List.duplicate(0, row_size), nil}, fn _,
+                                                                              {rows, previous,
+                                                                               observation} ->
+        <<filter, encoded::binary-size(^row_size), rest::binary>> = rows
+        row = restore_png_row(encoded, previous, channels, filter)
+        {rest, row, inspect_png_row(row, channels, color_type, observation)}
+      end)
+
+    observation || %{visible: false, varied: false}
+  end
+
+  defp png_chunks(<<0::32, "IEND", _crc::32>>, state), do: state
+
+  defp png_chunks(<<length::32, type::binary-size(4), rest::binary>>, state) do
+    <<data::binary-size(^length), _crc::32, remaining::binary>> = rest
+
+    state =
+      case type do
+        "IHDR" -> %{state | header: data}
+        "IDAT" -> %{state | data: [data | state.data]}
+        _other -> state
+      end
+
+    png_chunks(remaining, state)
+  end
+
+  defp png_channels(0), do: 1
+  defp png_channels(2), do: 3
+  defp png_channels(4), do: 2
+  defp png_channels(6), do: 4
+
+  defp restore_png_row(encoded, previous, bytes_per_pixel, filter) do
+    previous = :array.from_list(previous)
+
+    restored =
+      Enum.reduce(0..(byte_size(encoded) - 1), :array.new(), fn index, output ->
+        byte = :binary.at(encoded, index)
+
+        left =
+          if index < bytes_per_pixel, do: 0, else: :array.get(index - bytes_per_pixel, output)
+
+        above = :array.get(index, previous)
+
+        upper_left =
+          if index < bytes_per_pixel, do: 0, else: :array.get(index - bytes_per_pixel, previous)
+
+        value =
+          case filter do
+            0 -> byte
+            1 -> byte + left
+            2 -> byte + above
+            3 -> byte + div(left + above, 2)
+            4 -> byte + paeth(left, above, upper_left)
+          end
+
+        :array.set(index, rem(value, 256), output)
+      end)
+
+    :array.to_list(restored)
+  end
+
+  defp paeth(left, above, upper_left) do
+    estimate = left + above - upper_left
+    left_distance = abs(estimate - left)
+    above_distance = abs(estimate - above)
+    upper_left_distance = abs(estimate - upper_left)
+
+    cond do
+      left_distance <= above_distance and left_distance <= upper_left_distance -> left
+      above_distance <= upper_left_distance -> above
+      true -> upper_left
+    end
+  end
+
+  defp inspect_png_row(row, channels, color_type, observation) do
+    row
+    |> Enum.chunk_every(channels)
+    |> Enum.reduce_while(observation, fn pixel, current ->
+      sample = png_sample(pixel, color_type)
+
+      next =
+        case current do
+          nil ->
+            %{first: sample, visible: elem(sample, 3) > 0, varied: false}
+
+          value ->
+            %{
+              value
+              | visible: value.visible or elem(sample, 3) > 0,
+                varied: value.varied or sample != value.first
+            }
+        end
+
+      if next.visible and next.varied, do: {:halt, next}, else: {:cont, next}
+    end)
+  end
+
+  defp png_sample([gray], 0), do: {gray, gray, gray, 255}
+  defp png_sample([red, green, blue], 2), do: {red, green, blue, 255}
+  defp png_sample([gray, alpha], 4), do: {gray, gray, gray, alpha}
+  defp png_sample([red, green, blue, alpha], 6), do: {red, green, blue, alpha}
 
   defp webdriver_available?(port) do
     match?({:ok, _response}, webdriver_request(:get, port, "/status", nil))
@@ -210,7 +399,7 @@ defmodule Rekindle.Test.IntegrationBrowser do
 
     case :httpc.request(method, request, [], body_format: :binary) do
       {:ok, {{_version, status, _reason}, _headers, response}} when status in 200..299 ->
-        {:ok, Jason.decode!(response)}
+        {:ok, if(response == "", do: %{}, else: Jason.decode!(response))}
 
       {:ok, {{_version, status, _reason}, _headers, response}} ->
         {:error, {:http, status, response}}
@@ -265,12 +454,25 @@ defmodule Rekindle.Test.IntegrationBrowser do
     """
     <!doctype html>
     <html>
-      <head><meta charset="utf-8"><title>Rekindle startup</title></head>
+      <head>
+        <meta charset="utf-8">
+        <link rel="icon" href="data:,">
+        <title>Rekindle startup</title>
+      </head>
       <body>
         #{host}
         <script type="module">
           const fail = (error) => {
-            const message = String(error?.reason ?? error?.error ?? error);
+            const failure = error?.reason ?? error?.error ?? error;
+            const message = String(failure?.stack ?? failure);
+            if (
+              message.includes(
+                "Using exceptions for control flow, don't mind me. This isn't actually an error!"
+              )
+            ) {
+              error?.preventDefault?.();
+              return;
+            }
             window.rekindleError = message;
           };
           window.addEventListener("error", fail);

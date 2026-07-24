@@ -32,9 +32,7 @@ defmodule Rekindle.IntegrationsTest do
       assert both["Cargo.toml"] =~ ~s(name = "sample-client")
       assert both["Cargo.toml"] =~ framework
 
-      if name == :gpui do
-        assert both["Cargo.toml"] =~ ~s(features = ["wayland", "x11"])
-      end
+      assert_framework_entrypoints(name, both)
 
       assert both["Cargo.toml"] =~
                ~s(wasm-bindgen = "=#{Rekindle.Toolchain.wasm_bindgen_version()}")
@@ -60,6 +58,34 @@ defmodule Rekindle.IntegrationsTest do
              Integration.fetch(:slint)
 
     assert slint_host =~ ~s(id="canvas")
+  end
+
+  test "requires rendered surface pixels without browser failures" do
+    blank_surface = %{
+      "error" => nil,
+      "surface" => %{"present" => true, "visible" => true, "varied" => false}
+    }
+
+    rendered_surface = %{
+      "error" => nil,
+      "surface" => %{"present" => true, "visible" => true, "varied" => true}
+    }
+
+    assert {:pending, ^blank_surface} =
+             IntegrationBrowser.classify_observation(blank_surface, [])
+
+    assert {:ok, :ready} = IntegrationBrowser.classify_observation(rendered_surface, [])
+
+    assert {:error, "startup error: frame failed"} =
+             IntegrationBrowser.classify_observation(
+               put_in(rendered_surface["error"], "frame failed"),
+               []
+             )
+
+    assert {:error, "severe browser log: uncaught exception"} =
+             IntegrationBrowser.classify_observation(rendered_surface, [
+               %{"level" => "SEVERE", "message" => "uncaught exception"}
+             ])
   end
 
   test "generated clients compile for every target selection" do
@@ -149,6 +175,33 @@ defmodule Rekindle.IntegrationsTest do
       File.mkdir_p!(Path.dirname(path))
       File.write!(path, contents)
     end)
+  end
+
+  defp assert_framework_entrypoints(:gpui, files) do
+    assert files["Cargo.toml"] =~ ~s(features = ["wayland", "x11"])
+    assert files["src/bin/web.rs"] =~ "use std::cell::OnceCell;"
+    assert files["src/bin/web.rs"] =~ "gpui_platform::web_init();"
+    assert files["src/bin/web.rs"] =~ "gpui_platform::application().run_embedded"
+    refute files["src/bin/web.rs"] =~ "single_threaded_web"
+    assert files["src/bin/desktop.rs"] =~ "gpui_platform::application().run"
+  end
+
+  defp assert_framework_entrypoints(:egui, files) do
+    assert files["Cargo.toml"] =~
+             ~s(features = ["default_fonts", "glow", "wayland", "x11"])
+
+    assert files["src/bin/web.rs"] =~ "use wasm_bindgen::JsCast;"
+    assert files["src/bin/web.rs"] =~ "eframe::WebRunner::new()"
+    assert files["src/bin/desktop.rs"] =~ "eframe::run_native("
+  end
+
+  defp assert_framework_entrypoints(:slint, files) do
+    assert files["Cargo.toml"] =~
+             ~s(features = ["compat-1-2", "renderer-femtovg", "backend-winit", "std"])
+
+    assert files["src/bin/web.rs"] =~ "use slint::ComponentHandle;"
+    assert files["src/bin/web.rs"] =~ ".run()"
+    assert files["src/bin/desktop.rs"] =~ "::run()"
   end
 
   defp cargo_check!(root, target, triple) do
