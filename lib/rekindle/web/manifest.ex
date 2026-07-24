@@ -31,6 +31,37 @@ defmodule Rekindle.Web.Manifest do
   @spec validate_deployment(Path.t(), map()) :: :ok | {:error, Error.t()}
   def validate_deployment(root, manifest), do: validate(root, manifest, :deployment)
 
+  @doc false
+  @spec validate_member(Path.t(), map(), String.t()) :: :ok | {:error, Error.t()}
+  def validate_member(
+        root,
+        %{
+          "version" => @version,
+          "generation" => generation,
+          "entry" => entry,
+          "members" => members
+        } = manifest,
+        requested
+      )
+      when map_size(manifest) == 4 and is_binary(generation) and is_binary(entry) and
+             is_list(members) and is_binary(requested) do
+    with :ok <- relative_path(requested),
+         :ok <- canonical_members(members),
+         :ok <- entry_member(entry, members),
+         :ok <- generation_identity(generation, entry, members),
+         :ok <- generation_root(root),
+         %{} = member <- Enum.find(members, &(&1["path"] == requested)),
+         {:ok, ^requested} <- validate_declared_member(root, member, MapSet.new()) do
+      :ok
+    else
+      nil -> error(:missing_member, "Web generation member is missing: #{requested}")
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
+
+  def validate_member(_root, _manifest, _requested),
+    do: error(:invalid_manifest, "Web manifest has an unsupported shape")
+
   defp validate(
          root,
          %{
@@ -125,7 +156,7 @@ defmodule Rekindle.Web.Manifest do
     with :ok <- generation_root(root) do
       members
       |> Enum.reduce_while({:ok, MapSet.new()}, fn member, {:ok, paths} ->
-        case validate_member(root, member, paths) do
+        case validate_declared_member(root, member, paths) do
           {:ok, path} -> {:cont, {:ok, MapSet.put(paths, path)}}
           {:error, %Error{} = error} -> {:halt, {:error, error}}
         end
@@ -137,7 +168,7 @@ defmodule Rekindle.Web.Manifest do
     end
   end
 
-  defp validate_member(root, %{"path" => path, "sha256" => expected}, paths)
+  defp validate_declared_member(root, %{"path" => path, "sha256" => expected}, paths)
        when is_binary(expected) do
     with :ok <- relative_path(path),
          false <- MapSet.member?(paths, path),
@@ -167,7 +198,7 @@ defmodule Rekindle.Web.Manifest do
     end
   end
 
-  defp validate_member(_root, _member, _paths),
+  defp validate_declared_member(_root, _member, _paths),
     do: error(:invalid_manifest, "Web manifest contains an invalid member")
 
   defp generation_root(root) do

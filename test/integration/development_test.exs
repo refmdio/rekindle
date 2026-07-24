@@ -464,6 +464,87 @@ defmodule Rekindle.DevelopmentTest do
     refute conn.state == :sent
   end
 
+  test "does not serve a changed or linked Web generation member", %{root: root} do
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+
+    changed = publish_web(root, "export default 'unchanged';")
+    changed_path = Path.join([root, ".rekindle", "dev", "web", changed, "app.js"])
+    File.write!(changed_path, "changed bytes")
+
+    response = request("/__rekindle/web/#{changed}/app.js", options)
+    assert response.status == 404
+    refute response.resp_body =~ "changed bytes"
+
+    linked = publish_web(root, "export default 'linked';")
+    linked_path = Path.join([root, ".rekindle", "dev", "web", linked, "app.js"])
+    external = external_path(root, "member")
+    File.write!(external, "external member secret")
+    on_exit(fn -> File.rm_rf!(external) end)
+
+    File.rm!(linked_path)
+    File.ln_s!(external, linked_path)
+
+    response = request("/__rekindle/web/#{linked}/app.js", options)
+    assert response.status == 404
+    refute response.resp_body =~ "external member secret"
+  end
+
+  test "does not serve a Web generation member through a linked ancestor", %{root: root} do
+    generation =
+      publish_web_members(root, %{
+        "app.js" => "import './snippets/helper.js';",
+        "snippets/helper.js" => "export const helper = 'ready';"
+      })
+
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+    member_path = "/__rekindle/web/#{generation}/snippets/helper.js"
+
+    valid = request(member_path, options)
+    assert valid.status == 200
+    assert valid.resp_body == "export const helper = 'ready';"
+
+    snippets = Path.join([root, ".rekindle", "dev", "web", generation, "snippets"])
+    external = external_path(root, "snippets")
+    File.mkdir_p!(external)
+    File.write!(Path.join(external, "helper.js"), "external ancestor secret")
+    on_exit(fn -> File.rm_rf!(external) end)
+
+    File.rm_rf!(snippets)
+    File.ln_s!(external, snippets)
+
+    response = request(member_path, options)
+    assert response.status == 404
+    refute response.resp_body =~ "external ancestor secret"
+  end
+
+  test "does not serve a Web generation through a linked generation root", %{root: root} do
+    generation = publish_web(root, "export default 'generation root';")
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+    generation_root = Path.join([root, ".rekindle", "dev", "web", generation])
+    external = external_path(root, "generation")
+    File.rename!(generation_root, external)
+    File.ln_s!(external, generation_root)
+    on_exit(fn -> File.rm_rf!(external) end)
+
+    response = request("/__rekindle/web/#{generation}/app.js", options)
+    assert response.status == 404
+    refute response.resp_body =~ "generation root"
+  end
+
+  test "does not serve a Web generation through a linked state ancestor", %{root: root} do
+    generation = publish_web(root, "export default 'state ancestor';")
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+    web_root = Path.join([root, ".rekindle", "dev", "web"])
+    external = external_path(root, "state")
+    File.rename!(web_root, external)
+    File.ln_s!(external, web_root)
+    on_exit(fn -> File.rm_rf!(external) end)
+
+    response = request("/__rekindle/web/#{generation}/app.js", options)
+    assert response.status == 404
+    refute response.resp_body =~ "state ancestor"
+  end
+
   test "stops the running desktop process before starting its replacement", %{root: root} do
     supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
     launcher = start_launcher(root, supervisor)
@@ -917,20 +998,38 @@ defmodule Rekindle.DevelopmentTest do
     }
   end
 
-  defp publish_web(root, source) do
+  defp publish_web(root, source), do: publish_web_members(root, %{"app.js" => source})
+
+  defp publish_web_members(root, members) do
     temporary = Path.join(root, "web-source")
-    File.mkdir_p!(temporary)
-    File.write!(Path.join(temporary, "app.js"), source)
+    File.rm_rf!(temporary)
+
+    Enum.each(members, fn {path, contents} ->
+      destination = Path.join(temporary, path)
+      File.mkdir_p!(Path.dirname(destination))
+      File.write!(destination, contents)
+    end)
+
     {:ok, manifest} = Rekindle.Web.Manifest.create(temporary, "app.js")
     generation = manifest["generation"]
     generation_root = Path.join([root, ".rekindle", "dev", "web", generation])
     File.mkdir_p!(generation_root)
-    File.cp!(Path.join(temporary, "app.js"), Path.join(generation_root, "app.js"))
+
+    Enum.each(members, fn {path, contents} ->
+      destination = Path.join(generation_root, path)
+      File.mkdir_p!(Path.dirname(destination))
+      File.write!(destination, contents)
+    end)
+
     File.write!(Path.join(generation_root, "manifest.json"), Jason.encode!(manifest))
 
     select_web(root, generation)
 
     generation
+  end
+
+  defp external_path(root, name) do
+    root <> "-external-#{name}-#{System.unique_integer([:positive, :monotonic])}"
   end
 
   defp select_web(root, generation) do

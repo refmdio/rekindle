@@ -7,6 +7,7 @@ defmodule Rekindle.Phoenix.Development do
 
   alias Rekindle.Config
   alias Rekindle.OwnedPath
+  alias Rekindle.Web.Manifest
 
   @prefix ["__rekindle"]
   @generation ~r/\A[0-9a-f]{64}\z/
@@ -80,8 +81,9 @@ defmodule Rekindle.Phoenix.Development do
          true <- safe_member?(requested),
          {:ok, project} <- project(options),
          {:ok, manifest} <- manifest(project, generation),
-         true <- Enum.any?(manifest["members"], &(&1["path"] == requested)) do
-      file = Path.join([project.root, ".rekindle", "dev", "web", generation, requested])
+         root = Path.join([project.root, ".rekindle", "dev", "web", generation]),
+         :ok <- Manifest.validate_member(root, manifest, requested) do
+      file = Path.join(root, requested)
 
       conn
       |> put_resp_header("cache-control", "public, max-age=31536000, immutable")
