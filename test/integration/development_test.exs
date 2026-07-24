@@ -58,6 +58,67 @@ defmodule Rekindle.DevelopmentTest do
     assert_receive {Builder, :desktop, {:ok, %Result{target: :desktop}}}
   end
 
+  test "schedules all targets in canonical order regardless of configuration order", %{
+    root: root
+  } do
+    Application.put_env(:rekindle_development_test, Rekindle,
+      integration: :gpui,
+      targets: [desktop: [], web: []]
+    )
+
+    test = self()
+
+    build = fn target, _options ->
+      send(test, {:started, target, self()})
+
+      receive do
+        :finish -> {:ok, result(root, target, Atom.to_string(target))}
+      end
+    end
+
+    builder = start_builder(root, build)
+    :erlang.trace(builder, true, [:receive])
+    Builder.rebuild(builder, :all)
+
+    assert_receive {:trace, ^builder, :receive, {:"$gen_cast", {:rebuild, :all}}}
+    assert_receive {:trace, ^builder, :receive, {:build, :web, 1}}
+    assert_receive {:trace, ^builder, :receive, {:build, :desktop, 1}}
+
+    assert_receive {:started, :web, web}
+    assert_receive {:started, :desktop, desktop}
+
+    send(web, :finish)
+    send(desktop, :finish)
+
+    assert_receive {Builder, :web, {:ok, %Result{target: :web}}}
+    assert_receive {Builder, :desktop, {:ok, %Result{target: :desktop}}}
+  end
+
+  test "schedules only configured targets when rebuilding all", %{root: root} do
+    for target <- [:web, :desktop] do
+      Application.put_env(:rekindle_development_test, Rekindle,
+        integration: :gpui,
+        targets: [{target, []}]
+      )
+
+      test = self()
+
+      build = fn built_target, _options ->
+        send(test, {:started, built_target})
+        {:ok, result(root, built_target, Atom.to_string(built_target))}
+      end
+
+      builder = start_builder(root, build)
+      Builder.rebuild(builder, :all)
+
+      assert_receive {:started, ^target}
+      assert_receive {Builder, ^target, {:ok, %Result{target: ^target}}}
+      refute_receive {:started, _target}, 30
+
+      stop_supervised(Builder)
+    end
+  end
+
   test "supersedes a running build and only reports the newest result", %{root: root} do
     test = self()
     counter = start_supervised!({Agent, fn -> 0 end})

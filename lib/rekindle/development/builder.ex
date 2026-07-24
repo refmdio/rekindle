@@ -194,7 +194,9 @@ defmodule Rekindle.Development.Builder do
     end)
   end
 
-  defp normalize_targets(:all, targets), do: Map.keys(targets)
+  defp normalize_targets(:all, targets) do
+    Enum.filter(@targets, &Map.has_key?(targets, &1))
+  end
 
   defp normalize_targets(target, targets) when target in @targets,
     do: normalize_targets([target], targets)
