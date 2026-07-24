@@ -374,6 +374,49 @@ defmodule Rekindle.WebBuildTest do
     assert File.read!(selector_path) == selected
   end
 
+  test "binds the runtime entry to the Web generation identity", %{root: root} do
+    tools = fake_tools(root, "success-one")
+    assert {:ok, selected_result} = build(root, tools, profile: :release)
+
+    selector_path = Path.join(root, "priv/static/rekindle/entry.js")
+    selected = File.read!(selector_path)
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, candidate} = build(root, tools, activate: false)
+
+    generation_root = Path.dirname(candidate.artifact)
+    manifest_path = candidate.metadata.manifest
+    manifest = read_json(manifest_path)
+    tampered = %{manifest | "entry" => "snippets/helper.js"}
+
+    assert tampered["generation"] == manifest["generation"]
+
+    assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} =
+             Rekindle.Web.Manifest.validate(generation_root, tampered)
+
+    File.write!(manifest_path, Jason.encode!(tampered))
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} =
+             Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+    assert File.read!(selector_path) == selected
+    assert File.regular?(selected_result.artifact)
+
+    selected_manifest =
+      selected_result.metadata.manifest
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert :ok =
+             Rekindle.Web.Manifest.validate_deployment(
+               Path.dirname(selected_result.metadata.manifest),
+               selected_manifest
+             )
+  end
+
   test "reports incomplete and failed wasm-bindgen output", %{root: root} do
     tools = fake_tools(root, "missing-entry")
 

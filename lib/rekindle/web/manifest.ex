@@ -14,7 +14,7 @@ defmodule Rekindle.Web.Manifest do
       {:ok,
        %{
          "version" => @version,
-         "generation" => identity(members),
+         "generation" => identity(entry, members),
          "entry" => entry,
          "members" => members
        }}
@@ -46,7 +46,7 @@ defmodule Rekindle.Web.Manifest do
          :ok <- entry_member(entry, members),
          :ok <- validate_members(root, members),
          :ok <- validate_membership(kind, root, members),
-         :ok <- generation_identity(generation, members),
+         :ok <- generation_identity(generation, entry, members),
          :ok <- referenced_members(root, members) do
       :ok
     end
@@ -238,7 +238,7 @@ defmodule Rekindle.Web.Manifest do
     end
   end
 
-  defp identity(members), do: members |> Jason.encode!() |> sha256()
+  defp identity(entry, members), do: [@version, entry, members] |> Jason.encode!() |> sha256()
 
   defp entry_member(entry, members) do
     if Enum.any?(members, &(&1["path"] == entry)),
@@ -246,10 +246,14 @@ defmodule Rekindle.Web.Manifest do
       else: error(:invalid_manifest, "Web manifest entry is not a generation member")
   end
 
-  defp generation_identity(generation, members) do
-    if generation == identity(members),
+  defp generation_identity(generation, entry, members) do
+    if generation == identity(entry, members),
       do: :ok,
-      else: error(:invalid_manifest, "Web manifest generation does not match its members")
+      else:
+        error(
+          :invalid_manifest,
+          "Web manifest generation does not match its version, entry, and members"
+        )
   end
 
   defp sha256(contents),
