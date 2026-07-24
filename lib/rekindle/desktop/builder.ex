@@ -3,51 +3,51 @@ defmodule Rekindle.Desktop.Builder do
 
   alias Rekindle.Build.Result
   alias Rekindle.Desktop.{Error, Manifest}
+  alias Rekindle.Publication
 
   @spec build(Rekindle.Config.t(), Rekindle.Config.Target.t(), :dev | :release, keyword()) ::
           {:ok, Result.t()} | {:error, Rekindle.Cargo.Error.t() | Error.t()}
   def build(project, target, profile, options) do
-    temporary = temporary_path(project)
-
-    try do
-      with {:ok, cargo} <-
-             Rekindle.Cargo.build(project, target, profile, cargo_options(options)),
-           :ok <- mkdir(temporary),
-           executable <- Path.basename(cargo.artifact),
-           :ok <- copy_executable(cargo.artifact, Path.join(temporary, executable)),
-           {:ok, manifest} <-
-             Manifest.create(
-               temporary,
-               executable,
-               cargo.target,
-               cargo.package,
-               cargo.binary,
-               project.integration
-             ),
-           :ok <- write_manifest(temporary, manifest),
-           {:ok, generation} <- publish(project, profile, temporary, manifest),
-           {:ok, result} <-
-             finish(
-               project,
-               %Result{
-                 target: :desktop,
-                 profile: profile,
-                 artifact: Path.join(generation, executable),
-                 metadata: %{
-                   generation: manifest["generation"],
-                   manifest: Path.join(generation, "manifest.json"),
-                   package: cargo.package,
-                   binary: cargo.binary,
-                   rust_target: cargo.target,
-                   target_directory: cargo.target_directory,
-                   diagnostics: cargo.diagnostics
+    with {:ok, temporary} <- temporary_directory(project) do
+      try do
+        with {:ok, cargo} <-
+               Rekindle.Cargo.build(project, target, profile, cargo_options(options)),
+             executable <- Path.basename(cargo.artifact),
+             :ok <- copy_executable(cargo.artifact, Path.join(temporary, executable)),
+             {:ok, manifest} <-
+               Manifest.create(
+                 temporary,
+                 executable,
+                 cargo.target,
+                 cargo.package,
+                 cargo.binary,
+                 project.integration
+               ),
+             :ok <- write_manifest(temporary, manifest),
+             {:ok, generation} <- publish(project, profile, temporary, manifest),
+             {:ok, result} <-
+               finish(
+                 project,
+                 %Result{
+                   target: :desktop,
+                   profile: profile,
+                   artifact: Path.join(generation, executable),
+                   metadata: %{
+                     generation: manifest["generation"],
+                     manifest: Path.join(generation, "manifest.json"),
+                     package: cargo.package,
+                     binary: cargo.binary,
+                     rust_target: cargo.target,
+                     target_directory: cargo.target_directory,
+                     diagnostics: cargo.diagnostics
+                   }
                  }
-               }
-             ) do
-        {:ok, result}
+               ) do
+          {:ok, result}
+        end
+      after
+        File.rm_rf(temporary)
       end
-    after
-      File.rm_rf(temporary)
     end
   end
 
@@ -139,14 +139,13 @@ defmodule Rekindle.Desktop.Builder do
 
   defp finish(_project, result), do: {:ok, result}
 
-  defp temporary_path(project) do
-    Path.join([
-      project.root,
-      ".rekindle",
-      "tmp",
-      "desktop",
-      Integer.to_string(System.unique_integer([:positive, :monotonic]))
-    ])
+  defp temporary_directory(project) do
+    parent = Path.join([project.root, ".rekindle", "tmp", "desktop"])
+
+    case Publication.temporary_directory(parent, "build-") do
+      {:ok, path} -> {:ok, path}
+      {:error, reason} -> file_error(:mkdir, parent, reason)
+    end
   end
 
   defp state_root(project, :dev), do: Path.join([project.root, ".rekindle", "dev"])

@@ -5,6 +5,7 @@ defmodule Rekindle.Desktop.Release do
 
   alias Rekindle.Build.Result
   alias Rekindle.Desktop.{Error, Manifest}
+  alias Rekindle.Publication
 
   @release_executable ~r/\Aapplication-[0-9a-f]{64}\z/
 
@@ -24,10 +25,9 @@ defmodule Rekindle.Desktop.Release do
          true <- source_manifest["generation"] == metadata.generation,
          true <- source_manifest["target"] == metadata.rust_target,
          true <- source_manifest["integration"] == Atom.to_string(project.integration) do
-      :global.trans(
-        {{__MODULE__, destination_root}, self()},
-        fn -> publish_locked(destination_root, source_root, source_manifest, result) end
-      )
+      with_lock(project, destination_root, fn ->
+        publish_locked(destination_root, source_root, source_manifest, result)
+      end)
     else
       false ->
         error(:invalid_manifest, "desktop release does not match its build manifest")
@@ -113,22 +113,18 @@ defmodule Rekindle.Desktop.Release do
         error(:publish, "desktop release path is not a regular file: #{destination}")
 
       {:error, :enoent} ->
-        temporary =
-          Path.join(
-            Path.dirname(destination),
-            ".tmp-#{System.unique_integer([:positive, :monotonic])}"
-          )
-
         with :ok <- mkdir(Path.dirname(destination)),
-             :ok <- copy_executable(source, temporary),
-             :ok <- validate_executable(temporary, expected_hash),
-             {:ok, published?} <- link_executable(temporary, destination, expected_hash) do
-          File.rm(temporary)
-          {:ok, published?}
-        else
-          {:error, %Error{} = error} ->
+             {:ok, temporary} <-
+               temporary_file(Path.dirname(destination), ".tmp-executable-", :publish) do
+          try do
+            with :ok <- copy_executable(source, temporary),
+                 :ok <- validate_executable(temporary, expected_hash),
+                 {:ok, published?} <- link_executable(temporary, destination, expected_hash) do
+              {:ok, published?}
+            end
+          after
             File.rm(temporary)
-            {:error, error}
+          end
         end
 
       {:error, reason} ->
@@ -185,21 +181,22 @@ defmodule Rekindle.Desktop.Release do
   defp write_manifest(root, manifest) do
     destination = Path.join(root, "manifest.json")
 
-    temporary =
-      Path.join(root, ".tmp-manifest-#{System.unique_integer([:positive, :monotonic])}")
+    with {:ok, temporary} <- temporary_file(root, ".tmp-manifest-", :manifest_write) do
+      try do
+        with :ok <- File.write(temporary, Jason.encode!(manifest)),
+             :ok <- Manifest.validate(root, manifest),
+             :ok <- File.rename(temporary, destination) do
+          :ok
+        else
+          {:error, %Error{} = error} ->
+            {:error, error}
 
-    with :ok <- File.write(temporary, Jason.encode!(manifest)),
-         :ok <- Manifest.validate(root, manifest),
-         :ok <- File.rename(temporary, destination) do
-      :ok
-    else
-      {:error, %Error{} = error} ->
+          {:error, reason} ->
+            file_error(:manifest_write, destination, reason)
+        end
+      after
         File.rm(temporary)
-        {:error, error}
-
-      {:error, reason} ->
-        File.rm(temporary)
-        file_error(:manifest_write, destination, reason)
+      end
     end
   end
 
@@ -258,6 +255,23 @@ defmodule Rekindle.Desktop.Release do
     case File.mkdir_p(path) do
       :ok -> :ok
       {:error, reason} -> file_error(:mkdir, path, reason)
+    end
+  end
+
+  defp temporary_file(root, prefix, kind) do
+    case Publication.temporary_file(root, prefix) do
+      {:ok, path} -> {:ok, path}
+      {:error, reason} -> file_error(kind, root, reason)
+    end
+  end
+
+  defp with_lock(project, destination, function) do
+    case Publication.with_lock(project.root, {:desktop_release, destination}, function) do
+      {:error, {:publication_lock, reason}} ->
+        error(:publication_lock, "cannot serialize desktop publication: #{inspect(reason)}")
+
+      result ->
+        result
     end
   end
 

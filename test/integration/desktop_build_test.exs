@@ -7,7 +7,7 @@ defmodule Rekindle.DesktopBuildTest do
     root =
       Path.join(
         System.tmp_dir!(),
-        "rekindle-desktop-build-#{System.unique_integer([:positive, :monotonic])}"
+        "rekindle-desktop-build-#{System.pid()}-#{System.unique_integer([:positive, :monotonic])}"
       )
 
     File.mkdir_p!(Path.join(root, "client/src/bin"))
@@ -190,7 +190,7 @@ defmodule Rekindle.DesktopBuildTest do
     assert File.regular?(first.artifact)
   end
 
-  test "serializes concurrent releases for the same target", %{root: root} do
+  test "serializes independent release publishers for the same target", %{root: root} do
     first_tools = fake_tools(root, executable?: true, marker: "first")
     assert {:ok, first} = build(root, first_tools)
 
@@ -200,33 +200,47 @@ defmodule Rekindle.DesktopBuildTest do
     assert {:ok, project} =
              Rekindle.Config.load(:rekindle_desktop_build_test, project_root: root)
 
+    release_root = Path.join([root, "dist", "rekindle", "desktop", first_tools.target])
     parent = self()
 
-    tasks =
-      for candidate <- List.duplicate(first, 6) ++ List.duplicate(second, 6) do
-        Task.async(fn ->
-          send(parent, {:ready, self()})
+    holder =
+      Task.async(fn ->
+        Rekindle.Publication.with_lock(root, {:desktop_release, release_root}, fn ->
+          send(parent, :publication_locked)
 
           receive do
-            :publish ->
-              Rekindle.Desktop.Release.publish(project, %{candidate | profile: :release})
+            :release_publication -> :ok
           end
         end)
-      end
+      end)
 
-    pids =
-      for _index <- 1..length(tasks) do
-        assert_receive {:ready, pid}
-        pid
-      end
+    assert_receive :publication_locked
 
-    Enum.each(pids, &send(&1, :publish))
+    first_ready = Path.join(root, "first-publisher.ready")
+    first_done = Path.join(root, "first-publisher.done")
+    second_ready = Path.join(root, "second-publisher.ready")
+    second_done = Path.join(root, "second-publisher.done")
 
-    assert Enum.all?(tasks, fn task ->
-             match?({:ok, %Rekindle.Build.Result{}}, Task.await(task, 10_000))
-           end)
+    first_port = release_process(project, first, first_ready, first_done)
+    second_port = release_process(project, second, second_ready, second_done)
 
-    release_root = Path.join([root, "dist", "rekindle", "desktop", first_tools.target])
+    on_exit(fn ->
+      if Port.info(first_port), do: Port.close(first_port)
+      if Port.info(second_port), do: Port.close(second_port)
+    end)
+
+    wait_until(fn -> File.regular?(first_ready) and File.regular?(second_ready) end)
+    refute File.exists?(first_done)
+    refute File.exists?(second_done)
+
+    send(holder.pid, :release_publication)
+    assert :ok = Task.await(holder)
+
+    assert_receive {^first_port, {:exit_status, 0}}, 10_000
+    assert_receive {^second_port, {:exit_status, 0}}, 10_000
+    assert {:ok, %Rekindle.Build.Result{}} = read_process_result(first_done)
+    assert {:ok, %Rekindle.Build.Result{}} = read_process_result(second_done)
+
     manifest = release_root |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
     assert :ok = Rekindle.Desktop.Manifest.validate(release_root, manifest)
     assert File.regular?(Path.join(release_root, manifest["executable"]))
@@ -295,6 +309,62 @@ defmodule Rekindle.DesktopBuildTest do
       ] ++ options
     )
   end
+
+  defp release_process(project, result, ready, done) do
+    elixir = System.find_executable("elixir") || flunk("elixir executable is required")
+
+    arguments =
+      {project, %{result | profile: :release}, ready, done}
+      |> :erlang.term_to_binary()
+      |> Base.encode64()
+
+    expression = """
+    {project, result, ready, done} =
+      #{inspect(arguments)}
+      |> Base.decode64!()
+      |> :erlang.binary_to_term()
+
+    File.write!(ready, "ready")
+    publication = Rekindle.Desktop.Release.publish(project, result)
+    File.write!(done, publication |> :erlang.term_to_binary() |> Base.encode64())
+    """
+
+    code_paths =
+      Mix.Project.build_path()
+      |> Path.join("lib/*/ebin")
+      |> Path.wildcard()
+      |> Enum.flat_map(&[~c"-pa", String.to_charlist(&1)])
+
+    Port.open(
+      {:spawn_executable, String.to_charlist(elixir)},
+      [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        args: code_paths ++ [~c"-e", String.to_charlist(expression)]
+      ]
+    )
+  end
+
+  defp read_process_result(path) do
+    path
+    |> File.read!()
+    |> Base.decode64!()
+    |> :erlang.binary_to_term()
+  end
+
+  defp wait_until(condition, attempts \\ 200)
+
+  defp wait_until(condition, attempts) when attempts > 0 do
+    if condition.() do
+      :ok
+    else
+      Process.sleep(20)
+      wait_until(condition, attempts - 1)
+    end
+  end
+
+  defp wait_until(_condition, 0), do: flunk("independent publisher did not reach its gate")
 
   defp fake_tools(root, options) do
     target = Rekindle.Toolchain.desktop_target()
