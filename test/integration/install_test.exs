@@ -4,6 +4,8 @@ defmodule Rekindle.InstallTest do
   alias Igniter.Mix.Task.Args
   alias Igniter.Test
 
+  @moduletag timeout: 600_000
+
   test "fresh installation defaults to GPUI with both targets" do
     installed = install(project())
 
@@ -56,6 +58,7 @@ defmodule Rekindle.InstallTest do
       assert installed.issues == []
       manifest = content(installed, "client/Cargo.toml")
       assert manifest =~ Rekindle.Integration.dependency(String.to_existing_atom(integration))
+      assert content(installed, "client/Cargo.lock") =~ ~s(name = "rekindle_client")
 
       case integration do
         "gpui" ->
@@ -100,6 +103,45 @@ defmodule Rekindle.InstallTest do
         refute "/dist/rekindle/" in ignores
       end
     end
+  end
+
+  test "a generated client stays clean after its supported Cargo checks" do
+    root = tmp_dir()
+    target_dir = tmp_dir()
+    installed = install(project())
+    write_project(root, installed)
+
+    git!(root, ["init", "--quiet"])
+    git!(root, ["config", "user.email", "rekindle-test@example.invalid"])
+    git!(root, ["config", "user.name", "Rekindle Test"])
+    git!(root, ["add", "."])
+    git!(root, ["commit", "--quiet", "-m", "installed application"])
+
+    client = Path.join(root, "client")
+    {cargo, 0} = System.cmd("rustup", ["which", "cargo"], cd: client)
+    {rustc, 0} = System.cmd("rustup", ["which", "rustc"], cd: client)
+
+    for {binary, target} <- [
+          {"web", "wasm32-unknown-unknown"},
+          {"desktop", host_target!()}
+        ] do
+      {output, status} =
+        System.cmd(
+          String.trim(cargo),
+          ["check", "--locked", "--target", target, "--bin", binary, "--features", binary],
+          cd: client,
+          env: [
+            {"CARGO_TARGET_DIR", target_dir},
+            {"CARGO_TERM_COLOR", "never"},
+            {"RUSTC", String.trim(rustc)}
+          ],
+          stderr_to_stdout: true
+        )
+
+      assert status == 0, "installed #{binary} client failed to compile:\n#{output}"
+    end
+
+    assert git_status!(root) == ""
   end
 
   test "repeat installation is idempotent and explicit conflicts change no files" do
@@ -431,6 +473,7 @@ defmodule Rekindle.InstallTest do
         )
         |> String.replace(~r/gpui_platform = [^\n]+\n/, "")
       end)
+      |> delete_file("client/Cargo.lock")
 
     before = client_contents(original)
     root = tmp_dir()
@@ -767,6 +810,14 @@ defmodule Rekindle.InstallTest do
     %{igniter | rewrite: Rewrite.update!(igniter.rewrite, source)}
   end
 
+  defp delete_file(igniter, path) do
+    %{
+      igniter
+      | rewrite: Rewrite.delete(igniter.rewrite, path),
+        assigns: Map.update!(igniter.assigns, :test_files, &Map.delete(&1, path))
+    }
+  end
+
   defp ignore_lines(igniter) do
     igniter
     |> content(".gitignore")
@@ -776,6 +827,16 @@ defmodule Rekindle.InstallTest do
   defp index(content, value) do
     {index, _length} = :binary.match(content, value)
     index
+  end
+
+  defp git_status!(root) do
+    {output, 0} = System.cmd("git", ["status", "--porcelain"], cd: root)
+    output
+  end
+
+  defp git!(root, arguments) do
+    {output, status} = System.cmd("git", arguments, cd: root, stderr_to_stdout: true)
+    assert status == 0, "git #{Enum.join(arguments, " ")} failed:\n#{output}"
   end
 
   defp write_project(root, igniter) do

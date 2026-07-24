@@ -18,13 +18,14 @@ defmodule Rekindle.IntegrationsTest do
       expected_files =
         case name do
           :gpui ->
-            ["Cargo.toml", "rust-toolchain.toml", "src/lib.rs"]
+            ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "src/lib.rs"]
 
           :egui ->
-            ["Cargo.toml", "rust-toolchain.toml", "src/app.rs", "src/lib.rs"]
+            ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "src/app.rs", "src/lib.rs"]
 
           :slint ->
             [
+              "Cargo.lock",
               "Cargo.toml",
               "build.rs",
               "rust-toolchain.toml",
@@ -42,6 +43,7 @@ defmodule Rekindle.IntegrationsTest do
       refute Map.has_key?(desktop, "src/bin/web.rs")
 
       assert both["Cargo.toml"] =~ ~s(name = "sample-client")
+      assert both["Cargo.lock"] =~ ~s(name = "sample-client")
       assert both["Cargo.toml"] =~ framework
 
       assert_framework_entrypoints(name, both)
@@ -106,6 +108,7 @@ defmodule Rekindle.IntegrationsTest do
       for targets <- [[:web], [:desktop], [:web, :desktop]] do
         root = tmp_dir("#{name}-#{Enum.join(targets, "-")}")
         write(root, Integration.render(name, targets))
+        commit_generated_client!(root)
         dependency_names = cargo_dependency_names!(root)
 
         assert Integration.dependency(name) in dependency_names
@@ -117,6 +120,8 @@ defmodule Rekindle.IntegrationsTest do
 
         if :desktop in targets,
           do: cargo_check!(root, "desktop", desktop_target!())
+
+        assert git_status!(root) == ""
       end
     end
   end
@@ -235,7 +240,7 @@ defmodule Rekindle.IntegrationsTest do
     {output, status} =
       System.cmd(
         String.trim(cargo),
-        ["check", "--target", triple, "--bin", target, "--features", target],
+        ["check", "--locked", "--target", triple, "--bin", target, "--features", target],
         cd: root,
         env: [
           {"CARGO_TARGET_DIR", Path.join(System.tmp_dir!(), "rekindle-integration-target")},
@@ -247,6 +252,24 @@ defmodule Rekindle.IntegrationsTest do
 
     assert status == 0,
            "cargo check failed for #{Path.basename(root)} #{target}:\n#{output}"
+  end
+
+  defp commit_generated_client!(root) do
+    git!(root, ["init", "--quiet"])
+    git!(root, ["config", "user.email", "rekindle-test@example.invalid"])
+    git!(root, ["config", "user.name", "Rekindle Test"])
+    git!(root, ["add", "."])
+    git!(root, ["commit", "--quiet", "-m", "generated client"])
+  end
+
+  defp git_status!(root) do
+    {output, 0} = System.cmd("git", ["status", "--porcelain"], cd: root)
+    output
+  end
+
+  defp git!(root, arguments) do
+    {output, status} = System.cmd("git", arguments, cd: root, stderr_to_stdout: true)
+    assert status == 0, "git #{Enum.join(arguments, " ")} failed:\n#{output}"
   end
 
   defp cargo_dependency_names!(root) do

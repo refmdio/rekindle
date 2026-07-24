@@ -8,14 +8,14 @@ defmodule Rekindle.Integration do
   @integrations %{
     gpui: %{
       dependency: "gpui",
-      files: ["Cargo.toml", "rust-toolchain.toml", "src/lib.rs"],
+      files: ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "src/lib.rs"],
       graphics: %{web: :webgpu, desktop: :native},
       host: "",
       template: "gpui"
     },
     egui: %{
       dependency: "eframe",
-      files: ["Cargo.toml", "rust-toolchain.toml", "src/lib.rs", "src/app.rs"],
+      files: ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "src/lib.rs", "src/app.rs"],
       graphics: %{web: :webgl2, desktop: :native},
       host: ~s(<canvas id="rekindle-canvas"></canvas>),
       template: "egui"
@@ -23,6 +23,7 @@ defmodule Rekindle.Integration do
     slint: %{
       dependency: "slint",
       files: [
+        "Cargo.lock",
         "Cargo.toml",
         "rust-toolchain.toml",
         "build.rs",
