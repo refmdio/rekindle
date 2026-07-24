@@ -38,10 +38,11 @@ defmodule Rekindle.Web.Manifest do
            "generation" => generation,
            "entry" => entry,
            "members" => members
-         },
+         } = manifest,
          kind
        )
-       when is_binary(generation) and is_binary(entry) and is_list(members) do
+       when map_size(manifest) == 4 and is_binary(generation) and is_binary(entry) and
+              is_list(members) do
     with :ok <- relative_path(entry),
          :ok <- canonical_members(members),
          :ok <- entry_member(entry, members),
