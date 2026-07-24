@@ -1,3 +1,5 @@
+Code.compiler_options(ignore_module_conflict: true)
+
 defmodule Mix.Tasks.Phx.Server do
   use Mix.Task
 
@@ -6,6 +8,8 @@ defmodule Mix.Tasks.Phx.Server do
     send(Application.fetch_env!(:rekindle, :phx_server_probe), {:phx_server, arguments})
   end
 end
+
+Code.compiler_options(ignore_module_conflict: false)
 
 defmodule Rekindle.InstallTest do
   use ExUnit.Case, async: false
