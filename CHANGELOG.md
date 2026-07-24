@@ -1,5 +1,5 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 - 2026-07-24
 
-- Prepare the initial public release.
+- Initial release.
