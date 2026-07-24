@@ -7,7 +7,7 @@ defmodule Rekindle.WebBuildTest do
     root =
       Path.join(
         System.tmp_dir!(),
-        "rekindle-web-build-#{System.unique_integer([:positive, :monotonic])}"
+        "rekindle-web-build-#{System.pid()}-#{System.unique_integer([:positive, :monotonic])}"
       )
 
     File.mkdir_p!(Path.join(root, "client/src/bin"))
@@ -229,8 +229,19 @@ defmodule Rekindle.WebBuildTest do
 
     parent = self()
     namespace = Path.join(root, "priv/static/rekindle")
-    lock = {{Rekindle.Web.Release, namespace}, self()}
-    assert :global.set_lock(lock)
+
+    holder =
+      Task.async(fn ->
+        Rekindle.Publication.with_lock(root, :web_release, fn ->
+          send(parent, :publication_locked)
+
+          receive do
+            :release_publication -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :publication_locked
 
     tasks =
       for candidate <-
@@ -256,7 +267,8 @@ defmodule Rekindle.WebBuildTest do
       Enum.each(pids, &send(&1, :publish))
       Enum.each(tasks, &assert(Task.yield(&1, 50) == nil))
     after
-      :global.del_lock(lock)
+      send(holder.pid, :release_publication)
+      assert :ok = Task.await(holder)
     end
 
     assert Enum.all?(tasks, fn task ->

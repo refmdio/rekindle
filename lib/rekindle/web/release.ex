@@ -4,6 +4,7 @@ defmodule Rekindle.Web.Release do
   require Logger
 
   alias Rekindle.Build.Result
+  alias Rekindle.Publication
   alias Rekindle.Web.{Error, Manifest}
 
   @retained 2
@@ -21,10 +22,7 @@ defmodule Rekindle.Web.Release do
     with {:ok, manifest} <- read_manifest(source),
          :ok <- Manifest.validate(source, manifest),
          true <- manifest["generation"] == metadata.generation do
-      :global.trans(
-        {{__MODULE__, namespace}, self()},
-        fn -> publish_locked(namespace, source, manifest, result) end
-      )
+      with_lock(project, fn -> publish_locked(namespace, source, manifest, result) end)
     else
       false ->
         error(:invalid_manifest, "Web release generation does not match its manifest")
@@ -77,29 +75,33 @@ defmodule Rekindle.Web.Release do
         error(:publish, "Web release generation path is not a directory: #{destination}")
 
       {:error, :enoent} ->
-        temporary =
-          Path.join(
-            Path.dirname(destination),
-            ".tmp-#{System.unique_integer([:positive, :monotonic])}"
-          )
+        publish_new_generation(source, destination, manifest)
 
-        with :ok <- mkdir(Path.dirname(destination)),
-             :ok <- copy_directory(source, temporary),
+      {:error, reason} ->
+        file_error(:publish, destination, reason)
+    end
+  end
+
+  defp publish_new_generation(source, destination, manifest) do
+    parent = Path.dirname(destination)
+
+    with :ok <- mkdir(parent),
+         {:ok, temporary} <- Publication.temporary_directory(parent) do
+      try do
+        with :ok <- copy_directory(source, temporary),
              :ok <- validate_generation(temporary, manifest),
              :ok <- File.rename(temporary, destination) do
           {:ok, true}
         else
-          {:error, %Error{} = error} ->
-            File.rm_rf(temporary)
-            {:error, error}
-
-          {:error, reason} ->
-            File.rm_rf(temporary)
-            file_error(:publish, destination, reason)
+          {:error, %Error{} = error} -> {:error, error}
+          {:error, reason} -> file_error(:publish, destination, reason)
         end
-
-      {:error, reason} ->
-        file_error(:publish, destination, reason)
+      after
+        File.rm_rf(temporary)
+      end
+    else
+      {:error, %Error{} = error} -> {:error, error}
+      {:error, reason} -> file_error(:publish, destination, reason)
     end
   end
 
@@ -160,7 +162,6 @@ defmodule Rekindle.Web.Release do
 
   defp select(namespace, manifest) do
     destination = Path.join(namespace, "entry.js")
-    temporary = destination <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
 
     generation = manifest["generation"]
     module = Jason.encode!("./web/#{generation}/#{manifest["entry"]}")
@@ -172,13 +173,30 @@ defmodule Rekindle.Web.Release do
     """
 
     with :ok <- mkdir(namespace),
-         :ok <- File.write(temporary, selector),
-         :ok <- File.rename(temporary, destination) do
-      :ok
-    else
-      {:error, reason} ->
+         {:ok, temporary} <- Publication.temporary_file(namespace, ".tmp-entry-") do
+      try do
+        with :ok <- File.write(temporary, selector),
+             :ok <- File.rename(temporary, destination) do
+          :ok
+        else
+          {:error, reason} -> file_error(:selector_write, destination, reason)
+        end
+      after
         File.rm(temporary)
-        file_error(:selector_write, destination, reason)
+      end
+    else
+      {:error, %Error{} = error} -> {:error, error}
+      {:error, reason} -> file_error(:selector_write, destination, reason)
+    end
+  end
+
+  defp with_lock(project, function) do
+    case Publication.with_lock(project.root, :web_release, function) do
+      {:error, {:publication_lock, reason}} ->
+        error(:publication_lock, "cannot serialize Web release publication: #{inspect(reason)}")
+
+      result ->
+        result
     end
   end
 

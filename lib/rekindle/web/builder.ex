@@ -2,6 +2,7 @@ defmodule Rekindle.Web.Builder do
   @moduledoc false
 
   alias Rekindle.Build.Result
+  alias Rekindle.Publication
   alias Rekindle.Toolchain.Process
   alias Rekindle.Web.{Error, Manifest}
 
@@ -11,55 +12,57 @@ defmodule Rekindle.Web.Builder do
           {:ok, Result.t()}
           | {:error, Rekindle.Cargo.Error.t() | Rekindle.Toolchain.Error.t() | Error.t()}
   def build(project, target, profile, options) do
-    temporary = temporary_path(project)
-
-    try do
-      with :ok <- mkdir(temporary),
-           {:ok, cargo} <- Rekindle.Cargo.build(project, target, profile, cargo_options(options)),
-           {:ok, wasm_bindgen} <-
-             Rekindle.Toolchain.resolve_wasm_bindgen(
-               Rekindle.Toolchain.wasm_bindgen_version(),
-               toolchain_options(options)
-             ),
-           :ok <- bindgen(wasm_bindgen, cargo.artifact, temporary, options),
-           :ok <- copy_public(project.client_root, temporary),
-           {:ok, manifest} <- Manifest.create(temporary, @entry),
-           :ok <- write_manifest(temporary, manifest),
-           {:ok, generation} <- publish(project, profile, temporary, manifest),
-           {:ok, result} <-
-             finish(
-               project,
-               %Result{
-                 target: :web,
-                 profile: profile,
-                 artifact: Path.join(generation, @entry),
-                 metadata: %{
-                   generation: manifest["generation"],
-                   manifest: Path.join(generation, "manifest.json"),
-                   package: cargo.package,
-                   binary: cargo.binary,
-                   rust_target: cargo.target,
-                   target_directory: cargo.target_directory,
-                   diagnostics: cargo.diagnostics
-                 }
-               },
-               manifest,
-               options
-             ) do
-        {:ok, result}
+    with {:ok, temporary} <- temporary_directory(project) do
+      try do
+        with {:ok, cargo} <-
+               Rekindle.Cargo.build(project, target, profile, cargo_options(options)),
+             {:ok, wasm_bindgen} <-
+               Rekindle.Toolchain.resolve_wasm_bindgen(
+                 Rekindle.Toolchain.wasm_bindgen_version(),
+                 toolchain_options(options)
+               ),
+             :ok <- bindgen(wasm_bindgen, cargo.artifact, temporary, options),
+             :ok <- copy_public(project.client_root, temporary),
+             {:ok, manifest} <- Manifest.create(temporary, @entry),
+             :ok <- write_manifest(temporary, manifest),
+             {:ok, generation} <- publish(project, profile, temporary, manifest),
+             {:ok, result} <-
+               finish(
+                 project,
+                 %Result{
+                   target: :web,
+                   profile: profile,
+                   artifact: Path.join(generation, @entry),
+                   metadata: %{
+                     generation: manifest["generation"],
+                     manifest: Path.join(generation, "manifest.json"),
+                     package: cargo.package,
+                     binary: cargo.binary,
+                     rust_target: cargo.target,
+                     target_directory: cargo.target_directory,
+                     diagnostics: cargo.diagnostics
+                   }
+                 },
+                 manifest,
+                 options
+               ) do
+          {:ok, result}
+        end
+      after
+        File.rm_rf(temporary)
       end
-    after
-      File.rm_rf(temporary)
     end
   end
 
   @doc false
   @spec activate(Rekindle.Config.t(), Result.t()) :: :ok | {:error, Error.t()}
   def activate(project, %Result{target: :web, profile: profile, metadata: metadata}) do
-    with :ok <- select(project, profile, %{"generation" => metadata.generation}) do
-      if profile == :dev, do: Rekindle.Development.Cleanup.web(project, metadata.generation)
-      :ok
-    end
+    with_lock(project, {:web, profile}, fn ->
+      with :ok <- select(project, profile, %{"generation" => metadata.generation}) do
+        if profile == :dev, do: Rekindle.Development.Cleanup.web(project, metadata.generation)
+        :ok
+      end
+    end)
   end
 
   defp bindgen(executable, artifact, output, options) do
@@ -236,7 +239,6 @@ defmodule Rekindle.Web.Builder do
   defp select(project, profile, manifest) do
     root = state_root(project, profile)
     destination = Path.join(root, "web-current.json")
-    temporary = destination <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
 
     selector =
       Jason.encode!(%{
@@ -245,13 +247,20 @@ defmodule Rekindle.Web.Builder do
       })
 
     with :ok <- mkdir(root),
-         :ok <- File.write(temporary, selector),
-         :ok <- File.rename(temporary, destination) do
-      :ok
-    else
-      {:error, reason} ->
+         {:ok, temporary} <- Publication.temporary_file(root, ".tmp-web-current-") do
+      try do
+        with :ok <- File.write(temporary, selector),
+             :ok <- File.rename(temporary, destination) do
+          :ok
+        else
+          {:error, reason} -> file_error(:selector_write, destination, reason)
+        end
+      after
         File.rm(temporary)
-        file_error(:selector_write, destination, reason)
+      end
+    else
+      {:error, %Error{} = error} -> {:error, error}
+      {:error, reason} -> file_error(:selector_write, destination, reason)
     end
   end
 
@@ -260,23 +269,34 @@ defmodule Rekindle.Web.Builder do
 
   defp finish(project, result, manifest, options) do
     if Keyword.get(options, :activate, true) do
-      case select(project, result.profile, manifest) do
-        :ok -> {:ok, result}
-        {:error, %Error{} = error} -> {:error, error}
-      end
+      with_lock(project, {:web, result.profile}, fn ->
+        case select(project, result.profile, manifest) do
+          :ok -> {:ok, result}
+          {:error, %Error{} = error} -> {:error, error}
+        end
+      end)
     else
       {:ok, result}
     end
   end
 
-  defp temporary_path(project) do
-    Path.join([
-      project.root,
-      ".rekindle",
-      "tmp",
-      "web",
-      Integer.to_string(System.unique_integer([:positive, :monotonic]))
-    ])
+  defp temporary_directory(project) do
+    parent = Path.join([project.root, ".rekindle", "tmp", "web"])
+
+    case Publication.temporary_directory(parent, "build-") do
+      {:ok, path} -> {:ok, path}
+      {:error, reason} -> file_error(:mkdir, parent, reason)
+    end
+  end
+
+  defp with_lock(project, key, function) do
+    case Publication.with_lock(project.root, key, function) do
+      {:error, {:publication_lock, reason}} ->
+        error(:publication_lock, "cannot serialize Web publication: #{inspect(reason)}")
+
+      result ->
+        result
+    end
   end
 
   defp generation_parent(project, profile), do: Path.join([state_root(project, profile), "web"])
