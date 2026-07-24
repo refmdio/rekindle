@@ -34,6 +34,9 @@ defmodule Rekindle.InstallTest do
     assert length(Regex.scan(~r/\{Rekindle,/, application)) == 1
 
     endpoint = content(installed, "lib/demo_web/endpoint.ex")
+    assert endpoint =~ "plug(Plug.Static"
+    assert endpoint =~ ~s(at: "/rekindle")
+    assert endpoint =~ ~s(from: {:demo, "priv/static/rekindle"})
     assert endpoint =~ "plug(Rekindle.Web.Development, otp_app: :demo)"
 
     mix = content(installed, "mix.exs")
@@ -103,6 +106,27 @@ defmodule Rekindle.InstallTest do
 
     assert Enum.any?(conflicted.issues, &String.contains?(&1, "conflicts"))
     assert changed_contents(conflicted) == changed_contents(installed)
+  end
+
+  test "adds a missing release plug when the development plug already exists" do
+    installed =
+      install(
+        project(%{
+          "lib/demo_web/endpoint.ex" => """
+          defmodule DemoWeb.Endpoint do
+            use Phoenix.Endpoint, otp_app: :demo
+
+            if code_reloading? do
+              plug Rekindle.Web.Development, otp_app: :demo
+            end
+          end
+          """
+        })
+      )
+
+    endpoint = content(installed, "lib/demo_web/endpoint.ex")
+    assert endpoint =~ "plug(Plug.Static"
+    assert length(Regex.scan(~r/Rekindle\.Web\.Development/, endpoint)) == 1
   end
 
   test "does not stage installation when a generated client path already exists" do
@@ -528,6 +552,9 @@ defmodule Rekindle.InstallTest do
     assert installed.issues == []
     assert "/web/static/rekindle/" in ignore_lines(installed)
     refute "/priv/static/rekindle/" in ignore_lines(installed)
+
+    assert content(installed, "lib/demo_web/endpoint.ex") =~
+             ~s(from: {:demo, "web/static/rekindle"})
   end
 
   test "ignore additions preserve application-owned grouping and comments" do

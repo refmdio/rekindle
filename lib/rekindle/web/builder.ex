@@ -26,22 +26,27 @@ defmodule Rekindle.Web.Builder do
            {:ok, manifest} <- Manifest.create(temporary, @entry),
            :ok <- write_manifest(temporary, manifest),
            {:ok, generation} <- publish(project, profile, temporary, manifest),
-           :ok <- maybe_activate(project, profile, manifest, options) do
-        {:ok,
-         %Result{
-           target: :web,
-           profile: profile,
-           artifact: Path.join(generation, @entry),
-           metadata: %{
-             generation: manifest["generation"],
-             manifest: Path.join(generation, "manifest.json"),
-             package: cargo.package,
-             binary: cargo.binary,
-             rust_target: cargo.target,
-             target_directory: cargo.target_directory,
-             diagnostics: cargo.diagnostics
-           }
-         }}
+           {:ok, result} <-
+             finish(
+               project,
+               %Result{
+                 target: :web,
+                 profile: profile,
+                 artifact: Path.join(generation, @entry),
+                 metadata: %{
+                   generation: manifest["generation"],
+                   manifest: Path.join(generation, "manifest.json"),
+                   package: cargo.package,
+                   binary: cargo.binary,
+                   rust_target: cargo.target,
+                   target_directory: cargo.target_directory,
+                   diagnostics: cargo.diagnostics
+                 }
+               },
+               manifest,
+               options
+             ) do
+        {:ok, result}
       end
     after
       File.rm_rf(temporary)
@@ -250,11 +255,17 @@ defmodule Rekindle.Web.Builder do
     end
   end
 
-  defp maybe_activate(project, profile, manifest, options) do
+  defp finish(project, %Result{profile: :release} = result, _manifest, _options),
+    do: Rekindle.Web.Release.publish(project, result)
+
+  defp finish(project, result, manifest, options) do
     if Keyword.get(options, :activate, true) do
-      select(project, profile, manifest)
+      case select(project, result.profile, manifest) do
+        :ok -> {:ok, result}
+        {:error, %Error{} = error} -> {:error, error}
+      end
     else
-      :ok
+      {:ok, result}
     end
   end
 

@@ -81,9 +81,103 @@ defmodule Rekindle.WebBuildTest do
 
     assert {:ok, result} = build(root, tools, profile: :release)
     assert result.profile == :release
-    assert result.artifact =~ "/.rekindle/release/web/"
-    assert File.regular?(Path.join(root, ".rekindle/release/web-current.json"))
+    assert result.artifact =~ "/priv/static/rekindle/web/"
+    assert File.regular?(result.artifact)
+
+    selector = root |> Path.join("priv/static/rekindle/web-current.json") |> read_json()
+    assert selector["generation"] == result.metadata.generation
+    assert selector["entry"] == "web/#{result.metadata.generation}/app.js"
+    assert selector["manifest"] == "web/#{result.metadata.generation}/manifest.json"
+
+    assert result.metadata.manifest ==
+             Path.join([
+               root,
+               "priv/static/rekindle/web",
+               result.metadata.generation,
+               "manifest.json"
+             ])
+
+    assert File.regular?(
+             Path.join([
+               root,
+               ".rekindle/release/web",
+               result.metadata.generation,
+               "manifest.json"
+             ])
+           )
+
     refute File.exists?(Path.join(root, ".rekindle/dev/web-current.json"))
+    refute File.exists?(Path.join(root, ".rekindle/release/web-current.json"))
+  end
+
+  test "retains the selected and previous Web releases without removing sibling files", %{
+    root: root
+  } do
+    tools = fake_tools(root, "success-one")
+    namespace = Path.join(root, "priv/static/rekindle")
+    File.mkdir_p!(Path.join(namespace, "web"))
+    File.write!(Path.join(namespace, "keep.txt"), "application-owned")
+    File.mkdir_p!(Path.join(namespace, "web/.tmp-stale"))
+
+    assert {:ok, first} = build(root, tools, profile: :release)
+    refute File.exists?(Path.join(namespace, "web/.tmp-stale"))
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, second} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-three")
+    assert {:ok, third} = build(root, tools, profile: :release)
+
+    generations =
+      namespace
+      |> Path.join("web")
+      |> File.ls!()
+      |> Enum.filter(&(&1 =~ ~r/^[0-9a-f]{64}$/))
+      |> MapSet.new()
+
+    assert generations ==
+             MapSet.new([second.metadata.generation, third.metadata.generation])
+
+    refute MapSet.member?(generations, first.metadata.generation)
+    assert File.read!(Path.join(namespace, "keep.txt")) == "application-owned"
+  end
+
+  test "rolls back a new generation when the release selector cannot be replaced", %{
+    root: root
+  } do
+    tools = fake_tools(root, "success-one")
+    assert {:ok, first} = build(root, tools, profile: :release)
+
+    namespace = Path.join(root, "priv/static/rekindle")
+    selector = Path.join(namespace, "web-current.json")
+    selected = File.read!(selector)
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, candidate} = build(root, tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    destination =
+      Path.join([
+        namespace,
+        "web",
+        candidate.metadata.generation
+      ])
+
+    File.chmod!(namespace, 0o555)
+
+    publication =
+      try do
+        Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+      after
+        File.chmod!(namespace, 0o755)
+      end
+
+    assert {:error, %Rekindle.Web.Error{kind: :selector_write}} = publication
+    assert File.read!(selector) == selected
+    assert File.regular?(first.artifact)
+    refute File.exists?(destination)
   end
 
   test "keeps the selected generation when the next package is incomplete", %{root: root} do
@@ -277,11 +371,11 @@ defmodule Rekindle.WebBuildTest do
       mkdir -p "$output"
       mode=$(cat '#{mode_path}')
       case "$mode" in
-        success)
+        success*)
           mkdir -p "$output/snippets"
-          printf "import './snippets/helper.js';\\nconst imports = {'./app_bg.js': {}};\\nconst wasm = new URL('app_bg.wasm', import.meta.url);\\n" > "$output/app.js"
-          printf 'wasm' > "$output/app_bg.wasm"
-          printf 'export const ready = true;\\n' > "$output/snippets/helper.js"
+          printf "/* %s */\\nimport './snippets/helper.js';\\nconst imports = {'./app_bg.js': {}};\\nconst wasm = new URL('app_bg.wasm', import.meta.url);\\n" "$mode" > "$output/app.js"
+          printf 'wasm-%s' "$mode" > "$output/app_bg.wasm"
+          printf 'export const mode = "%s";\\n' "$mode" > "$output/snippets/helper.js"
           ;;
         missing-reference)
           printf "const wasm = new URL('app_bg.wasm', import.meta.url);\\n" > "$output/app.js"

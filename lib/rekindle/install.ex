@@ -209,42 +209,92 @@ if Code.ensure_loaded?(Igniter) do
          {:code,
           Sourceror.parse_string!("[otp_app: #{inspect(app)}, endpoint: #{inspect(endpoint)}]")}}
       )
-      |> maybe_install_web_endpoint(app, endpoint, selection.targets)
+      |> maybe_install_web_endpoint(app, endpoint, selection)
       |> TaskAliases.add_alias(:setup, "rekindle.setup", if_exists: :append)
       |> maybe_add_web_alias(selection.targets)
       |> update_ignores(selection, mode)
     end
 
-    defp maybe_install_web_endpoint(igniter, app, endpoint, targets) do
-      if :web in targets do
+    defp maybe_install_web_endpoint(igniter, app, endpoint, selection) do
+      if :web in selection.targets do
         Igniter.Project.Module.find_and_update_module!(igniter, endpoint, fn zipper ->
-          case Common.move_to(zipper, fn zipper ->
-                 Function.function_call?(zipper, :plug, 2) and
-                   Function.argument_equals?(zipper, 0, Rekindle.Web.Development)
-               end) do
-            {:ok, _zipper} ->
+          static_root = Path.join(selection.public_dir, "rekindle")
+
+          additions =
+            [
+              unless(static_plug?(zipper, app, static_root),
+                do: static_plug_source(app, static_root)
+              ),
+              unless(development_plug?(zipper), do: development_plug_source(app))
+            ]
+            |> Enum.reject(&is_nil/1)
+
+          case additions do
+            [] ->
               {:ok, zipper}
 
-            :error ->
+            additions ->
               case Igniter.Code.Module.move_to_use(zipper, Phoenix.Endpoint) do
                 {:ok, use_zipper} ->
-                  code =
-                    """
-                    if code_reloading? do
-                      plug Rekindle.Web.Development, otp_app: #{inspect(app)}
-                    end
-                    """
-
-                  {:ok, Common.add_code(use_zipper, code, placement: :after)}
+                  {:ok,
+                   Common.add_code(use_zipper, Enum.join(additions, "\n\n"), placement: :after)}
 
                 :error ->
-                  {:error, "could not add the Rekindle development plug to #{inspect(endpoint)}"}
+                  {:error, "could not add the Rekindle endpoint plugs to #{inspect(endpoint)}"}
               end
           end
         end)
       else
         igniter
       end
+    end
+
+    defp static_plug?(zipper, app, static_root) do
+      match?(
+        {:ok, _zipper},
+        Common.move_to(zipper, fn zipper ->
+          Function.function_call?(zipper, :plug, 2) and
+            Function.argument_equals?(zipper, 0, Plug.Static) and
+            static_plug_options?(zipper, app, static_root)
+        end)
+      )
+    end
+
+    defp static_plug_options?(zipper, app, static_root) do
+      with {:ok, options} <- Function.move_to_nth_argument(zipper, 1),
+           {:ok, options} <- Common.expand_literal(options) do
+        Keyword.get(options, :at) == "/rekindle" and
+          Keyword.get(options, :from) == {app, static_root}
+      else
+        _error -> false
+      end
+    end
+
+    defp development_plug?(zipper) do
+      match?(
+        {:ok, _zipper},
+        Common.move_to(zipper, fn zipper ->
+          Function.function_call?(zipper, :plug, 2) and
+            Function.argument_equals?(zipper, 0, Rekindle.Web.Development)
+        end)
+      )
+    end
+
+    defp static_plug_source(app, static_root) do
+      """
+      plug Plug.Static,
+        at: "/rekindle",
+        from: {#{inspect(app)}, #{inspect(static_root)}},
+        gzip: false
+      """
+    end
+
+    defp development_plug_source(app) do
+      """
+      if code_reloading? do
+        plug Rekindle.Web.Development, otp_app: #{inspect(app)}
+      end
+      """
     end
 
     defp maybe_generate_client(igniter, _selection, mode) when mode != :generate, do: igniter
