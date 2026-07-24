@@ -65,7 +65,9 @@ defmodule Rekindle.Web.Builder do
   def activate(project, %Result{target: :web, profile: profile, metadata: metadata}) do
     with_lock(project, {:web, profile}, fn ->
       with :ok <- activate_generation(project, profile, metadata.generation) do
-        if profile == :dev, do: Rekindle.Development.Cleanup.web(project, metadata.generation)
+        if profile == :dev,
+          do: Rekindle.Development.Cleanup.web_locked(project, metadata.generation)
+
         :ok
       end
     end)

@@ -55,10 +55,12 @@ defmodule Rekindle.Development.Cleanup do
 
   @spec discard(Rekindle.Config.t(), Rekindle.Build.Result.t()) :: :ok
   def discard(project, %{target: :web, metadata: %{generation: generation, manifest: manifest}}) do
-    selected = selected_web(project.root)
+    with_cleanup_lock(project, {:web, :dev}, fn ->
+      selected = selected_web(project.root)
 
-    if selected != generation, do: remove_owned_directory(Path.dirname(manifest))
-    web(project, selected)
+      if selected != generation, do: remove_owned_directory(Path.dirname(manifest))
+      web_locked(project, selected)
+    end)
   end
 
   def discard(
@@ -79,6 +81,12 @@ defmodule Rekindle.Development.Cleanup do
 
   @spec web(Rekindle.Config.t(), String.t()) :: :ok
   def web(project, generation) do
+    with_cleanup_lock(project, {:web, :dev}, fn -> web_locked(project, generation) end)
+  end
+
+  @doc false
+  @spec web_locked(Rekindle.Config.t(), String.t() | nil) :: :ok
+  def web_locked(project, generation) do
     prune(Path.join([project.root, ".rekindle", "dev", "web"]), generation)
   end
 

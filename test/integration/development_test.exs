@@ -148,6 +148,62 @@ defmodule Rekindle.DevelopmentTest do
     assert File.dir?(Path.join([root, ".rekindle", "dev", "web", selected]))
   end
 
+  test "serializes stale Web cleanup with activation across VMs", %{root: root} do
+    selected = publish_web(root, "export default 'selected';")
+    stale = publish_web(root, "export default 'stale';")
+    select_web(root, selected)
+
+    {:ok, project} =
+      Rekindle.Config.load(:rekindle_development_test, project_root: root)
+
+    stale_result = web_result(root, stale)
+    ready = Path.join(root, "web-publication.ready")
+    release = Path.join(root, "web-publication.release")
+    port = publication_lock_process(root, {:web, :dev}, ready, release)
+
+    on_exit(fn ->
+      File.write(release, "release")
+      if Port.info(port), do: Port.close(port)
+    end)
+
+    assert_until(fn -> File.regular?(ready) end, 200)
+
+    cleanup =
+      Task.async(fn -> Rekindle.Development.Cleanup.discard(project, stale_result) end)
+
+    assert Task.yield(cleanup, 100) == nil
+    assert File.dir?(Path.dirname(stale_result.metadata.manifest))
+    assert selected_web(root) == selected
+
+    File.write!(release, "release")
+    assert_receive {^port, {:exit_status, 0}}, 5_000
+    assert :ok = Task.await(cleanup, 5_000)
+    refute File.exists?(Path.dirname(stale_result.metadata.manifest))
+    assert selected_web(root) == selected
+    assert_valid_web_generation(root, selected)
+
+    activated = publish_web(root, "export default 'activated';")
+    select_web(root, selected)
+    activated_result = web_result(root, activated)
+
+    assert :ok = Rekindle.Web.Builder.activate(project, activated_result)
+    assert :ok = Rekindle.Development.Cleanup.discard(project, activated_result)
+    assert selected_web(root) == activated
+    assert_valid_web_generation(root, activated)
+
+    discarded = publish_web(root, "export default 'discarded';")
+    select_web(root, activated)
+    discarded_result = web_result(root, discarded)
+
+    assert :ok = Rekindle.Development.Cleanup.discard(project, discarded_result)
+
+    assert {:error, %Rekindle.Web.Error{kind: :manifest_read}} =
+             Rekindle.Web.Builder.activate(project, discarded_result)
+
+    assert selected_web(root) == activated
+    assert_valid_web_generation(root, activated)
+  end
+
   @tag capture_log: true
   test "retains the last successful result when a later build fails", %{root: root} do
     counter = start_supervised!({Agent, fn -> 0 end})
@@ -823,12 +879,50 @@ defmodule Rekindle.DevelopmentTest do
     File.cp!(Path.join(temporary, "app.js"), Path.join(generation_root, "app.js"))
     File.write!(Path.join(generation_root, "manifest.json"), Jason.encode!(manifest))
 
+    select_web(root, generation)
+
+    generation
+  end
+
+  defp select_web(root, generation) do
     File.write!(
       Path.join(root, ".rekindle/dev/web-current.json"),
       Jason.encode!(%{"generation" => generation})
     )
+  end
 
-    generation
+  defp selected_web(root) do
+    root
+    |> Path.join(".rekindle/dev/web-current.json")
+    |> File.read!()
+    |> Jason.decode!()
+    |> Map.fetch!("generation")
+  end
+
+  defp web_result(root, generation) do
+    generation_root = Path.join([root, ".rekindle", "dev", "web", generation])
+
+    %Result{
+      target: :web,
+      profile: :dev,
+      artifact: Path.join(generation_root, "app.js"),
+      metadata: %{
+        generation: generation,
+        manifest: Path.join(generation_root, "manifest.json")
+      }
+    }
+  end
+
+  defp assert_valid_web_generation(root, generation) do
+    generation_root = Path.join([root, ".rekindle", "dev", "web", generation])
+
+    manifest =
+      generation_root
+      |> Path.join("manifest.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert :ok = Rekindle.Web.Manifest.validate(generation_root, manifest)
   end
 
   defp request(path, options) do
@@ -1002,21 +1096,25 @@ defmodule Rekindle.DevelopmentTest do
   end
 
   defp staging_process(root, target, staging, ready, release) do
+    publication_lock_process(root, {:staging, target}, ready, release, staging)
+  end
+
+  defp publication_lock_process(root, key, ready, release, directory \\ nil) do
     elixir = System.find_executable("elixir") || flunk("elixir executable is required")
 
     arguments =
-      {root, target, staging, ready, release}
+      {root, key, ready, release, directory}
       |> :erlang.term_to_binary()
       |> Base.encode64()
 
     expression = """
-    {root, target, staging, ready, release} =
+    {root, key, ready, release, directory} =
       #{inspect(arguments)}
       |> Base.decode64!()
       |> :erlang.binary_to_term()
 
-    Rekindle.Publication.with_lock(root, {:staging, target}, fn ->
-      File.mkdir_p!(staging)
+    Rekindle.Publication.with_lock(root, key, fn ->
+      if directory, do: File.mkdir_p!(directory)
       File.write!(ready, "ready")
 
       wait = fn wait ->
