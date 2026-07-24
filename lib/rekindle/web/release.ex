@@ -69,7 +69,7 @@ defmodule Rekindle.Web.Release do
   defp publish_generation(source, destination, manifest) do
     case File.lstat(destination) do
       {:ok, %{type: :directory}} ->
-        with :ok <- validate_generation(destination, manifest) do
+        with :ok <- validate_deployment(destination, manifest) do
           {:ok, false}
         end
 
@@ -104,9 +104,17 @@ defmodule Rekindle.Web.Release do
   end
 
   defp validate_generation(root, expected) do
+    validate_generation(root, expected, &Manifest.validate/2)
+  end
+
+  defp validate_deployment(root, expected) do
+    validate_generation(root, expected, &Manifest.validate_deployment/2)
+  end
+
+  defp validate_generation(root, expected, validator) do
     with {:ok, stored} <- read_manifest(root),
          true <- stored == expected,
-         :ok <- Manifest.validate(root, stored) do
+         :ok <- validator.(root, stored) do
       :ok
     else
       false ->

@@ -47,3 +47,7 @@ Rekindle.Phoenix.web_entry_path(MyAppWeb.Endpoint)
 Phoenix resolves the path through its static manifest after `phx.digest`. The
 module loads and starts the selected immutable Web generation. Include it as a
 module script after the host element required by the selected UI integration.
+
+The exact Rekindle generation remains under `.rekindle/release`. Its
+`priv/static` copy is deployment output, so Phoenix can add digested and
+compressed derivatives without changing the canonical generation identity.

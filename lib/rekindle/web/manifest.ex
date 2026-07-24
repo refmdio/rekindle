@@ -25,23 +25,34 @@ defmodule Rekindle.Web.Manifest do
   end
 
   @spec validate(Path.t(), map()) :: :ok | {:error, Error.t()}
-  def validate(root, %{
-        "version" => @version,
-        "generation" => generation,
-        "entry" => entry,
-        "members" => members
-      })
-      when is_binary(generation) and is_binary(entry) and is_list(members) do
+  def validate(root, manifest), do: validate(root, manifest, :canonical)
+
+  @doc false
+  @spec validate_deployment(Path.t(), map()) :: :ok | {:error, Error.t()}
+  def validate_deployment(root, manifest), do: validate(root, manifest, :deployment)
+
+  defp validate(
+         root,
+         %{
+           "version" => @version,
+           "generation" => generation,
+           "entry" => entry,
+           "members" => members
+         },
+         kind
+       )
+       when is_binary(generation) and is_binary(entry) and is_list(members) do
     with :ok <- relative_path(entry),
          :ok <- entry_member(entry, members),
          :ok <- validate_members(root, members),
+         :ok <- validate_membership(kind, root, members),
          :ok <- generation_identity(generation, members),
          :ok <- referenced_members(root, members) do
       :ok
     end
   end
 
-  def validate(_root, _manifest),
+  defp validate(_root, _manifest, _kind),
     do: error(:invalid_manifest, "Web manifest has an unsupported shape")
 
   defp members(root) do
@@ -109,6 +120,7 @@ defmodule Rekindle.Web.Manifest do
        when is_binary(expected) do
     with :ok <- relative_path(path),
          false <- MapSet.member?(paths, path),
+         {:ok, %{type: :regular}} <- File.lstat(Path.join(root, path)),
          {:ok, contents} <- File.read(Path.join(root, path)),
          true <- sha256(contents) == expected do
       {:ok, path}
@@ -116,8 +128,14 @@ defmodule Rekindle.Web.Manifest do
       true ->
         error(:invalid_manifest, "Web manifest contains duplicate member #{path}")
 
-      {:error, reason} when is_atom(reason) ->
+      {:error, :enoent} ->
         error(:missing_member, "Web generation member is missing: #{path}")
+
+      {:ok, _stat} ->
+        error(:unsupported_member, "Web generation member is not a regular file: #{path}")
+
+      {:error, reason} when is_atom(reason) ->
+        file_error(:member_read, path, reason)
 
       false ->
         error(:member_hash, "Web generation member hash does not match: #{path}")
@@ -129,6 +147,24 @@ defmodule Rekindle.Web.Manifest do
 
   defp validate_member(_root, _member, _paths),
     do: error(:invalid_manifest, "Web manifest contains an invalid member")
+
+  defp validate_membership(:canonical, root, declared), do: exact_members(root, declared)
+  defp validate_membership(:deployment, _root, _declared), do: :ok
+
+  defp exact_members(root, declared) do
+    with {:ok, actual} <- members(root) do
+      actual_paths =
+        actual
+        |> Enum.reject(&(&1["path"] == "manifest.json"))
+        |> MapSet.new(& &1["path"])
+
+      declared_paths = MapSet.new(declared, & &1["path"])
+
+      if actual_paths == declared_paths,
+        do: :ok,
+        else: error(:invalid_manifest, "Web manifest does not list every generation member")
+    end
+  end
 
   defp referenced_members(root, members) do
     member_paths = MapSet.new(members, & &1["path"])

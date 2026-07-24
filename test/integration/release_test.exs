@@ -26,9 +26,18 @@ defmodule Rekindle.ReleaseTest do
     web_manifest_path = Path.join(web_generation_root, "manifest.json")
     web_manifest = read_json(web_manifest_path)
 
+    canonical_generation_root =
+      Path.join([root, ".rekindle/release/web", web_entry.generation])
+
+    canonical_manifest =
+      canonical_generation_root
+      |> Path.join("manifest.json")
+      |> read_json()
+
     assert web_entry.module == "./web/#{web_entry.generation}/app.js"
     assert File.regular?(Path.join(web_root, String.trim_leading(web_entry.module, "./")))
-    assert :ok = Rekindle.Web.Manifest.validate(web_generation_root, web_manifest)
+    assert web_manifest == canonical_manifest
+    assert :ok = Rekindle.Web.Manifest.validate(canonical_generation_root, canonical_manifest)
 
     digest_manifest = read_json(Path.join(root, "priv/static/cache_manifest.json"))
     digested_entry = digest_manifest["latest"]["rekindle/entry.js"]
@@ -37,7 +46,23 @@ defmodule Rekindle.ReleaseTest do
     assert File.read!(Path.join(root, "priv/static/#{digested_entry}")) ==
              File.read!(web_entry_path)
 
+    assert Enum.any?(digest_manifest["latest"], fn {logical, digested} ->
+             logical =~ "rekindle/web/#{web_entry.generation}/" and logical != digested
+           end)
+
     assert File.read!(Path.join(root, "priv/static/sibling.txt")) == "web-sibling"
+
+    assert {_output, 0} = mix(root, tools, ["assets.deploy"])
+
+    assert File.read!(tools.order) |> String.split("\n", trim: true) == [
+             "web-release",
+             "web-release"
+           ]
+
+    repeated_entry = read_entry(web_entry_path)
+    repeated_digest_manifest = read_json(Path.join(root, "priv/static/cache_manifest.json"))
+    assert repeated_entry == web_entry
+    assert is_binary(repeated_digest_manifest["latest"]["rekindle/entry.js"])
 
     selected_web = File.read!(web_entry_path)
     File.write!(tools.mode, "second")
@@ -269,7 +294,7 @@ defmodule Rekindle.ReleaseTest do
     environment = [
       {"PATH", tools.bin <> ":" <> System.fetch_env!("PATH")},
       {"XDG_CACHE_HOME", tools.cache},
-      {"MIX_DEPS_PATH", Path.expand("../../deps", __DIR__)},
+      {"MIX_DEPS_PATH", Path.join(root, "deps")},
       {"MIX_BUILD_PATH", Path.join(root, "_build")}
     ]
 

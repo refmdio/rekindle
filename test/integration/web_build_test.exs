@@ -150,6 +150,7 @@ defmodule Rekindle.WebBuildTest do
     entry = File.read!(entry_path)
     manifest_path = result.metadata.manifest
     manifest = File.read!(manifest_path)
+    artifact = File.read!(result.artifact)
 
     File.write!(manifest_path, Jason.encode!(%{"generation" => result.metadata.generation}))
 
@@ -159,6 +160,14 @@ defmodule Rekindle.WebBuildTest do
     assert File.read!(entry_path) == entry
 
     File.write!(manifest_path, manifest)
+    File.write!(result.artifact, "changed")
+
+    assert {:error, %Rekindle.Web.Error{kind: :member_hash}} =
+             build(root, tools, profile: :release)
+
+    assert File.read!(entry_path) == entry
+
+    File.write!(result.artifact, artifact)
     File.rm!(manifest_path)
 
     assert {:error, %Rekindle.Web.Error{kind: :manifest_read}} =
@@ -282,6 +291,46 @@ defmodule Rekindle.WebBuildTest do
     assert Path.wildcard(Path.join(root, ".rekindle/tmp/web/*")) == []
   end
 
+  test "rejects an unlisted member when reusing a development generation", %{root: root} do
+    tools = fake_tools(root, "success")
+    assert {:ok, result} = build(root, tools)
+
+    generation_root = Path.dirname(result.artifact)
+    manifest = generation_root |> Path.join("manifest.json") |> read_json()
+    selector_path = Path.join(root, ".rekindle/dev/web-current.json")
+    selected = File.read!(selector_path)
+
+    File.write!(Path.join(generation_root, "unlisted.txt"), "unlisted")
+
+    assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} =
+             Rekindle.Web.Manifest.validate(generation_root, manifest)
+
+    assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} = build(root, tools)
+    assert File.read!(selector_path) == selected
+  end
+
+  test "rejects an unlisted member when reusing a release build generation", %{root: root} do
+    tools = fake_tools(root, "success")
+    assert {:ok, result} = build(root, tools, profile: :release)
+
+    selector_path = Path.join(root, "priv/static/rekindle/entry.js")
+    selected = File.read!(selector_path)
+
+    generation_root =
+      Path.join([root, ".rekindle/release/web", result.metadata.generation])
+
+    manifest = generation_root |> Path.join("manifest.json") |> read_json()
+    File.write!(Path.join(generation_root, "unlisted.txt"), "unlisted")
+
+    assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} =
+             Rekindle.Web.Manifest.validate(generation_root, manifest)
+
+    assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} =
+             build(root, tools, profile: :release)
+
+    assert File.read!(selector_path) == selected
+  end
+
   test "reports incomplete and failed wasm-bindgen output", %{root: root} do
     tools = fake_tools(root, "missing-entry")
 
@@ -353,6 +402,14 @@ defmodule Rekindle.WebBuildTest do
     assert {:error, %Rekindle.Web.Error{kind: :member_hash}} = build(root, tools)
     assert File.read!(Path.join(root, ".rekindle/dev/web-current.json")) == selector
 
+    File.write!(result.artifact, original)
+    File.rm!(result.artifact)
+    File.ln_s!("snippets/helper.js", result.artifact)
+
+    assert {:error, %Rekindle.Web.Error{kind: :unsupported_member}} =
+             Rekindle.Web.Manifest.validate(generation_root, manifest)
+
+    File.rm!(result.artifact)
     File.write!(result.artifact, original)
     duplicate = update_in(manifest["members"], &(&1 ++ [hd(&1)]))
 
