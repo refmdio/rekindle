@@ -13,7 +13,7 @@ defmodule Rekindle.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       name: "Rekindle",
-      description: "Mix-first build system and development runtime for Rust UI applications.",
+      description: "Elixir build system and development runtime for Rust UI applications.",
       homepage_url: @docs_url,
       source_url: @source_url,
       docs: docs(),

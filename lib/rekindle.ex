@@ -2,7 +2,7 @@ defmodule Rekindle do
   use Supervisor
 
   @moduledoc """
-  Mix-first tooling for Rust UI applications in Elixir and Phoenix projects.
+  Elixir build system and development runtime for Rust UI applications.
   """
 
   alias Rekindle.Config
