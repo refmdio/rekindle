@@ -26,7 +26,7 @@ mix rekindle.build desktop --release
 The published layout is:
 
 ```text
-dist/rekindle/desktop/<rust-target>/<binary>-<sha256>
+dist/rekindle/desktop/<rust-target>/application-<sha256>
 dist/rekindle/desktop/<rust-target>/manifest.json
 ```
 

@@ -6,6 +6,8 @@ defmodule Rekindle.Desktop.Release do
   alias Rekindle.Build.Result
   alias Rekindle.Desktop.{Error, Manifest}
 
+  @release_executable ~r/\Aapplication-[0-9a-f]{64}\z/
+
   @spec publish(Rekindle.Config.t(), Result.t()) ::
           {:ok, Result.t()} | {:error, Error.t()}
   def publish(
@@ -38,8 +40,7 @@ defmodule Rekindle.Desktop.Release do
   defp publish_locked(root, source_root, source_manifest, result) do
     executable = content_name(source_manifest)
 
-    with {:ok, previous} <- previous_manifest(root),
-         {:ok, published?} <-
+    with {:ok, published?} <-
            publish_executable(
              Path.join(source_root, source_manifest["executable"]),
              Path.join(root, executable),
@@ -49,14 +50,13 @@ defmodule Rekindle.Desktop.Release do
         root,
         executable,
         source_manifest,
-        previous,
         result,
         published?
       )
     end
   end
 
-  defp prepare_publication(root, executable, source_manifest, previous, result, published?) do
+  defp prepare_publication(root, executable, source_manifest, result, published?) do
     expected_hash = source_manifest["sha256"]
 
     case Manifest.create(
@@ -68,7 +68,7 @@ defmodule Rekindle.Desktop.Release do
            source_manifest["integration"]
          ) do
       {:ok, %{"sha256" => hash} = manifest} when hash == expected_hash ->
-        finish_publication(root, manifest, previous, result, published?)
+        finish_publication(root, manifest, result, published?)
 
       {:ok, _manifest} ->
         rollback(root, executable, published?)
@@ -80,10 +80,10 @@ defmodule Rekindle.Desktop.Release do
     end
   end
 
-  defp finish_publication(root, manifest, previous, result, published?) do
+  defp finish_publication(root, manifest, result, published?) do
     case write_manifest(root, manifest) do
       :ok ->
-        cleanup(root, previous, manifest["executable"])
+        cleanup(root, manifest["executable"])
 
         {:ok,
          %{
@@ -97,7 +97,7 @@ defmodule Rekindle.Desktop.Release do
          }}
 
       {:error, %Error{} = error} ->
-        if published?, do: remove(Path.join(root, manifest["executable"]))
+        if published?, do: remove_regular(Path.join(root, manifest["executable"]))
         {:error, error}
     end
   end
@@ -203,32 +203,22 @@ defmodule Rekindle.Desktop.Release do
     end
   end
 
-  defp previous_manifest(root) do
-    path = Path.join(root, "manifest.json")
-
-    case read_manifest(path) do
-      {:ok, manifest} ->
-        case Manifest.validate(root, manifest) do
-          :ok -> {:ok, manifest}
-          {:error, %Error{}} -> {:ok, nil}
-        end
-
-      {:error, %Error{kind: :manifest_read}} ->
-        {:ok, nil}
-
-      {:error, %Error{}} ->
-        {:ok, nil}
-    end
+  defp cleanup(root, selected) do
+    remove_unreferenced(root, selected)
+    remove_temporaries(root)
   end
 
-  defp cleanup(root, nil, _selected), do: remove_temporaries(root)
+  defp remove_unreferenced(root, selected) do
+    case File.ls(root) do
+      {:ok, names} ->
+        names
+        |> Enum.filter(&Regex.match?(@release_executable, &1))
+        |> Enum.reject(&(&1 == selected))
+        |> Enum.each(fn name -> remove_regular(Path.join(root, name)) end)
 
-  defp cleanup(root, previous, selected) do
-    if previous["executable"] != selected do
-      remove(Path.join(root, previous["executable"]))
+      _error ->
+        :ok
     end
-
-    remove_temporaries(root)
   end
 
   defp remove_temporaries(root) do
@@ -236,21 +226,17 @@ defmodule Rekindle.Desktop.Release do
       {:ok, names} ->
         names
         |> Enum.filter(&String.starts_with?(&1, ".tmp-"))
-        |> Enum.each(fn name -> remove(Path.join(root, name)) end)
+        |> Enum.each(fn name -> remove_regular(Path.join(root, name)) end)
 
       _error ->
         :ok
     end
   end
 
-  defp rollback(root, executable, true), do: remove(Path.join(root, executable))
+  defp rollback(root, executable, true), do: remove_regular(Path.join(root, executable))
   defp rollback(_root, _executable, false), do: :ok
 
-  defp content_name(manifest) do
-    extension = Path.extname(manifest["executable"])
-    basename = Path.basename(manifest["executable"], extension)
-    basename <> "-" <> manifest["sha256"] <> extension
-  end
+  defp content_name(manifest), do: "application-" <> manifest["sha256"]
 
   defp read_manifest(path) do
     with {:ok, contents} <- File.read(path),
@@ -275,10 +261,22 @@ defmodule Rekindle.Desktop.Release do
     end
   end
 
-  defp remove(path) do
-    case File.rm_rf(path) do
-      {:ok, _removed} -> :ok
-      {:error, reason, file} -> Logger.warning("could not remove #{file}: #{inspect(reason)}")
+  defp remove_regular(path) do
+    case File.lstat(path) do
+      {:ok, %{type: :regular}} ->
+        case File.rm(path) do
+          :ok -> :ok
+          {:error, reason} -> Logger.warning("could not remove #{path}: #{inspect(reason)}")
+        end
+
+      {:ok, _stat} ->
+        :ok
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("could not inspect #{path}: #{inspect(reason)}")
     end
   end
 

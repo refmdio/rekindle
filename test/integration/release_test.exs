@@ -73,7 +73,7 @@ defmodule Rekindle.ReleaseTest do
     File.write!(tools.mode, "third")
     assert {_output, 0} = mix(root, tools, ["rekindle.build", "desktop"])
     candidate = desktop_candidate(root, tools.target, "third")
-    staged = Path.join(desktop_root, "desktop-#{candidate.manifest["sha256"]}")
+    staged = Path.join(desktop_root, "application-#{candidate.manifest["sha256"]}")
     File.cp!(candidate.artifact, staged)
     File.chmod!(staged, 0o755)
 

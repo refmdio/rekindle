@@ -75,11 +75,17 @@ defmodule Rekindle.DesktopBuildTest do
     File.mkdir_p!(target_root)
     File.write!(Path.join(target_root, "keep.txt"), "application-owned")
     File.write!(Path.join(target_root, ".tmp-stale"), "incomplete")
+    orphan = Path.join(target_root, "application-#{String.duplicate("a", 64)}")
+    owned_directory = Path.join(target_root, "application-#{String.duplicate("b", 64)}")
+    owned_symlink = Path.join(target_root, "application-#{String.duplicate("c", 64)}")
+    File.write!(orphan, "unreferenced")
+    File.mkdir!(owned_directory)
+    File.ln_s!("keep.txt", owned_symlink)
 
     assert {:ok, result} = build(root, tools, profile: :release)
     assert result.profile == :release
     assert Path.dirname(result.artifact) == target_root
-    assert Path.basename(result.artifact) == "desktop-#{sha256(File.read!(result.artifact))}"
+    assert Path.basename(result.artifact) == "application-#{sha256(File.read!(result.artifact))}"
     assert executable?(result.artifact)
     refute File.exists?(tools.launched)
 
@@ -93,6 +99,9 @@ defmodule Rekindle.DesktopBuildTest do
     assert :ok = Rekindle.Desktop.Manifest.validate(target_root, manifest)
     assert File.read!(Path.join(target_root, "keep.txt")) == "application-owned"
     refute File.exists?(Path.join(target_root, ".tmp-stale"))
+    refute File.exists?(orphan)
+    assert File.dir?(owned_directory)
+    assert match?({:ok, %{type: :symlink}}, File.lstat(owned_symlink))
 
     previous = result.artifact
     tools = fake_tools(root, executable?: true, marker: "second")
@@ -144,7 +153,9 @@ defmodule Rekindle.DesktopBuildTest do
 
     assert release_root
            |> File.ls!()
-           |> Enum.filter(&String.starts_with?(&1, "desktop-")) == [Path.basename(first.artifact)]
+           |> Enum.filter(&String.starts_with?(&1, "application-")) == [
+             Path.basename(first.artifact)
+           ]
   end
 
   test "keeps the selected manifest unchanged when replacement is not writable", %{root: root} do
@@ -158,7 +169,7 @@ defmodule Rekindle.DesktopBuildTest do
     tools = fake_tools(root, executable?: true, marker: "second")
     assert {:ok, candidate} = build(root, tools)
     contents = File.read!(candidate.artifact)
-    staged = Path.join(release_root, "desktop-#{sha256(contents)}")
+    staged = Path.join(release_root, "application-#{sha256(contents)}")
     File.cp!(candidate.artifact, staged)
     File.chmod!(staged, 0o755)
 
@@ -222,7 +233,9 @@ defmodule Rekindle.DesktopBuildTest do
 
     assert release_root
            |> File.ls!()
-           |> Enum.filter(&String.starts_with?(&1, "desktop-")) == [manifest["executable"]]
+           |> Enum.filter(&String.starts_with?(&1, "application-")) == [
+             manifest["executable"]
+           ]
   end
 
   test "rejects changed bytes in an existing generation", %{root: root} do
