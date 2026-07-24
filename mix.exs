@@ -32,6 +32,7 @@ defmodule Rekindle.MixProject do
       {:muontrap, "~> 1.8"},
       {:plug, "~> 1.16"},
       {:igniter, "~> 0.8", optional: true},
+      {:phoenix, "~> 1.7", only: :test},
       {:ex_doc, "~> 0.40.3", only: :dev, runtime: false}
     ]
   end
