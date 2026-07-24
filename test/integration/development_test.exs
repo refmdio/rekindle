@@ -461,6 +461,65 @@ defmodule Rekindle.DevelopmentTest do
     assert read_marker(root)["generation"] == first.metadata.generation
   end
 
+  @tag capture_log: true
+  test "restores the retained desktop process after the launcher restarts", %{root: root} do
+    supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+    launcher = start_launcher(root, supervisor)
+    retained = desktop_result(root, "persisted", :running)
+    broken = desktop_result(root, "broken-after-restart", :exit)
+
+    DesktopDevelopment.replace(launcher, retained)
+    assert_receive {DesktopDevelopment, {:ready, ^retained}}, 1_000
+    %{current: %{pid: original_pid}} = DesktopDevelopment.status(launcher)
+
+    stop_supervised(DesktopDevelopment)
+    assert_until(fn -> not Process.alive?(original_pid) end)
+
+    restarted = start_launcher(root, supervisor)
+    DesktopDevelopment.replace(restarted, broken)
+
+    assert_receive {DesktopDevelopment, {:error, %Rekindle.Desktop.Error{kind: :readiness}}},
+                   1_000
+
+    assert_receive {DesktopDevelopment, {:ready, ^retained}}, 1_000
+
+    assert %{current: %{pid: fallback_pid}, candidate: nil} =
+             DesktopDevelopment.status(restarted)
+
+    assert Process.alive?(fallback_pid)
+    assert read_marker(root)["generation"] == retained.metadata.generation
+  end
+
+  @tag capture_log: true
+  test "does not follow an invalid retained desktop manifest path", %{root: root} do
+    supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+    retained = desktop_result(root, "outside-marker", :running)
+    broken = desktop_result(root, "invalid-marker-replacement", :exit)
+    marker = Path.join(root, ".rekindle/dev/desktop-last-running.json")
+    File.mkdir_p!(Path.dirname(marker))
+
+    File.write!(
+      marker,
+      Jason.encode!(%{
+        "generation" => retained.metadata.generation,
+        "target" => retained.metadata.rust_target,
+        "manifest" => Path.relative_to(retained.metadata.manifest, Path.dirname(root))
+      })
+    )
+
+    launcher = start_launcher(root, supervisor)
+    DesktopDevelopment.replace(launcher, broken)
+
+    assert_receive {DesktopDevelopment, {:error, %Rekindle.Desktop.Error{kind: :readiness}}},
+                   1_000
+
+    assert_until(fn ->
+      DesktopDevelopment.status(launcher) == %{current: nil, candidate: nil}
+    end)
+
+    refute_receive {DesktopDevelopment, {:ready, ^retained}}, 200
+  end
+
   test "logs desktop failures without a notification process", %{root: root} do
     supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
 

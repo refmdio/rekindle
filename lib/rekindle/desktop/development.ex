@@ -9,6 +9,8 @@ defmodule Rekindle.Desktop.Development do
   alias Rekindle.Development.Cleanup
   alias Rekindle.Desktop.{Error, Manifest}
 
+  @generation ~r/\A[0-9a-f]{64}\z/
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(options) do
     GenServer.start_link(__MODULE__, options, Keyword.take(options, [:name]))
@@ -26,13 +28,16 @@ defmodule Rekindle.Desktop.Development do
   def init(options) do
     Process.flag(:trap_exit, true)
 
+    root = options |> Keyword.get(:project_root, File.cwd!()) |> Path.expand()
+
     {:ok,
      %{
-       root: options |> Keyword.get(:project_root, File.cwd!()) |> Path.expand(),
+       root: root,
        supervisor: Keyword.fetch!(options, :supervisor),
        readiness: Keyword.get(options, :readiness, 300),
        notify: Keyword.get(options, :notify),
        process_options: Keyword.get(options, :process_options, []),
+       retained: load_retained(root),
        current: nil,
        candidate: nil
      }}
@@ -73,7 +78,7 @@ defmodule Rekindle.Desktop.Development do
         :ok ->
           Cleanup.desktop(state.root, candidate.result)
           notify(state.notify, {:ready, candidate.result})
-          {:noreply, %{state | current: candidate, candidate: nil}}
+          {:noreply, %{state | retained: candidate.result, current: candidate, candidate: nil}}
 
         {:error, error} ->
           {:noreply, reject_candidate(state, error)}
@@ -124,7 +129,7 @@ defmodule Rekindle.Desktop.Development do
   defp launch(state, result) do
     case validate(result) do
       :ok ->
-        fallback = retained_result(state)
+        fallback = state.retained
         discard_candidate(state)
         stop(state.supervisor, state.current)
 
@@ -180,11 +185,6 @@ defmodule Rekindle.Desktop.Development do
     cleanup_rejected(state, state.candidate.result)
   end
 
-  defp retained_result(%{candidate: %{rollback?: true, result: result}}), do: result
-  defp retained_result(%{candidate: %{fallback: fallback}}), do: fallback
-  defp retained_result(%{current: %{result: result}}), do: result
-  defp retained_result(_state), do: nil
-
   defp maybe_rollback(state, nil, _rollback?), do: state
   defp maybe_rollback(state, _fallback, true), do: state
 
@@ -194,7 +194,7 @@ defmodule Rekindle.Desktop.Development do
 
   defp cleanup_rejected(state, result) do
     selected =
-      case retained_result(state) do
+      case state.retained do
         %{metadata: %{generation: generation}} -> generation
         nil -> result.metadata.generation
       end
@@ -252,6 +252,42 @@ defmodule Rekindle.Desktop.Development do
 
   defp validate(_result),
     do: {:error, Error.new(:invalid_result, "expected a desktop development build result")}
+
+  defp load_retained(root) do
+    directory = Path.join([root, ".rekindle", "dev"])
+    marker_path = Path.join(directory, "desktop-last-running.json")
+
+    with {:ok, contents} <- File.read(marker_path),
+         {:ok,
+          %{
+            "generation" => generation,
+            "target" => target,
+            "manifest" => relative_manifest
+          }} <- Jason.decode(contents),
+         true <- is_binary(generation) and Regex.match?(@generation, generation),
+         true <- is_binary(target) and Path.basename(target) == target,
+         expected = Path.join(["desktop", target, generation, "manifest.json"]),
+         true <- relative_manifest == expected,
+         manifest_path = Path.join(directory, relative_manifest),
+         {:ok, manifest_contents} <- File.read(manifest_path),
+         {:ok, manifest} <- Jason.decode(manifest_contents),
+         true <- manifest["generation"] == generation,
+         true <- manifest["target"] == target,
+         :ok <- Manifest.validate(Path.dirname(manifest_path), manifest) do
+      %Result{
+        target: :desktop,
+        profile: :dev,
+        artifact: Path.join(Path.dirname(manifest_path), manifest["executable"]),
+        metadata: %{
+          generation: generation,
+          manifest: manifest_path,
+          rust_target: target
+        }
+      }
+    else
+      _error -> nil
+    end
+  end
 
   defp write_marker(root, result) do
     directory = Path.join([root, ".rekindle", "dev"])
