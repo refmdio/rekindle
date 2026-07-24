@@ -96,7 +96,7 @@ defmodule Rekindle.DesktopBuildTest do
     assert manifest["integration"] == "gpui"
     assert manifest["sha256"] == sha256(File.read!(result.artifact))
     assert manifest["executable"] == Path.basename(result.artifact)
-    assert :ok = Rekindle.Desktop.Manifest.validate(target_root, manifest)
+    assert :ok = Rekindle.Desktop.Manifest.validate_deployment(target_root, manifest)
     assert File.read!(Path.join(target_root, "keep.txt")) == "application-owned"
     refute File.exists?(Path.join(target_root, ".tmp-stale"))
     refute File.exists?(orphan)
@@ -242,7 +242,7 @@ defmodule Rekindle.DesktopBuildTest do
     assert {:ok, %Rekindle.Build.Result{}} = read_process_result(second_done)
 
     manifest = release_root |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
-    assert :ok = Rekindle.Desktop.Manifest.validate(release_root, manifest)
+    assert :ok = Rekindle.Desktop.Manifest.validate_deployment(release_root, manifest)
     assert File.regular?(Path.join(release_root, manifest["executable"]))
 
     assert release_root
@@ -263,6 +263,47 @@ defmodule Rekindle.DesktopBuildTest do
     assert File.read!(result.artifact) == "changed"
     refute File.exists?(Path.join(root, ".rekindle/dev/desktop-last-running.json"))
     assert Path.wildcard(Path.join(root, ".rekindle/tmp/desktop/*")) == []
+  end
+
+  test "rejects noncanonical desktop generation inventory during reuse", %{root: root} do
+    tools = fake_tools(root, executable?: true)
+    assert {:ok, result} = build(root, tools)
+
+    generation_root = Path.dirname(result.artifact)
+    manifest = result.metadata.manifest |> File.read!() |> Jason.decode!()
+    linked_root = Path.join(root, "linked-desktop-generation")
+    File.ln_s!(generation_root, linked_root)
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}} =
+             Rekindle.Desktop.Manifest.validate(linked_root, manifest)
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}} =
+             Rekindle.Desktop.Manifest.validate_deployment(linked_root, manifest)
+
+    extra_file = Path.join(generation_root, "extra")
+    File.write!(extra_file, "application-owned")
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}} =
+             Rekindle.Desktop.Manifest.validate(generation_root, manifest)
+
+    assert :ok = Rekindle.Desktop.Manifest.validate_deployment(generation_root, manifest)
+    File.rm!(extra_file)
+
+    extra_directory = Path.join(generation_root, "extra-directory")
+    File.mkdir!(extra_directory)
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}} =
+             Rekindle.Desktop.Manifest.validate(generation_root, manifest)
+
+    File.rmdir!(extra_directory)
+    File.ln_s!(result.artifact, Path.join(generation_root, "extra-link"))
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}} =
+             Rekindle.Desktop.Manifest.validate(generation_root, manifest)
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}} = build(root, tools)
+    assert File.regular?(result.artifact)
+    assert executable?(result.artifact)
   end
 
   test "rejects non-executable Cargo output", %{root: root} do
@@ -342,7 +383,34 @@ defmodule Rekindle.DesktopBuildTest do
     assert :ok =
              release_manifest
              |> Jason.decode!()
-             |> then(&Rekindle.Desktop.Manifest.validate(release_root, &1))
+             |> then(&Rekindle.Desktop.Manifest.validate_deployment(release_root, &1))
+  end
+
+  test "rejects a noncanonical desktop release source without replacing output", %{root: root} do
+    selected_tools = fake_tools(root, executable?: true, marker: "selected")
+    assert {:ok, selected} = build(root, selected_tools, profile: :release)
+    release_root = Path.dirname(selected.artifact)
+    manifest_path = selected.metadata.manifest
+    selected_manifest = File.read!(manifest_path)
+
+    candidate_tools = fake_tools(root, executable?: true, marker: "candidate")
+    assert {:ok, candidate} = build(root, candidate_tools)
+    candidate_root = Path.dirname(candidate.artifact)
+    File.ln_s!(candidate.artifact, Path.join(candidate_root, "extra-link"))
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_desktop_build_test, project_root: root)
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}} =
+             Rekindle.Desktop.Release.publish(project, %{candidate | profile: :release})
+
+    assert File.read!(manifest_path) == selected_manifest
+    assert File.regular?(selected.artifact)
+
+    assert :ok =
+             selected_manifest
+             |> Jason.decode!()
+             |> then(&Rekindle.Desktop.Manifest.validate_deployment(release_root, &1))
   end
 
   defp build(root, tools, options \\ []) do

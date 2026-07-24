@@ -490,6 +490,31 @@ defmodule Rekindle.DevelopmentTest do
   end
 
   @tag capture_log: true
+  test "keeps the running desktop process when replacement inventory is invalid", %{root: root} do
+    supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+    launcher = start_launcher(root, supervisor)
+    stable = desktop_result(root, "stable-inventory", :running)
+    invalid = desktop_result(root, "invalid-inventory", :running)
+
+    DesktopDevelopment.replace(launcher, stable)
+    assert_receive {DesktopDevelopment, {:ready, ^stable}}, 1_000
+    %{current: %{pid: stable_pid}} = DesktopDevelopment.status(launcher)
+
+    File.ln_s!(invalid.artifact, Path.join(Path.dirname(invalid.artifact), "extra-link"))
+    DesktopDevelopment.replace(launcher, invalid)
+
+    assert_receive {DesktopDevelopment,
+                    {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}}},
+                   1_000
+
+    assert %{current: %{pid: ^stable_pid}, candidate: nil} =
+             DesktopDevelopment.status(launcher)
+
+    assert Process.alive?(stable_pid)
+    assert read_marker(root)["generation"] == stable.metadata.generation
+  end
+
+  @tag capture_log: true
   test "keeps the running desktop process when its replacement exits early", %{root: root} do
     supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
     launcher = start_launcher(root, supervisor)

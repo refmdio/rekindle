@@ -184,7 +184,7 @@ defmodule Rekindle.Desktop.Release do
     with {:ok, temporary} <- temporary_file(root, ".tmp-manifest-", :manifest_write) do
       try do
         with :ok <- File.write(temporary, Jason.encode!(manifest)),
-             :ok <- Manifest.validate(root, manifest),
+             :ok <- Manifest.validate_deployment(root, manifest),
              :ok <- File.rename(temporary, destination) do
           :ok
         else
