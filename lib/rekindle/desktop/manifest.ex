@@ -26,19 +26,23 @@ defmodule Rekindle.Desktop.Manifest do
   end
 
   @spec validate(Path.t(), map()) :: :ok | {:error, Error.t()}
-  def validate(root, %{
-        "version" => @version,
-        "generation" => generation,
-        "target" => target,
-        "package" => package,
-        "binary" => binary,
-        "integration" => integration,
-        "executable" => executable,
-        "sha256" => expected
-      })
-      when is_binary(generation) and is_binary(target) and target != "" and is_binary(package) and
-             package != "" and is_binary(binary) and binary != "" and
-             integration in ["gpui", "egui", "slint"] and is_binary(expected) do
+  def validate(
+        root,
+        %{
+          "version" => @version,
+          "generation" => generation,
+          "target" => target,
+          "package" => package,
+          "binary" => binary,
+          "integration" => integration,
+          "executable" => executable,
+          "sha256" => expected
+        } = manifest
+      )
+      when map_size(manifest) == 8 and is_binary(generation) and is_binary(target) and
+             target != "" and is_binary(package) and package != "" and is_binary(binary) and
+             binary != "" and integration in ["gpui", "egui", "slint"] and
+             is_binary(expected) do
     fields = %{
       "target" => target,
       "package" => package,

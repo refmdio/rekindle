@@ -298,6 +298,53 @@ defmodule Rekindle.DesktopBuildTest do
              Rekindle.Desktop.Manifest.validate(generation_root, escaping)
   end
 
+  test "rejects noncanonical desktop manifest fields without replacing prior output", %{
+    root: root
+  } do
+    selected_tools = fake_tools(root, executable?: true, marker: "selected")
+    assert {:ok, selected} = build(root, selected_tools, profile: :release)
+    release_root = Path.dirname(selected.artifact)
+    release_manifest_path = selected.metadata.manifest
+    release_manifest = File.read!(release_manifest_path)
+
+    candidate_tools = fake_tools(root, executable?: true, marker: "candidate")
+    assert {:ok, candidate} = build(root, candidate_tools)
+    generation_root = Path.dirname(candidate.artifact)
+    manifest_path = candidate.metadata.manifest
+    manifest = manifest_path |> File.read!() |> Jason.decode!()
+    unknown = Map.put(manifest, "metadata", %{"ignored" => true})
+
+    for invalid <- [
+          unknown,
+          Map.delete(manifest, "target"),
+          Map.put(manifest, "sha256", 42)
+        ] do
+      assert {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}} =
+               Rekindle.Desktop.Manifest.validate(generation_root, invalid)
+    end
+
+    File.write!(manifest_path, Jason.encode!(unknown))
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}} =
+             build(root, candidate_tools)
+
+    assert File.regular?(candidate.artifact)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_desktop_build_test, project_root: root)
+
+    assert {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}} =
+             Rekindle.Desktop.Release.publish(project, %{candidate | profile: :release})
+
+    assert File.read!(release_manifest_path) == release_manifest
+    assert File.regular?(selected.artifact)
+
+    assert :ok =
+             release_manifest
+             |> Jason.decode!()
+             |> then(&Rekindle.Desktop.Manifest.validate(release_root, &1))
+  end
+
   defp build(root, tools, options \\ []) do
     Rekindle.build(
       :desktop,
