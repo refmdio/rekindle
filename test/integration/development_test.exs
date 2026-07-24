@@ -723,7 +723,7 @@ defmodule Rekindle.DevelopmentTest do
 
   test "cleans abandoned startup output while preserving selected generations", %{root: root} do
     temporary = Path.join([root, ".rekindle", "tmp", "web", "abandoned"])
-    marker = Path.join([root, ".rekindle", "dev", "web-current.json.tmp-abandoned"])
+    marker = Path.join([root, ".rekindle", "dev", ".tmp-web-current-abandoned"])
     File.mkdir_p!(temporary)
     File.write!(Path.join(temporary, "partial"), "partial")
     File.mkdir_p!(Path.dirname(marker))
@@ -746,6 +746,44 @@ defmodule Rekindle.DevelopmentTest do
     refute File.exists?(marker)
     assert File.dir?(Path.join(web_root, selected))
     assert length(Path.wildcard(Path.join(web_root, String.duplicate("?", 64)))) == 2
+  end
+
+  test "startup cleanup waits for live staging in independent VMs", %{root: root} do
+    {:ok, project} =
+      Rekindle.Config.load(:rekindle_development_test, project_root: root)
+
+    for target <- [:web, :desktop] do
+      staging = Path.join([root, ".rekindle", "tmp", Atom.to_string(target), "active"])
+      ready = Path.join(root, "#{target}-staging.ready")
+      release = Path.join(root, "#{target}-staging.release")
+      port = staging_process(root, target, staging, ready, release)
+
+      on_exit(fn ->
+        File.write(release, "release")
+        if Port.info(port), do: Port.close(port)
+      end)
+
+      assert_until(fn -> File.regular?(ready) end, 200)
+
+      other = if target == :web, do: :desktop, else: :web
+
+      assert :independent =
+               Rekindle.Publication.with_lock(
+                 root,
+                 {:staging, other},
+                 fn -> :independent end,
+                 50
+               )
+
+      cleanup = Task.async(fn -> Rekindle.Development.Cleanup.startup(project) end)
+      assert Task.yield(cleanup, 100) == nil
+      assert File.dir?(staging)
+
+      File.write!(release, "release")
+      assert_receive {^port, {:exit_status, 0}}, 5_000
+      assert :ok = Task.await(cleanup, 5_000)
+      refute File.exists?(staging)
+    end
   end
 
   defp start_builder(root, build, options \\ []) do
@@ -961,6 +999,54 @@ defmodule Rekindle.DevelopmentTest do
         rust_target: target
       }
     }
+  end
+
+  defp staging_process(root, target, staging, ready, release) do
+    elixir = System.find_executable("elixir") || flunk("elixir executable is required")
+
+    arguments =
+      {root, target, staging, ready, release}
+      |> :erlang.term_to_binary()
+      |> Base.encode64()
+
+    expression = """
+    {root, target, staging, ready, release} =
+      #{inspect(arguments)}
+      |> Base.decode64!()
+      |> :erlang.binary_to_term()
+
+    Rekindle.Publication.with_lock(root, {:staging, target}, fn ->
+      File.mkdir_p!(staging)
+      File.write!(ready, "ready")
+
+      wait = fn wait ->
+        if File.regular?(release) do
+          :ok
+        else
+          Process.sleep(10)
+          wait.(wait)
+        end
+      end
+
+      wait.(wait)
+    end)
+    """
+
+    code_paths =
+      Mix.Project.build_path()
+      |> Path.join("lib/*/ebin")
+      |> Path.wildcard()
+      |> Enum.flat_map(&[~c"-pa", String.to_charlist(&1)])
+
+    Port.open(
+      {:spawn_executable, String.to_charlist(elixir)},
+      [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        args: code_paths ++ [~c"-e", String.to_charlist(expression)]
+      ]
+    )
   end
 
   defp read_marker(root) do

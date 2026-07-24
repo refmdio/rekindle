@@ -8,6 +8,12 @@ defmodule Rekindle.Desktop.Builder do
   @spec build(Rekindle.Config.t(), Rekindle.Config.Target.t(), :dev | :release, keyword()) ::
           {:ok, Result.t()} | {:error, Rekindle.Cargo.Error.t() | Error.t()}
   def build(project, target, profile, options) do
+    with_staging_lock(project, fn ->
+      build_staged(project, target, profile, options)
+    end)
+  end
+
+  defp build_staged(project, target, profile, options) do
     with {:ok, temporary} <- temporary_directory(project) do
       try do
         with {:ok, cargo} <-
@@ -48,6 +54,16 @@ defmodule Rekindle.Desktop.Builder do
       after
         File.rm_rf(temporary)
       end
+    end
+  end
+
+  defp with_staging_lock(project, function) do
+    case Publication.with_lock(project.root, {:staging, :desktop}, function) do
+      {:error, {:publication_lock, reason}} ->
+        error(:publication_lock, "cannot serialize desktop staging: #{inspect(reason)}")
+
+      result ->
+        result
     end
   end
 

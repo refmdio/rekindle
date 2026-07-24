@@ -12,6 +12,12 @@ defmodule Rekindle.Web.Builder do
           {:ok, Result.t()}
           | {:error, Rekindle.Cargo.Error.t() | Rekindle.Toolchain.Error.t() | Error.t()}
   def build(project, target, profile, options) do
+    with_lock(project, {:staging, :web}, fn ->
+      build_staged(project, target, profile, options)
+    end)
+  end
+
+  defp build_staged(project, target, profile, options) do
     with {:ok, temporary} <- temporary_directory(project) do
       try do
         with {:ok, cargo} <-

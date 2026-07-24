@@ -3,16 +3,22 @@ defmodule Rekindle.Development.Cleanup do
 
   require Logger
 
+  alias Rekindle.Publication
+
   @retained 2
   @generation ~r/\A[0-9a-f]{64}\z/
 
   @spec startup(Rekindle.Config.t()) :: :ok
   def startup(project) do
-    remove_owned_directory(Path.join([project.root, ".rekindle", "tmp"]))
-    remove_temporary_markers(project.root)
+    cleanup_staging(project, :web)
+    cleanup_staging(project, :desktop)
+    remove_empty_tmp_root(project.root)
 
-    web_selected = selected_web(project.root)
-    prune(Path.join([project.root, ".rekindle", "dev", "web"]), web_selected)
+    with_cleanup_lock(project, {:web, :dev}, fn ->
+      remove_temporary_markers(project.root)
+      web_selected = selected_web(project.root)
+      prune(Path.join([project.root, ".rekindle", "dev", "web"]), web_selected)
+    end)
 
     desktop_root = Path.join([project.root, ".rekindle", "dev", "desktop"])
     desktop_selected = selected_desktop(project.root)
@@ -26,6 +32,25 @@ defmodule Rekindle.Development.Cleanup do
     end)
 
     :ok
+  end
+
+  defp cleanup_staging(project, target) do
+    with_cleanup_lock(project, {:staging, target}, fn ->
+      remove_owned_directory(
+        Path.join([project.root, ".rekindle", "tmp", Atom.to_string(target)])
+      )
+    end)
+  end
+
+  defp with_cleanup_lock(project, key, function) do
+    case Publication.with_lock(project.root, key, function) do
+      {:error, {:publication_lock, reason}} ->
+        Logger.warning("could not clean #{inspect(key)} state: #{inspect(reason)}")
+        :ok
+
+      result ->
+        result
+    end
   end
 
   @spec discard(Rekindle.Config.t(), Rekindle.Build.Result.t()) :: :ok
@@ -184,11 +209,26 @@ defmodule Rekindle.Development.Cleanup do
   end
 
   defp remove_temporary_markers(root) do
-    root
-    |> Path.join(".rekindle/dev/*.tmp-*")
-    |> Path.wildcard()
-    |> Enum.each(fn path ->
-      if match?({:ok, %{type: :regular}}, File.lstat(path)), do: File.rm(path)
-    end)
+    directory = Path.join([root, ".rekindle", "dev"])
+
+    case File.ls(directory) do
+      {:ok, names} ->
+        names
+        |> Enum.filter(&String.starts_with?(&1, ".tmp-web-current-"))
+        |> Enum.each(fn name ->
+          path = Path.join(directory, name)
+          if match?({:ok, %{type: :regular}}, File.lstat(path)), do: File.rm(path)
+        end)
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp remove_empty_tmp_root(root) do
+    case File.rmdir(Path.join([root, ".rekindle", "tmp"])) do
+      :ok -> :ok
+      {:error, _reason} -> :ok
+    end
   end
 end
