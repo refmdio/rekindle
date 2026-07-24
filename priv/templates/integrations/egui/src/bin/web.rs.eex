@@ -15,7 +15,7 @@ pub fn start() {
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(|_| Ok(Box::new(<%= @crate_name %>::RekindleApp))),
+                Box::new(|_| Ok(Box::new(<%= @crate_name %>::HelloWorld))),
             )
             .await
             .expect("failed to start the application");

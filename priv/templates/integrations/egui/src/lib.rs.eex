@@ -1,12 +1,9 @@
-pub struct RekindleApp;
+pub struct HelloWorld;
 
-impl eframe::App for RekindleApp {
+impl eframe::App for HelloWorld {
     fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
         eframe::egui::CentralPanel::default().show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.heading("Rekindle");
-                ui.label("Edit client/src/lib.rs to build your application.");
-            });
+            ui.heading("Hello World!");
         });
     }
 }

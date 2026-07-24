@@ -40,6 +40,7 @@ defmodule Rekindle.IntegrationsTest do
       refute both["Cargo.toml"] =~ ~r/^rekindle(?:_|-|\s*=)/m
       refute both["src/bin/web.rs"] =~ "rekindleReady"
       refute both["src/bin/web.rs"] =~ "rekindleStatus"
+      refute Enum.any?(both, fn {_path, source} -> source =~ "Rekindle" end)
       assert both["src/lib.rs"] != ""
       assert both["src/bin/web.rs"] =~ "sample_client"
       assert both["src/bin/desktop.rs"] =~ "sample_client"
@@ -184,6 +185,8 @@ defmodule Rekindle.IntegrationsTest do
     assert files["src/bin/web.rs"] =~ "gpui_platform::application().run_embedded"
     refute files["src/bin/web.rs"] =~ "single_threaded_web"
     assert files["src/bin/desktop.rs"] =~ "gpui_platform::application().run"
+    assert files["src/lib.rs"] =~ ~S|format!("Hello, {}!", &self.text)|
+    assert files["src/lib.rs"] =~ "gpui::red()"
   end
 
   defp assert_framework_entrypoints(:egui, files) do
@@ -193,6 +196,7 @@ defmodule Rekindle.IntegrationsTest do
     assert files["src/bin/web.rs"] =~ "use wasm_bindgen::JsCast;"
     assert files["src/bin/web.rs"] =~ "eframe::WebRunner::new()"
     assert files["src/bin/desktop.rs"] =~ "eframe::run_native("
+    assert files["src/lib.rs"] =~ ~S|ui.heading("Hello World!");|
   end
 
   defp assert_framework_entrypoints(:slint, files) do
@@ -202,6 +206,8 @@ defmodule Rekindle.IntegrationsTest do
     assert files["src/bin/web.rs"] =~ "use slint::ComponentHandle;"
     assert files["src/bin/web.rs"] =~ ".run()"
     assert files["src/bin/desktop.rs"] =~ "::run()"
+    assert files["src/lib.rs"] =~ ~s(text: "hello world";)
+    assert files["src/lib.rs"] =~ "color: green;"
   end
 
   defp cargo_check!(root, target, triple) do

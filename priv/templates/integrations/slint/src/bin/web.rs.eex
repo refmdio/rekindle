@@ -4,7 +4,7 @@ use slint::ComponentHandle;
 
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() {
-    <%= @crate_name %>::RekindleApp::new()
+    <%= @crate_name %>::HelloWorld::new()
         .expect("failed to create the application")
         .run()
         .expect("failed to run the application");
