@@ -21,7 +21,8 @@ defmodule Rekindle.Desktop.Builder do
                executable,
                cargo.target,
                cargo.package,
-               cargo.binary
+               cargo.binary,
+               project.integration
              ),
            :ok <- write_manifest(temporary, manifest),
            {:ok, generation} <- publish(project, profile, temporary, manifest),

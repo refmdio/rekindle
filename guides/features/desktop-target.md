@@ -24,12 +24,12 @@ mix rekindle.build desktop --release
 The published layout is:
 
 ```text
-dist/rekindle/<rust-target>/<binary>-<sha256>
-dist/rekindle/<rust-target>/manifest.json
+dist/rekindle/desktop/<rust-target>/<binary>-<sha256>
+dist/rekindle/desktop/<rust-target>/manifest.json
 ```
 
-The manifest identifies the executable, Rust target, Cargo package, binary, and
-content hash. A release build packages the executable but never launches it.
+The manifest identifies the executable, Rust target, selected integration,
+Cargo package, binary, and content hash. A release build packages the executable but never launches it.
 Use the manifest from an application packager, installer, or deployment
 pipeline.
 

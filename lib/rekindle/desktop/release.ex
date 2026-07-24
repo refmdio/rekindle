@@ -13,12 +13,15 @@ defmodule Rekindle.Desktop.Release do
         %Result{target: :desktop, profile: :release, metadata: metadata} = result
       ) do
     source_root = Path.dirname(metadata.manifest)
-    destination_root = Path.join([project.root, "dist", "rekindle", metadata.rust_target])
+
+    destination_root =
+      Path.join([project.root, "dist", "rekindle", "desktop", metadata.rust_target])
 
     with {:ok, source_manifest} <- read_manifest(metadata.manifest),
          :ok <- Manifest.validate(source_root, source_manifest),
          true <- source_manifest["generation"] == metadata.generation,
-         true <- source_manifest["target"] == metadata.rust_target do
+         true <- source_manifest["target"] == metadata.rust_target,
+         true <- source_manifest["integration"] == Atom.to_string(project.integration) do
       :global.trans(
         {{__MODULE__, destination_root}, self()},
         fn -> publish_locked(destination_root, source_root, source_manifest, result) end
@@ -61,7 +64,8 @@ defmodule Rekindle.Desktop.Release do
            executable,
            source_manifest["target"],
            source_manifest["package"],
-           source_manifest["binary"]
+           source_manifest["binary"],
+           source_manifest["integration"]
          ) do
       {:ok, %{"sha256" => hash} = manifest} when hash == expected_hash ->
         finish_publication(root, manifest, previous, result, published?)

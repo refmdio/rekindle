@@ -5,16 +5,18 @@ defmodule Rekindle.Desktop.Manifest do
 
   @version 1
 
-  @spec create(Path.t(), String.t(), String.t(), String.t(), String.t()) ::
+  @spec create(Path.t(), String.t(), String.t(), String.t(), String.t(), atom() | String.t()) ::
           {:ok, map()} | {:error, Error.t()}
-  def create(root, executable, target, package, binary) do
+  def create(root, executable, target, package, binary, integration) do
     with :ok <- component(executable, "executable"),
          :ok <- component(target, "target"),
+         {:ok, integration} <- integration(integration),
          {:ok, contents} <- read_executable(root, executable) do
       fields = %{
         "target" => target,
         "package" => package,
         "binary" => binary,
+        "integration" => integration,
         "executable" => executable,
         "sha256" => sha256(contents)
       }
@@ -30,15 +32,18 @@ defmodule Rekindle.Desktop.Manifest do
         "target" => target,
         "package" => package,
         "binary" => binary,
+        "integration" => integration,
         "executable" => executable,
         "sha256" => expected
       })
       when is_binary(generation) and is_binary(target) and target != "" and is_binary(package) and
-             package != "" and is_binary(binary) and binary != "" and is_binary(expected) do
+             package != "" and is_binary(binary) and binary != "" and
+             integration in ["gpui", "egui", "slint"] and is_binary(expected) do
     fields = %{
       "target" => target,
       "package" => package,
       "binary" => binary,
+      "integration" => integration,
       "executable" => executable,
       "sha256" => expected
     }
@@ -85,6 +90,12 @@ defmodule Rekindle.Desktop.Manifest do
 
   defp component(_value, label),
     do: error(:invalid_manifest, "desktop #{label} must be a single path component")
+
+  defp integration(value) when value in [:gpui, :egui, :slint],
+    do: {:ok, Atom.to_string(value)}
+
+  defp integration(value) when value in ["gpui", "egui", "slint"], do: {:ok, value}
+  defp integration(_value), do: error(:invalid_manifest, "desktop integration is invalid")
 
   defp identity(fields), do: fields |> Jason.encode!() |> sha256()
 

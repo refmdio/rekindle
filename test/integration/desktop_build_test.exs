@@ -56,6 +56,7 @@ defmodule Rekindle.DesktopBuildTest do
     assert manifest["target"] == tools.target
     assert manifest["package"] == "fixture_ui"
     assert manifest["binary"] == "desktop"
+    assert manifest["integration"] == "gpui"
     assert manifest["executable"] == "desktop"
     assert manifest["sha256"] == sha256(File.read!(result.artifact))
 
@@ -70,7 +71,7 @@ defmodule Rekindle.DesktopBuildTest do
 
   test "publishes a content-named desktop release without launching it", %{root: root} do
     tools = fake_tools(root, executable?: true, marker: "first")
-    target_root = Path.join([root, "dist", "rekindle", tools.target])
+    target_root = Path.join([root, "dist", "rekindle", "desktop", tools.target])
     File.mkdir_p!(target_root)
     File.write!(Path.join(target_root, "keep.txt"), "application-owned")
     File.write!(Path.join(target_root, ".tmp-stale"), "incomplete")
@@ -86,6 +87,7 @@ defmodule Rekindle.DesktopBuildTest do
     assert result.metadata.manifest == Path.join(target_root, "manifest.json")
     assert manifest["generation"] == result.metadata.generation
     assert manifest["target"] == tools.target
+    assert manifest["integration"] == "gpui"
     assert manifest["sha256"] == sha256(File.read!(result.artifact))
     assert manifest["executable"] == Path.basename(result.artifact)
     assert :ok = Rekindle.Desktop.Manifest.validate(target_root, manifest)
@@ -213,7 +215,7 @@ defmodule Rekindle.DesktopBuildTest do
              match?({:ok, %Rekindle.Build.Result{}}, Task.await(task, 10_000))
            end)
 
-    release_root = Path.join([root, "dist", "rekindle", first_tools.target])
+    release_root = Path.join([root, "dist", "rekindle", "desktop", first_tools.target])
     manifest = release_root |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
     assert :ok = Rekindle.Desktop.Manifest.validate(release_root, manifest)
     assert File.regular?(Path.join(release_root, manifest["executable"]))
