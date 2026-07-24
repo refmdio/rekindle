@@ -1,5 +1,10 @@
 defmodule Rekindle.Cargo.Error do
-  @moduledoc false
+  @moduledoc """
+  Reports Cargo metadata, compilation, process, or artifact selection failures.
+
+  Structured compiler messages are available in `diagnostics`; bounded raw
+  process output is available in `output`.
+  """
 
   @enforce_keys [:kind, :message]
   defexception [:kind, :message, diagnostics: [], output: ""]
@@ -12,6 +17,7 @@ defmodule Rekindle.Cargo.Error do
         }
 
   @spec new(atom(), String.t(), keyword()) :: t()
+  @doc false
   def new(kind, message, options \\ []) do
     struct!(__MODULE__, Keyword.merge([kind: kind, message: message], options))
   end

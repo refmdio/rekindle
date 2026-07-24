@@ -1,5 +1,7 @@
 defmodule Rekindle.Desktop.Error do
-  @moduledoc false
+  @moduledoc """
+  Reports desktop artifact validation, publication, or launch failures.
+  """
 
   @enforce_keys [:kind, :message]
   defexception [:kind, :message]
@@ -10,5 +12,6 @@ defmodule Rekindle.Desktop.Error do
         }
 
   @spec new(atom(), String.t()) :: t()
+  @doc false
   def new(kind, message), do: %__MODULE__{kind: kind, message: message}
 end

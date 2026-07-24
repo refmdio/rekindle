@@ -2,6 +2,18 @@ defmodule Mix.Tasks.Rekindle.Setup do
   use Mix.Task
 
   @shortdoc "Installs declared Rust UI prerequisites"
+  @moduledoc """
+  Installs the declared prerequisites for enabled Rust UI targets.
+
+      mix rekindle.setup
+      mix rekindle.setup web
+      mix rekindle.setup desktop
+      mix rekindle.setup all
+
+  The Web setup installs the pinned `wasm-bindgen-cli` into Rekindle's
+  versioned user cache. Cargo and target readiness are checked before tools are
+  installed.
+  """
 
   @impl Mix.Task
   def run(arguments) do

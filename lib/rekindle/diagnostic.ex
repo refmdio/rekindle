@@ -1,5 +1,7 @@
 defmodule Rekindle.Diagnostic do
-  @moduledoc false
+  @moduledoc """
+  A structured compiler or Cargo diagnostic returned by a build.
+  """
 
   @enforce_keys [:severity, :source, :message]
   defstruct [:severity, :source, :message, :file, :line, :rendered]

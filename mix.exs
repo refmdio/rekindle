@@ -14,6 +14,7 @@ defmodule Rekindle.MixProject do
       name: "Rekindle",
       description: "Mix-first build system and development runtime for Rust UI applications.",
       source_url: @source_url,
+      docs: docs(),
       package: package()
     ]
   end
@@ -28,7 +29,16 @@ defmodule Rekindle.MixProject do
       {:jason, "~> 1.4"},
       {:muontrap, "~> 1.8"},
       {:plug, "~> 1.16"},
-      {:igniter, "~> 0.8", optional: true}
+      {:igniter, "~> 0.8", optional: true},
+      {:ex_doc, "~> 0.40.3", only: :dev, runtime: false}
+    ]
+  end
+
+  defp docs do
+    [
+      main: "readme",
+      extras: ["README.md"],
+      source_url: @source_url
     ]
   end
 

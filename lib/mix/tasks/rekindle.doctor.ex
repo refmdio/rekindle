@@ -2,6 +2,15 @@ defmodule Mix.Tasks.Rekindle.Doctor do
   use Mix.Task
 
   @shortdoc "Checks Rekindle configuration and prerequisites"
+  @moduledoc """
+  Checks the Rekindle configuration and target prerequisites without changing
+  the project.
+
+      mix rekindle.doctor
+
+  The command reports configuration, Cargo, integration, target, and pinned
+  Web tool readiness and exits unsuccessfully when a required check fails.
+  """
 
   @impl Mix.Task
   def run(arguments) do

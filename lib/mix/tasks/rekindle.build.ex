@@ -2,6 +2,19 @@ defmodule Mix.Tasks.Rekindle.Build do
   use Mix.Task
 
   @shortdoc "Builds Web or desktop artifacts"
+  @moduledoc """
+  Builds one enabled Rust UI target without starting it.
+
+      mix rekindle.build web
+      mix rekindle.build desktop
+      mix rekindle.build web --release
+      mix rekindle.build desktop --release
+
+  Development builds publish internal generations below `.rekindle/dev`.
+  Release Web builds publish Phoenix static assets; release desktop builds
+  publish a content-named executable and manifest below `dist/rekindle`.
+  """
+
   @diagnostic_limit 64_000
 
   @impl Mix.Task
