@@ -106,6 +106,7 @@ defmodule Rekindle.Development.Builder do
           if current? do
             finish_current(state, target, target_state, result)
           else
+            discard_result(state.project, result)
             {%{target_state | running: nil}, :stale}
           end
 
@@ -227,6 +228,7 @@ defmodule Rekindle.Development.Builder do
         {%{target_state | running: nil, last_success: result}, {:ok, result}}
 
       {:error, error} ->
+        Rekindle.Development.Cleanup.discard(state.project, result)
         {%{target_state | running: nil}, {:error, error}}
     end
   end
@@ -238,6 +240,12 @@ defmodule Rekindle.Development.Builder do
   defp finish_current(_state, _target, target_state, other) do
     {%{target_state | running: nil}, {:error, {:invalid_build_result, other}}}
   end
+
+  defp discard_result(project, {:ok, %Result{} = result}) do
+    Rekindle.Development.Cleanup.discard(project, result)
+  end
+
+  defp discard_result(_project, _result), do: :ok
 
   defp maybe_start_pending(state, target) do
     target_state = Map.fetch!(state.targets, target)

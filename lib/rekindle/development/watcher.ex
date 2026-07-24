@@ -11,6 +11,7 @@ defmodule Rekindle.Development.Watcher do
   @impl GenServer
   def init(options) do
     source = Keyword.fetch!(options, :source)
+    root = options |> Keyword.fetch!(:root) |> Path.expand()
     :ok = FileSystem.subscribe(source)
     send(self(), :initial_build)
 
@@ -18,7 +19,9 @@ defmodule Rekindle.Development.Watcher do
      %{
        source: GenServer.whereis(source),
        builder: Keyword.fetch!(options, :builder),
-       root: options |> Keyword.fetch!(:root) |> Path.expand()
+       root: root,
+       target_directory:
+         options |> Keyword.get(:target_directory, Path.join(root, "target")) |> Path.expand()
      }}
   end
 
@@ -29,7 +32,7 @@ defmodule Rekindle.Development.Watcher do
   end
 
   def handle_info({:file_event, source, {path, _events}}, %{source: source} = state) do
-    case targets(state.root, path) do
+    case targets(state.root, path, state.target_directory) do
       [] -> :ok
       targets -> Rekindle.Development.Builder.rebuild(state.builder, targets)
     end
@@ -43,14 +46,19 @@ defmodule Rekindle.Development.Watcher do
 
   @doc false
   @spec targets(Path.t(), Path.t()) :: [:web | :desktop]
-  def targets(root, path) do
+  def targets(root, path), do: targets(root, path, Path.join(root, "target"))
+
+  @doc false
+  @spec targets(Path.t(), Path.t(), Path.t()) :: [:web | :desktop]
+  def targets(root, path, target_directory) do
+    expanded = Path.expand(path)
     relative = path |> Path.expand() |> Path.relative_to(root)
 
     cond do
       Path.type(relative) == :absolute ->
         []
 
-      relative == "target" or String.starts_with?(relative, "target/") ->
+      inside?(expanded, target_directory) ->
         []
 
       relative == ".git" or String.starts_with?(relative, ".git/") ->
@@ -71,5 +79,10 @@ defmodule Rekindle.Development.Watcher do
       true ->
         [:web, :desktop]
     end
+  end
+
+  defp inside?(path, directory) do
+    directory = Path.expand(directory)
+    path == directory or String.starts_with?(path, directory <> "/")
   end
 end

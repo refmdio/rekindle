@@ -71,7 +71,6 @@ defmodule Rekindle.Desktop.Development do
     if running?(candidate.pid) do
       case write_marker(state.root, candidate.result) do
         :ok ->
-          stop(state.supervisor, state.current)
           Cleanup.desktop(state.root, candidate.result)
           notify(state.notify, {:ready, candidate.result})
           {:noreply, %{state | current: candidate, candidate: nil}}
@@ -98,9 +97,7 @@ defmodule Rekindle.Desktop.Development do
             "desktop process exited before it became ready: #{inspect(reason)}"
           )
 
-        cleanup_rejected(state, state.candidate.result)
-        notify(state.notify, {:error, error})
-        {:noreply, %{state | candidate: nil}}
+        {:noreply, reject_candidate(state, error)}
 
       state.current && state.current.reference == reference ->
         notify(state.notify, {:exited, state.current.result, reason})
@@ -125,33 +122,55 @@ defmodule Rekindle.Desktop.Development do
   end
 
   defp launch(state, result) do
-    discard_candidate(state)
+    case validate(result) do
+      :ok ->
+        fallback = retained_result(state)
+        discard_candidate(state)
+        stop(state.supervisor, state.current)
 
-    with :ok <- validate(result),
-         {:ok, pid} <- start_process(state, result) do
-      reference = Process.monitor(pid)
-      timer = Process.send_after(self(), {:ready, reference}, state.readiness)
-      candidate = %{pid: pid, reference: reference, timer: timer, result: result}
-      %{state | candidate: candidate}
-    else
+        state
+        |> Map.merge(%{current: nil, candidate: nil})
+        |> start_candidate(result, fallback, false)
+
       {:error, %Error{} = error} ->
         cleanup_rejected(state, result)
         notify(state.notify, {:error, error})
-        %{state | candidate: nil}
+        state
+    end
+  end
+
+  defp start_candidate(state, result, fallback, rollback?) do
+    case start_process(state, result) do
+      {:ok, pid} ->
+        reference = Process.monitor(pid)
+        timer = Process.send_after(self(), {:ready, reference}, state.readiness)
+
+        candidate = %{
+          pid: pid,
+          reference: reference,
+          timer: timer,
+          result: result,
+          fallback: fallback,
+          rollback?: rollback?
+        }
+
+        %{state | candidate: candidate}
 
       {:error, reason} ->
         error = Error.new(:start_failed, "desktop process could not start: #{inspect(reason)}")
         cleanup_rejected(state, result)
         notify(state.notify, {:error, error})
-        %{state | candidate: nil}
+
+        maybe_rollback(%{state | candidate: nil}, fallback, rollback?)
     end
   end
 
   defp reject_candidate(state, error) do
-    stop(state.supervisor, state.candidate)
-    cleanup_rejected(state, state.candidate.result)
+    candidate = state.candidate
+    stop(state.supervisor, candidate)
+    cleanup_rejected(state, candidate.result)
     notify(state.notify, {:error, error})
-    %{state | candidate: nil}
+    maybe_rollback(%{state | candidate: nil}, candidate.fallback, candidate.rollback?)
   end
 
   defp discard_candidate(%{candidate: nil}), do: :ok
@@ -161,10 +180,22 @@ defmodule Rekindle.Desktop.Development do
     cleanup_rejected(state, state.candidate.result)
   end
 
+  defp retained_result(%{candidate: %{rollback?: true, result: result}}), do: result
+  defp retained_result(%{candidate: %{fallback: fallback}}), do: fallback
+  defp retained_result(%{current: %{result: result}}), do: result
+  defp retained_result(_state), do: nil
+
+  defp maybe_rollback(state, nil, _rollback?), do: state
+  defp maybe_rollback(state, _fallback, true), do: state
+
+  defp maybe_rollback(state, fallback, false) do
+    start_candidate(state, fallback, nil, true)
+  end
+
   defp cleanup_rejected(state, result) do
     selected =
-      case state.current do
-        %{result: %{metadata: %{generation: generation}}} -> generation
+      case retained_result(state) do
+        %{metadata: %{generation: generation}} -> generation
         nil -> result.metadata.generation
       end
 

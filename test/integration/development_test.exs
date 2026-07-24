@@ -107,6 +107,48 @@ defmodule Rekindle.DevelopmentTest do
   end
 
   @tag capture_log: true
+  test "removes a generation published by a superseded build", %{root: root} do
+    test = self()
+    selected = publish_web(root, "export default 'selected';")
+    stale = String.duplicate("f", 64)
+    stale_root = Path.join([root, ".rekindle", "dev", "web", stale])
+    File.mkdir_p!(stale_root)
+    manifest = Path.join(stale_root, "manifest.json")
+    File.write!(manifest, "{}")
+    counter = start_supervised!({Agent, fn -> 0 end})
+
+    build = fn _target, options ->
+      case Agent.get_and_update(counter, &{&1, &1 + 1}) do
+        0 ->
+          send(test, :stale_started)
+          cancel_ref = options[:cancel_ref]
+          receive do: ({:rekindle_cancel, ^cancel_ref} -> :ok)
+
+          {:ok,
+           %Result{
+             target: :web,
+             profile: :dev,
+             artifact: Path.join(stale_root, "app.js"),
+             metadata: %{generation: stale, manifest: manifest}
+           }}
+
+        1 ->
+          send(test, :current_started)
+          {:error, :expected_test_stop}
+      end
+    end
+
+    builder = start_builder(root, build)
+    Builder.rebuild(builder, :web)
+    assert_receive :stale_started
+    Builder.rebuild(builder, :web)
+    assert_receive :current_started
+
+    refute File.exists?(stale_root)
+    assert File.dir?(Path.join([root, ".rekindle", "dev", "web", selected]))
+  end
+
+  @tag capture_log: true
   test "retains the last successful result when a later build fails", %{root: root} do
     counter = start_supervised!({Agent, fn -> 0 end})
 
@@ -326,6 +368,31 @@ defmodule Rekindle.DevelopmentTest do
     end
   end
 
+  @tag timeout: 60_000
+  test "rejects missing browser graphics capabilities before importing Web output", %{root: root} do
+    cases = [
+      {:gpui,
+       "Object.defineProperty(navigator, 'gpu', {value: {requestAdapter: async () => ({})}});",
+       &String.replace(&1, "window.isSecureContext", "false"),
+       "WebGPU requires HTTPS or a loopback origin."},
+      {:gpui,
+       "Object.defineProperty(navigator, 'gpu', {value: {requestAdapter: async () => null}});",
+       &String.replace(&1, "window.isSecureContext", "true"),
+       "No WebGPU graphics adapter is available."},
+      {:egui, "HTMLCanvasElement.prototype.getContext = () => null;", & &1,
+       "No WebGL2 graphics context is available."},
+      {:slint, "HTMLCanvasElement.prototype.getContext = () => null;", & &1,
+       "No WebGL2 graphics context is available."}
+    ]
+
+    Enum.each(cases, fn {integration, setup, transform, expected} ->
+      output = run_browser_failure(root, integration, setup, transform)
+      assert output =~ ~s(data-rekindle-runtime="executed")
+      assert output =~ ~s(<pre id="rekindle-error">#{expected}</pre>)
+      refute output =~ "data-rekindle-imported"
+    end)
+  end
+
   test "does not expose unselected or malformed Web paths", %{root: root} do
     generation = publish_web(root, "export default 'ready';")
     options = Development.init(otp_app: :rekindle_development_test, project_root: root)
@@ -338,7 +405,7 @@ defmodule Rekindle.DevelopmentTest do
     refute conn.state == :sent
   end
 
-  test "adopts a ready desktop process and replaces it only after handoff", %{root: root} do
+  test "stops the running desktop process before starting its replacement", %{root: root} do
     supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
     launcher = start_launcher(root, supervisor)
     first = desktop_result(root, "first", :running)
@@ -355,7 +422,7 @@ defmodule Rekindle.DevelopmentTest do
 
     DesktopDevelopment.replace(launcher, second)
     assert_until(fn -> DesktopDevelopment.status(launcher).candidate != nil end)
-    assert Process.alive?(first_pid)
+    refute Process.alive?(first_pid)
     assert read_marker(root)["generation"] == first.metadata.generation
 
     assert_receive {DesktopDevelopment, {:ready, ^second}}, 1_000
@@ -379,10 +446,14 @@ defmodule Rekindle.DevelopmentTest do
     assert_receive {DesktopDevelopment, {:error, %Rekindle.Desktop.Error{kind: :readiness}}},
                    1_000
 
-    assert %{current: %{pid: ^first_pid}, candidate: nil} =
+    assert_receive {DesktopDevelopment, {:ready, ^first}}, 1_000
+
+    assert %{current: %{pid: rollback_pid}, candidate: nil} =
              DesktopDevelopment.status(launcher)
 
-    assert Process.alive?(first_pid)
+    refute rollback_pid == first_pid
+    refute Process.alive?(first_pid)
+    assert Process.alive?(rollback_pid)
     assert Process.alive?(launcher)
     assert read_marker(root)["generation"] == first.metadata.generation
   end
@@ -425,6 +496,8 @@ defmodule Rekindle.DevelopmentTest do
 
       assert_receive {DesktopDevelopment, {:error, %Rekindle.Desktop.Error{kind: :readiness}}},
                      1_000
+
+      assert_receive {DesktopDevelopment, {:ready, ^stable}}, 1_000
     end
 
     generation_root = Path.join([root, ".rekindle", "dev", "desktop", "test-target"])
@@ -432,6 +505,32 @@ defmodule Rekindle.DevelopmentTest do
 
     assert length(generations) == 2
     assert stable.metadata.generation in generations
+    assert Process.alive?(launcher)
+  end
+
+  @tag capture_log: true
+  test "attempts the retained desktop executable only once", %{root: root} do
+    supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+    launcher = start_launcher(root, supervisor)
+    retained = desktop_result(root, "one-restart", :running_once)
+    broken = desktop_result(root, "replacement", :exit)
+
+    DesktopDevelopment.replace(launcher, retained)
+    assert_receive {DesktopDevelopment, {:ready, ^retained}}, 1_000
+
+    DesktopDevelopment.replace(launcher, broken)
+
+    assert_receive {DesktopDevelopment, {:error, %Rekindle.Desktop.Error{kind: :readiness}}},
+                   1_000
+
+    assert_receive {DesktopDevelopment, {:error, %Rekindle.Desktop.Error{kind: :readiness}}},
+                   1_000
+
+    assert_until(fn ->
+      DesktopDevelopment.status(launcher) == %{current: nil, candidate: nil}
+    end)
+
+    refute_receive {DesktopDevelopment, {:ready, ^retained}}, 200
     assert Process.alive?(launcher)
   end
 
@@ -473,6 +572,14 @@ defmodule Rekindle.DevelopmentTest do
     assert Rekindle.Development.Watcher.targets(
              client,
              Path.join(client, "target/debug/client")
+           ) == []
+
+    custom_target = Path.join(client, ".cargo-output")
+
+    assert Rekindle.Development.Watcher.targets(
+             client,
+             Path.join(custom_target, "debug/client"),
+             custom_target
            ) == []
 
     assert Rekindle.Development.Watcher.targets(client, Path.join(root, "outside.rs")) == []
@@ -544,6 +651,33 @@ defmodule Rekindle.DevelopmentTest do
     assert File.dir?(Path.join(release_root, hd(generations)))
   end
 
+  test "cleans abandoned startup output while preserving selected generations", %{root: root} do
+    temporary = Path.join([root, ".rekindle", "tmp", "web", "abandoned"])
+    marker = Path.join([root, ".rekindle", "dev", "web-current.json.tmp-abandoned"])
+    File.mkdir_p!(temporary)
+    File.write!(Path.join(temporary, "partial"), "partial")
+    File.mkdir_p!(Path.dirname(marker))
+    File.write!(marker, "partial")
+
+    selected = publish_web(root, "export default 'selected';")
+    web_root = Path.join([root, ".rekindle", "dev", "web"])
+
+    for value <- ["c", "d", "e"] do
+      generation = String.duplicate(value, 64)
+      File.mkdir_p!(Path.join(web_root, generation))
+      File.touch!(Path.join(web_root, generation))
+    end
+
+    {:ok, project} =
+      Rekindle.Config.load(:rekindle_development_test, project_root: root)
+
+    assert :ok = Rekindle.Development.Cleanup.startup(project)
+    refute File.exists?(Path.join([root, ".rekindle", "tmp"]))
+    refute File.exists?(marker)
+    assert File.dir?(Path.join(web_root, selected))
+    assert length(Path.wildcard(Path.join(web_root, String.duplicate("?", 64)))) == 2
+  end
+
   defp start_builder(root, build, options \\ []) do
     start_supervised!(
       {Builder,
@@ -608,6 +742,88 @@ defmodule Rekindle.DevelopmentTest do
     """
   end
 
+  defp run_browser_failure(root, integration, setup, transform) do
+    browser = System.find_executable("chromium") || flunk("Chromium is required")
+
+    Application.put_env(:rekindle_development_test, Rekindle,
+      integration: integration,
+      targets: [web: []]
+    )
+
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+
+    runtime =
+      options
+      |> then(&request("/__rekindle/runtime.js", &1).resp_body)
+      |> transform.()
+      |> then(&("document.documentElement.dataset.rekindleRuntime = \"executed\";\n" <> &1))
+      |> String.replace(
+        "const module = await import(current.entry);",
+        """
+        document.documentElement.dataset.rekindleImported = "true";
+        const module = await import(current.entry);
+        """
+      )
+
+    generation = String.duplicate("a", 64)
+
+    selector =
+      Jason.encode!(%{
+        generation: generation,
+        entry:
+          "data:text/javascript,export default async function initialize() " <>
+            "{ document.documentElement.dataset.applicationStarted = 'true'; }"
+      })
+
+    page =
+      """
+      <!doctype html>
+      <html><body>
+        <canvas id="rekindle-canvas"></canvas>
+        <pre id="rekindle-error" hidden></pre>
+        <script>
+          #{setup}
+          window.fetch = () => Promise.resolve(
+            new Response(#{Jason.encode!(selector)}, {
+              status: 200,
+              headers: {"content-type": "application/json"}
+            })
+          );
+        </script>
+        <script type="module">#{runtime}</script>
+      </body></html>
+      """
+
+    directory =
+      Path.join(root, "browser-failure-#{integration}-#{System.unique_integer([:positive])}")
+
+    profile = Path.join(directory, "profile")
+    File.mkdir_p!(directory)
+    page_path = Path.join(directory, "index.html")
+    File.write!(page_path, page)
+
+    arguments = [
+      "--headless=new",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-dev-shm-usage",
+      "--allow-file-access-from-files",
+      "--user-data-dir=#{profile}",
+      "--virtual-time-budget=1000",
+      "--dump-dom",
+      "file://#{page_path}"
+    ]
+
+    assert {:ok, %{status: 0, output: output}} =
+             Rekindle.Toolchain.Process.run(browser, arguments,
+               cd: directory,
+               timeout: 15_000,
+               output_limit: 1_000_000
+             )
+
+    output
+  end
+
   defp start_launcher(root, supervisor) do
     start_supervised!(
       {DesktopDevelopment,
@@ -620,8 +836,21 @@ defmodule Rekindle.DevelopmentTest do
 
     body =
       case behavior do
-        :running -> "#!/bin/sh\n# #{name}\nwhile true; do sleep 1; done\n"
-        :exit -> "#!/bin/sh\n# #{name}\nexit 0\n"
+        :running ->
+          "#!/bin/sh\n# #{name}\nwhile true; do sleep 1; done\n"
+
+        :exit ->
+          "#!/bin/sh\n# #{name}\nexit 0\n"
+
+        :running_once ->
+          marker = source <> ".started"
+
+          """
+          #!/bin/sh
+          if [ -f '#{marker}' ]; then exit 0; fi
+          touch '#{marker}'
+          while true; do sleep 1; done
+          """
       end
 
     File.write!(source, body)

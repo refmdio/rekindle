@@ -94,6 +94,14 @@ defmodule RekindleTest do
       )
 
     File.mkdir_p!(Path.join(root, "client/src/bin"))
+
+    File.write!(Path.join(root, "client/Cargo.toml"), """
+    [package]
+    name = "client"
+    version = "0.1.0"
+    edition = "2024"
+    """)
+
     File.write!(Path.join(root, "client/src/bin/web.rs"), "fn main() {}\n")
     root
   end

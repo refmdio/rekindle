@@ -25,48 +25,51 @@ defmodule Rekindle do
     otp_app = Keyword.fetch!(options, :otp_app)
     project_root = Keyword.get(options, :project_root, File.cwd!())
 
-    case Config.load(otp_app, project_root: project_root) do
-      {:ok, project} ->
-        builder = process_name(otp_app, "Builder")
-        file_system = process_name(otp_app, "FileSystem")
-        desktop_supervisor = process_name(otp_app, "DesktopSupervisor")
-        desktop = process_name(otp_app, "Desktop")
+    with {:ok, project} <- Config.load(otp_app, project_root: project_root),
+         {:ok, metadata} <- Rekindle.Cargo.Metadata.load(project),
+         :ok <- Rekindle.Development.Cleanup.startup(project) do
+      builder = process_name(otp_app, "Builder")
+      file_system = process_name(otp_app, "FileSystem")
+      desktop_supervisor = process_name(otp_app, "DesktopSupervisor")
+      desktop = process_name(otp_app, "Desktop")
 
-        desktop_children =
-          if Map.has_key?(project.targets, :desktop) do
-            [
-              %{
-                id: Rekindle.Desktop.Processes,
-                start:
-                  {DynamicSupervisor, :start_link,
-                   [[strategy: :one_for_one, name: desktop_supervisor]]},
-                type: :supervisor
-              },
-              {Rekindle.Desktop.Development,
-               name: desktop, project_root: project.root, supervisor: desktop_supervisor}
-            ]
-          else
-            []
-          end
+      desktop_children =
+        if Map.has_key?(project.targets, :desktop) do
+          [
+            %{
+              id: Rekindle.Desktop.Processes,
+              start:
+                {DynamicSupervisor, :start_link,
+                 [[strategy: :one_for_one, name: desktop_supervisor]]},
+              type: :supervisor
+            },
+            {Rekindle.Desktop.Development,
+             name: desktop, project_root: project.root, supervisor: desktop_supervisor}
+          ]
+        else
+          []
+        end
 
-        notifications = if Map.has_key?(project.targets, :desktop), do: [desktop], else: []
+      notifications = if Map.has_key?(project.targets, :desktop), do: [desktop], else: []
 
-        children =
-          desktop_children ++
-            [
-              {Rekindle.Development.Builder,
-               name: builder, otp_app: otp_app, project_root: project.root, notify: notifications},
-              %{
-                id: Rekindle.Development.FileSystem,
-                start:
-                  {FileSystem, :start_link, [[dirs: [project.client_root], name: file_system]]}
-              },
-              {Rekindle.Development.Watcher,
-               source: file_system, builder: builder, root: project.client_root}
-            ]
+      children =
+        desktop_children ++
+          [
+            {Rekindle.Development.Builder,
+             name: builder, otp_app: otp_app, project_root: project.root, notify: notifications},
+            %{
+              id: Rekindle.Development.FileSystem,
+              start: {FileSystem, :start_link, [[dirs: [project.client_root], name: file_system]]}
+            },
+            {Rekindle.Development.Watcher,
+             source: file_system,
+             builder: builder,
+             root: project.client_root,
+             target_directory: metadata.target_directory}
+          ]
 
-        Supervisor.init(children, strategy: :rest_for_one)
-
+      Supervisor.init(children, strategy: :rest_for_one)
+    else
       {:error, error} ->
         raise error
     end
