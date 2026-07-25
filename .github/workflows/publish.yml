@@ -141,6 +141,8 @@ jobs:
           mix docs --warnings-as-errors
 
       - name: Inspect the Hex publication
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
         run: mix hex.publish --dry-run
 
       - name: Publish package and documentation
