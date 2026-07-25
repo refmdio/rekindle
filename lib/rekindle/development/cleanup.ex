@@ -28,6 +28,7 @@ defmodule Rekindle.Development.Cleanup do
 
     with_cleanup_lock(project, {:web, :dev}, fn ->
       remove_temporary_markers(project.root, ".tmp-web-current-")
+      remove_temporary_markers(project.root, ".tmp-web-error-")
       web_selected = selected_web(project.root)
       prune(project.root, Path.join([project.root, ".rekindle", "dev", "web"]), web_selected)
     end)

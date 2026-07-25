@@ -7,6 +7,7 @@ defmodule Rekindle.Phoenix.Development do
 
   alias Rekindle.Config
   alias Rekindle.OwnedPath
+  alias Rekindle.Publication
   alias Rekindle.Web.Manifest
 
   @prefix ["__rekindle"]
@@ -99,16 +100,22 @@ defmodule Rekindle.Phoenix.Development do
   @spec put_error(Config.t(), String.t()) :: :ok
   def put_error(project, message) do
     path = error_path(project)
-    temporary = path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
 
     with :ok <- OwnedPath.ensure_directory(project.root, Path.dirname(path)),
-         :ok <- File.write(temporary, Jason.encode!(%{"error" => message})),
-         :ok <- File.rename(temporary, path) do
-      :ok
-    else
-      {:error, _reason} ->
+         {:ok, temporary} <-
+           Publication.temporary_file(Path.dirname(path), ".tmp-web-error-") do
+      try do
+        with :ok <- File.write(temporary, Jason.encode!(%{"error" => message})),
+             :ok <- File.rename(temporary, path) do
+          :ok
+        else
+          {:error, _reason} -> :ok
+        end
+      after
         OwnedPath.remove_file(project.root, temporary)
-        :ok
+      end
+    else
+      {:error, _reason} -> :ok
     end
   end
 

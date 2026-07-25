@@ -1347,6 +1347,8 @@ defmodule Rekindle.DevelopmentTest do
   test "cleans abandoned startup output while preserving selected generations", %{root: root} do
     temporary = Path.join([root, ".rekindle", "tmp", "web", "abandoned"])
     marker = Path.join([root, ".rekindle", "dev", ".tmp-web-current-abandoned"])
+    error_temporary = Path.join([root, ".rekindle", "dev", ".tmp-web-error-abandoned"])
+    unrelated = Path.join([root, ".rekindle", "dev", "application-state"])
 
     desktop_marker =
       Path.join([root, ".rekindle", "dev", ".tmp-desktop-last-running-abandoned"])
@@ -1355,10 +1357,14 @@ defmodule Rekindle.DevelopmentTest do
     File.write!(Path.join(temporary, "partial"), "partial")
     File.mkdir_p!(Path.dirname(marker))
     File.write!(marker, "partial")
+    File.write!(error_temporary, "partial")
+    File.write!(unrelated, "keep")
     File.write!(desktop_marker, "partial")
 
     selected = publish_web(root, "export default 'selected';")
     web_root = Path.join([root, ".rekindle", "dev", "web"])
+    selector = Path.join([root, ".rekindle", "dev", "web-current.json"])
+    selected_selector = File.read!(selector)
 
     for value <- ["c", "d", "e"] do
       generation = String.duplicate(value, 64)
@@ -1370,9 +1376,13 @@ defmodule Rekindle.DevelopmentTest do
       Rekindle.Config.load(:rekindle_development_test, project_root: root)
 
     assert :ok = Rekindle.Development.Cleanup.startup(project)
+    assert :ok = Rekindle.Development.Cleanup.startup(project)
     refute File.exists?(Path.join([root, ".rekindle", "tmp"]))
     refute File.exists?(marker)
+    refute File.exists?(error_temporary)
     refute File.exists?(desktop_marker)
+    assert File.read!(unrelated) == "keep"
+    assert File.read!(selector) == selected_selector
     assert File.dir?(Path.join(web_root, selected))
     assert length(Path.wildcard(Path.join(web_root, String.duplicate("?", 64)))) == 2
   end
