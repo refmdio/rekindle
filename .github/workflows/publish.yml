@@ -94,6 +94,15 @@ jobs:
       - name: Install dependencies
         run: mix deps.get
 
+      - name: Prepare wasm-bindgen
+        run: |
+          mix run --no-start -e '
+            case Rekindle.Toolchain.install_wasm_bindgen() do
+              {:ok, path} -> IO.puts(path)
+              {:error, error} -> raise error
+            end
+          '
+
       - name: Match the release tag to the package version
         if: github.event_name == 'release'
         env:
