@@ -3,6 +3,7 @@ name: Publish to Hex
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,20 +14,58 @@ concurrency:
 
 jobs:
   publish:
-    if: github.event.release.prerelease == false
-    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out the release tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
 
       - name: Set up Erlang and Elixir
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           otp-version: "29"
           elixir-version: "1.20"
+
+      - name: Install acceptance dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            build-essential \
+            clang \
+            cmake \
+            libasound2-dev \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libgl1-mesa-dev \
+            libglib2.0-dev \
+            libssl-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            mesa-vulkan-drivers \
+            pkg-config \
+            weston
+
+      - name: Check acceptance prerequisites
+        run: |
+          test -r /proc/self/stat
+          for executable in chromium chromedriver kill pkill setsid weston; do
+            command -v "$executable"
+          done
+          pkg-config --exists fontconfig wayland-client xkbcommon xkbcommon-x11
 
       - name: Restore dependencies and build cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -40,6 +79,7 @@ jobs:
         run: mix deps.get
 
       - name: Match the release tag to the package version
+        if: github.event_name == 'release'
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
@@ -66,11 +106,10 @@ jobs:
           mix docs --warnings-as-errors
 
       - name: Inspect the Hex publication
-        env:
-          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
         run: mix hex.publish --dry-run
 
       - name: Publish package and documentation
+        if: github.event_name == 'release'
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
         run: mix hex.publish --yes
