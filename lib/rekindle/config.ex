@@ -8,6 +8,7 @@ defmodule Rekindle.Config do
   @config_keys [:integration, :targets, :public_dir]
   @target_keys [:package, :binary, :features, :profiles]
   @profile_names [:dev, :release]
+  @application_config_key :"Elixir.Rekindle"
 
   @enforce_keys [:otp_app, :root, :client_root, :integration, :targets, :public_dir]
   defstruct [:otp_app, :root, :client_root, :integration, :targets, :public_dir]
@@ -93,7 +94,7 @@ defmodule Rekindle.Config do
   end
 
   defp fetch(otp_app) do
-    case Application.fetch_env(otp_app, Rekindle) do
+    case Application.fetch_env(otp_app, @application_config_key) do
       {:ok, config} ->
         {:ok, config}
 
