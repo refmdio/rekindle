@@ -686,6 +686,38 @@ defmodule Rekindle.DevelopmentTest do
     end)
   end
 
+  @tag timeout: 60_000
+  test "recovers after the current selection transport disconnects", %{root: root} do
+    selector =
+      browser_selector(
+        String.duplicate("a", 64),
+        """
+        export default async function initialize() {
+          const root = document.documentElement;
+          root.dataset.initializers =
+            String(Number(root.dataset.initializers || "0") + 1);
+          root.dataset.requestsAtInitialization = root.dataset.requests;
+          root.dataset.applicationStarted = "true";
+        }
+        """
+      )
+
+    output =
+      run_browser_responses(
+        root,
+        :egui,
+        "HTMLCanvasElement.prototype.getContext = () => ({});",
+        & &1,
+        [%{"reject" => "selection transport disconnected", "delay" => 600}, selector]
+      )
+
+    assert output =~ ~s(data-application-started="true")
+    assert output =~ ~s(data-initializers="1")
+    assert output =~ ~s(data-requests-at-initialization="2")
+    assert output =~ ~s(data-rekindle-error-count="1")
+    assert output =~ "TypeError: selection transport disconnected"
+  end
+
   test "does not expose unselected or malformed Web paths", %{root: root} do
     generation = publish_web(root, "export default 'ready';")
     options = Development.init(otp_app: :rekindle_development_test, project_root: root)
@@ -1573,14 +1605,23 @@ defmodule Rekindle.DevelopmentTest do
           };
           window.fetch = () => {
             const index = Math.min(requests, responses.length - 1);
+            const response = responses[index];
             requests += 1;
             document.documentElement.dataset.requests = String(requests);
-            return Promise.resolve(
-              new Response(responses[index], {
-                status: 200,
-                headers: {"content-type": "application/json"}
-              })
-            );
+            return new Promise((resolve, reject) => {
+              window.setTimeout(() => {
+                if (typeof response === "object" && response.reject) {
+                  reject(new TypeError(response.reject));
+                  return;
+                }
+                resolve(
+                  new Response(response, {
+                    status: 200,
+                    headers: {"content-type": "application/json"}
+                  })
+                );
+              }, typeof response === "object" ? response.delay || 0 : 0);
+            });
           };
         </script>
         <script type="module">#{runtime}</script>
