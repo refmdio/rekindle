@@ -20,6 +20,15 @@ defmodule Rekindle.Toolchain.Process do
 
   @type failure :: :cancelled | :timeout | {:start, Exception.t()}
 
+  @doc false
+  @spec process_control_preflight() :: :ok | {:error, failure()}
+  def process_control_preflight do
+    case process_tools() do
+      {:ok, _tools} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
   @spec run(Path.t(), [String.t()], keyword()) :: {:ok, t()} | {:error, failure()}
   def run(executable, arguments, options \\ []) do
     timeout = Keyword.get(options, :timeout, @default_timeout)
@@ -214,7 +223,8 @@ defmodule Rekindle.Toolchain.Process do
   end
 
   defp process_tools do
-    with {:ok, tools} <-
+    with :ok <- verify_procfs(),
+         {:ok, tools} <-
            Enum.reduce_while(
              [:setsid, :pkill, :kill],
              {:ok, %{}},
@@ -231,6 +241,15 @@ defmodule Rekindle.Toolchain.Process do
            ),
          :ok <- verify_process_tools(tools) do
       {:ok, tools}
+    end
+  end
+
+  defp verify_procfs do
+    if File.regular?("/proc/self/stat") do
+      :ok
+    else
+      error = RuntimeError.exception("procfs is not available at /proc")
+      {:error, {:start, error}}
     end
   end
 

@@ -8,6 +8,12 @@ mix rekindle.doctor
 
 The command does not modify the project.
 
+## Process controls are unavailable
+
+Rekindle 0.1 requires Linux, procfs mounted at `/proc`, and the `setsid`,
+`pkill`, and `kill` executables. Install the missing system tools or mount
+procfs, then rerun `mix rekindle.doctor`.
+
 ## The Web tool is missing
 
 Run:

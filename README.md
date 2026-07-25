@@ -14,6 +14,8 @@ shared Rust UI crate.
 - Elixir 1.17 or later
 - Rust and Cargo
 - A Phoenix project generator
+- Linux with procfs mounted at `/proc`
+- `setsid`, `pkill`, and `kill`
 - The Rust targets and native system libraries required by the selected UI
   integration
 

@@ -379,6 +379,11 @@ defmodule Rekindle.Cargo.MessagesTest do
   alias Rekindle.Cargo.Messages
   alias Rekindle.Toolchain.Process
 
+  test "validates the host process controls" do
+    assert File.regular?("/proc/self/stat")
+    assert :ok = Process.process_control_preflight()
+  end
+
   test "decodes compiler diagnostics and the matching artifact" do
     diagnostic =
       Jason.encode!(%{
@@ -515,6 +520,9 @@ defmodule Rekindle.Cargo.ProcessTest do
 
     on_exit(fn -> System.put_env("PATH", previous_path) end)
     System.put_env("PATH", bin)
+
+    assert {:error, {:start, preflight_error}} = Process.process_control_preflight()
+    assert Exception.message(preflight_error) == "pkill executable was not found"
 
     assert {:error, {:start, error}} = Process.run(executable, [], cd: root)
     assert Exception.message(error) == "pkill executable was not found"

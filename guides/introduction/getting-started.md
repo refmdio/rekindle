@@ -3,6 +3,9 @@
 This guide covers installation into an existing Phoenix application. For a new
 application, use the `mix igniter.new` command shown in the README.
 
+Rekindle 0.1 runs on Linux with procfs mounted at `/proc`. Its managed Cargo
+processes require `setsid`, `pkill`, and `kill`.
+
 ## Add Rekindle to an existing Phoenix application
 
 Add Igniter to the application's development dependencies:
