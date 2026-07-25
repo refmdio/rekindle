@@ -8,8 +8,12 @@ rejected with a diagnostic instead of producing an untested release artifact.
 ## Development
 
 `mix rekindle.dev` builds the desktop target after client changes. Rekindle
-starts a replacement executable only after a successful build. If compilation
-or startup fails, the last working process remains available.
+validates a successful build before replacing the running process. It then
+stops the current process, starts the candidate, and selects the candidate only
+after it remains running through the readiness interval. If the candidate
+fails and a retained executable exists, Rekindle makes one best-effort restart
+of that executable; the restart can also fail. A failed first launch has no
+previous executable to restore.
 
 Run one build without starting the executable:
 

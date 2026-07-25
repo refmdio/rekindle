@@ -44,9 +44,12 @@ Arguments are passed through to `mix phx.server`.
 
 Files below `client/` are watched and rebuilt through Cargo. A successful Web
 build publishes an immutable development generation and notifies connected
-browsers. A successful desktop build starts the replacement executable only
-after it is ready. Failed replacements leave the last working desktop process
-available.
+browsers. For a desktop replacement, Rekindle stops the current process before
+starting the candidate and selects the candidate only after it remains running
+through the readiness interval. If the candidate fails and a retained
+executable exists, Rekindle makes one best-effort restart of that executable;
+the restart can also fail. A failed first launch has no previous executable to
+restore.
 
 Rekindle's supervised development services run only when the Phoenix endpoint
 has code reloading enabled.
