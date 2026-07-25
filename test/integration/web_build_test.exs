@@ -359,6 +359,53 @@ defmodule Rekindle.WebBuildTest do
     refute File.exists?(Path.join([web_root, candidate.metadata.generation]))
   end
 
+  test "does not activate a release when a stale generation cannot be removed", %{root: root} do
+    tools = fake_tools(root, "success-one")
+    assert {:ok, first} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, second} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-three")
+    assert {:ok, candidate} = build(root, tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    namespace = Path.join(root, "priv/static/rekindle")
+    web_root = Path.join(namespace, "web")
+    selector = File.read!(Path.join(namespace, "entry.js"))
+    selected_manifest = File.read!(second.metadata.manifest)
+    selected_artifact = File.read!(second.artifact)
+    stale = Path.dirname(first.artifact)
+
+    File.chmod!(stale, 0o555)
+
+    publication =
+      try do
+        Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+      after
+        if File.exists?(stale), do: File.chmod!(stale, 0o755)
+      end
+
+    assert {:error, %Rekindle.Web.Error{kind: :cleanup}} = publication
+    assert File.read!(Path.join(namespace, "entry.js")) == selector
+    assert File.read!(second.metadata.manifest) == selected_manifest
+    assert File.read!(second.artifact) == selected_artifact
+    refute File.exists?(Path.join(web_root, candidate.metadata.generation))
+
+    assert release_generations(web_root) ==
+             MapSet.new([first.metadata.generation, second.metadata.generation])
+
+    assert {:ok, published} =
+             Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+    assert published.metadata.generation == candidate.metadata.generation
+
+    assert release_generations(web_root) ==
+             MapSet.new([second.metadata.generation, candidate.metadata.generation])
+  end
+
   test "serializes concurrent Web releases in the same public namespace", %{root: root} do
     tools = fake_tools(root, "success-one")
     assert {:ok, first} = build(root, tools)
@@ -1036,6 +1083,13 @@ defmodule Rekindle.WebBuildTest do
              )
 
     %{generation: generation, module: module}
+  end
+
+  defp release_generations(root) do
+    root
+    |> File.ls!()
+    |> Enum.filter(&(&1 =~ ~r/^[0-9a-f]{64}$/))
+    |> MapSet.new()
   end
 
   defp sha256(contents),

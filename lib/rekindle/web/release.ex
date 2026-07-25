@@ -216,13 +216,15 @@ defmodule Rekindle.Web.Release do
           |> Enum.sort_by(fn {_path, modified} -> modified end, :desc)
           |> keep(selected, previous)
 
-        generations
-        |> Enum.map(&elem(&1, 0))
-        |> Enum.reject(&MapSet.member?(retained, &1))
-        |> Enum.each(&remove(project, &1))
+        stale =
+          generations
+          |> Enum.map(&elem(&1, 0))
+          |> Enum.reject(&MapSet.member?(retained, &1))
 
-        remove_temporaries(project, root)
-        :ok
+        with :ok <- remove_generations(project, stale) do
+          remove_temporaries(project, root)
+          :ok
+        end
 
       {:error, :enoent} ->
         :ok
@@ -283,6 +285,15 @@ defmodule Rekindle.Web.Release do
       _error ->
         :ok
     end
+  end
+
+  defp remove_generations(project, paths) do
+    Enum.reduce_while(paths, :ok, fn path, :ok ->
+      case OwnedPath.remove_directory(project.root, path) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, file_error(:cleanup, path, reason)}
+      end
+    end)
   end
 
   defp selected_generation(path) do
