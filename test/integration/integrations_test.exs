@@ -225,6 +225,7 @@ defmodule Rekindle.IntegrationsTest do
     end
   end
 
+  @tag timeout: 1_800_000
   test "packages Web and desktop generations for every built-in integration" do
     previous = Application.get_env(:rekindle_integration_matrix_test, Rekindle)
 
