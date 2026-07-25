@@ -21,7 +21,7 @@ defmodule Rekindle.Web.Release do
     namespace = Path.join(project.public_dir, "rekindle")
 
     with :ok <- validate_source(project, source),
-         {:ok, manifest} <- read_manifest(source),
+         {:ok, manifest} <- Manifest.read(source),
          :ok <- Manifest.validate(source, manifest),
          true <- manifest["generation"] == metadata.generation do
       with_lock(project, fn -> publish_locked(project, namespace, source, manifest, result) end)
@@ -117,7 +117,7 @@ defmodule Rekindle.Web.Release do
   end
 
   defp validate_generation(root, expected, validator) do
-    with {:ok, stored} <- read_manifest(root),
+    with {:ok, stored} <- Manifest.read(root),
          true <- stored == expected,
          :ok <- validator.(root, stored) do
       :ok
@@ -377,7 +377,7 @@ defmodule Rekindle.Web.Release do
     root = Path.join([namespace, "web", generation])
 
     with :ok <- selected_directory(project, root),
-         {:ok, manifest} <- read_manifest(root),
+         {:ok, manifest} <- Manifest.read(root),
          :ok <- Manifest.validate_deployment(root, manifest),
          true <- manifest["generation"] == generation and manifest["entry"] == entry do
       {:ok, generation}
@@ -401,21 +401,6 @@ defmodule Rekindle.Web.Release do
     case OwnedPath.validate_directory(project.root, path) do
       :ok -> :ok
       {:error, reason} -> file_error(:cleanup, path, reason)
-    end
-  end
-
-  defp read_manifest(root) do
-    path = Path.join(root, "manifest.json")
-
-    with {:ok, contents} <- File.read(path),
-         {:ok, manifest} <- Jason.decode(contents) do
-      {:ok, manifest}
-    else
-      {:error, %Jason.DecodeError{} = error} ->
-        error(:invalid_manifest, "Web release manifest is invalid: #{Exception.message(error)}")
-
-      {:error, reason} ->
-        file_error(:manifest_read, path, reason)
     end
   end
 

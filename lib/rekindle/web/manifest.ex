@@ -5,6 +5,32 @@ defmodule Rekindle.Web.Manifest do
 
   @version 1
 
+  @doc false
+  @spec read(Path.t()) :: {:ok, map()} | {:error, Error.t()}
+  def read(root) do
+    path = Path.join(root, "manifest.json")
+
+    case File.lstat(path) do
+      {:ok, %{type: :regular}} ->
+        with {:ok, contents} <- File.read(path),
+             {:ok, manifest} <- Jason.decode(contents) do
+          {:ok, manifest}
+        else
+          {:error, %Jason.DecodeError{} = error} ->
+            error(:invalid_manifest, "Web manifest is invalid: #{Exception.message(error)}")
+
+          {:error, reason} ->
+            manifest_file_error(path, reason)
+        end
+
+      {:ok, _stat} ->
+        error(:invalid_manifest, "Web manifest is not a regular file: #{path}")
+
+      {:error, reason} ->
+        manifest_file_error(path, reason)
+    end
+  end
+
   @spec create(Path.t(), String.t()) :: {:ok, map()} | {:error, Error.t()}
   def create(root, entry) do
     with :ok <- relative_path(entry),
@@ -368,6 +394,9 @@ defmodule Rekindle.Web.Manifest do
 
   defp file_error(kind, path, reason),
     do: error(kind, "cannot read Web generation member #{path}: #{:file.format_error(reason)}")
+
+  defp manifest_file_error(path, reason),
+    do: error(:manifest_read, "cannot read Web manifest #{path}: #{:file.format_error(reason)}")
 
   defp error(kind, message), do: {:error, Error.new(kind, message)}
 end

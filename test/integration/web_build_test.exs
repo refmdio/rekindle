@@ -280,6 +280,92 @@ defmodule Rekindle.WebBuildTest do
     assert File.read!(entry_path) == entry
   end
 
+  test "rejects linked and special Web release source manifests before reading", %{root: root} do
+    tools = fake_tools(root, "success")
+    assert {:ok, candidate} = build(root, tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    manifest_path = candidate.metadata.manifest
+    manifest = File.read!(manifest_path)
+    destination = Path.join([root, "priv/static/rekindle/web", candidate.metadata.generation])
+
+    for kind <- [:symlink, :fifo] do
+      backup = manifest_path <> ".source-backup"
+      File.rename!(manifest_path, backup)
+
+      case kind do
+        :symlink -> File.ln_s!(backup, manifest_path)
+        :fifo -> assert {"", 0} = System.cmd("mkfifo", [manifest_path])
+      end
+
+      try do
+        assert {:ok, {:error, %Rekindle.Web.Error{kind: :invalid_manifest}}} =
+                 bounded(fn ->
+                   Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+                 end)
+
+        refute File.exists?(destination)
+      after
+        File.rm!(manifest_path)
+        File.rename!(backup, manifest_path)
+      end
+
+      assert File.read!(manifest_path) == manifest
+    end
+
+    assert {:ok, published} =
+             Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+    assert published.metadata.generation == candidate.metadata.generation
+  end
+
+  test "rejects linked and special canonical Web manifests before reuse", %{root: root} do
+    tools = fake_tools(root, "success")
+    assert {:ok, selected} = build(root, tools, profile: :release)
+
+    entry = Path.join(root, "priv/static/rekindle/entry.js")
+    selector = File.read!(entry)
+    selected_artifact = File.read!(selected.artifact)
+
+    manifest_path =
+      Path.join([
+        root,
+        ".rekindle/release/web",
+        selected.metadata.generation,
+        "manifest.json"
+      ])
+
+    manifest = File.read!(manifest_path)
+
+    for kind <- [:symlink, :fifo] do
+      backup = manifest_path <> ".reuse-backup"
+      File.rename!(manifest_path, backup)
+
+      case kind do
+        :symlink -> File.ln_s!(backup, manifest_path)
+        :fifo -> assert {"", 0} = System.cmd("mkfifo", [manifest_path])
+      end
+
+      try do
+        assert {:ok, {:error, %Rekindle.Web.Error{kind: :invalid_manifest}}} =
+                 bounded(fn -> build(root, tools, profile: :release) end)
+
+        assert File.read!(entry) == selector
+        assert File.read!(selected.artifact) == selected_artifact
+      after
+        File.rm!(manifest_path)
+        File.rename!(backup, manifest_path)
+      end
+
+      assert File.read!(manifest_path) == manifest
+    end
+
+    assert {:ok, reused} = build(root, tools, profile: :release)
+    assert reused.metadata.generation == selected.metadata.generation
+  end
+
   test "rolls back a new generation when the release selector cannot be replaced", %{
     root: root
   } do
@@ -514,6 +600,8 @@ defmodule Rekindle.WebBuildTest do
     corruptions = [
       {:missing_manifest, manifest_path},
       {:tampered_manifest, manifest_path},
+      {:linked_manifest, manifest_path},
+      {:special_manifest, manifest_path},
       {:missing_member, selected.artifact},
       {:tampered_member, selected.artifact},
       {:linked_member, selected.artifact},
@@ -533,10 +621,10 @@ defmodule Rekindle.WebBuildTest do
         :tampered_member ->
           File.write!(path, "changed")
 
-        kind when kind in [:linked_member, :linked_generation] ->
+        kind when kind in [:linked_manifest, :linked_member, :linked_generation] ->
           File.ln_s!(backup, path)
 
-        kind when kind in [:special_member, :special_generation] ->
+        kind when kind in [:special_manifest, :special_member, :special_generation] ->
           assert {"", 0} = System.cmd("mkfifo", [path])
 
         _kind ->
@@ -1421,6 +1509,11 @@ defmodule Rekindle.WebBuildTest do
     import init from #{module};
     await init();
     """
+  end
+
+  defp bounded(function) do
+    task = Task.async(function)
+    Task.yield(task, 2_000) || Task.shutdown(task, :brutal_kill)
   end
 
   defp release_generations(root) do
