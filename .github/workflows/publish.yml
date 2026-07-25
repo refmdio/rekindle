@@ -67,10 +67,12 @@ jobs:
             command -v "$executable"
           done
           pkg-config --exists fontconfig wayland-client xkbcommon xkbcommon-x11
-          if sysctl -N kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          timeout 30 chromium --headless=new --disable-gpu --dump-dom about:blank >/dev/null
+          timeout 30 chromium \
+            --headless=new \
+            --no-sandbox \
+            --disable-gpu \
+            --dump-dom \
+            about:blank >/dev/null
 
       - name: Prepare Rust toolchains
         run: |

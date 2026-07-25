@@ -111,12 +111,12 @@ defmodule Rekindle.Test.IntegrationBrowser do
     common_browser_arguments(profile) ++
       [
         "--enable-unsafe-webgpu",
-        "--enable-features=Vulkan",
-        "--enable-unsafe-swiftshader",
-        "--ignore-gpu-blocklist",
-        "--disable-vulkan-surface",
-        "--use-angle=vulkan",
-        "--use-webgpu-adapter=swiftshader"
+        "--use-webgpu-adapter=swiftshader",
+        "--enable-dawn-features=allow_unsafe_apis",
+        "--disable-dawn-features=use_dxc",
+        "--enable-webgpu-developer-features",
+        "--use-gpu-in-tests",
+        "--enable-accelerated-2d-canvas"
       ]
   end
 
@@ -133,6 +133,7 @@ defmodule Rekindle.Test.IntegrationBrowser do
   defp common_browser_arguments(profile) do
     [
       "--headless=new",
+      "--no-sandbox",
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-dev-shm-usage",

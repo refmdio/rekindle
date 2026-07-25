@@ -492,6 +492,7 @@ defmodule Rekindle.DevelopmentTest do
     try do
       arguments = [
         "--headless=new",
+        "--no-sandbox",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-dev-shm-usage",
@@ -583,6 +584,7 @@ defmodule Rekindle.DevelopmentTest do
 
     arguments = [
       "--headless=new",
+      "--no-sandbox",
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-dev-shm-usage",
@@ -1875,6 +1877,7 @@ defmodule Rekindle.DevelopmentTest do
 
     arguments = [
       "--headless=new",
+      "--no-sandbox",
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-dev-shm-usage",
@@ -1958,6 +1961,7 @@ defmodule Rekindle.DevelopmentTest do
 
     arguments = [
       "--headless=new",
+      "--no-sandbox",
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-dev-shm-usage",
