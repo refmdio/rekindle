@@ -255,7 +255,8 @@ defmodule Rekindle.IntegrationsTest do
         project_root: root,
         cargo: cargo,
         rustc: String.trim(rustc),
-        env: environment
+        env: environment,
+        timeout: 600_000
       ]
 
       assert {:ok, web} = Rekindle.build(:web, Keyword.put(options, :profile, :release))

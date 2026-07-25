@@ -38,6 +38,7 @@ jobs:
             build-essential \
             clang \
             cmake \
+            inotify-tools \
             libasound2-dev \
             libfontconfig-dev \
             libfreetype-dev \
@@ -62,10 +63,25 @@ jobs:
       - name: Check acceptance prerequisites
         run: |
           test -r /proc/self/stat
-          for executable in chromium chromedriver kill pkill setsid weston; do
+          for executable in chromium chromedriver inotifywait kill pkill setsid weston; do
             command -v "$executable"
           done
           pkg-config --exists fontconfig wayland-client xkbcommon xkbcommon-x11
+          if sysctl -N kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          timeout 30 chromium --headless=new --disable-gpu --dump-dom about:blank >/dev/null
+
+      - name: Prepare Rust toolchains
+        run: |
+          echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup target add --toolchain stable wasm32-unknown-unknown
+          rustup toolchain install nightly --profile minimal --component rustfmt
+          rustup target add --toolchain nightly wasm32-unknown-unknown
+          rustup run stable rustc --print target-libdir --target wasm32-unknown-unknown
+          rustup run nightly rustc --print target-libdir --target wasm32-unknown-unknown
 
       - name: Restore dependencies and build cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
