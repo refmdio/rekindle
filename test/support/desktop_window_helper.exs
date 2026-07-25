@@ -124,26 +124,32 @@ defmodule Rekindle.Test.DesktopWindow do
     socket = "rekindle-#{resource_id()}"
     log = Path.join(runtime, "weston.log")
     trace = Path.join(runtime, "wayland-protocol.log")
+    {xvfb, display} = start_xvfb!(tools.xvfb)
 
     weston =
-      open_port(
-        tools.weston,
-        [
-          "--backend=headless",
-          "--renderer=pixman",
-          "--fake-seat",
-          "--shell=kiosk",
-          "--socket=#{socket}",
-          "--idle-time=0",
-          "--debug",
-          "--log=#{log}"
-        ],
-        [{"XDG_RUNTIME_DIR", runtime}, {"DISPLAY", nil}]
-      )
+      try do
+        open_port(
+          tools.weston,
+          [
+            "--backend=x11",
+            "--renderer=pixman",
+            "--shell=kiosk",
+            "--socket=#{socket}",
+            "--idle-time=0",
+            "--debug",
+            "--log=#{log}"
+          ],
+          [{"XDG_RUNTIME_DIR", runtime}, {"DISPLAY", display}]
+        )
+      rescue
+        error ->
+          close_port(xvfb)
+          reraise error, __STACKTRACE__
+      end
 
     debug =
       try do
-        wait_for_socket!(runtime, socket)
+        wait_for_socket!(runtime, socket, log)
 
         port =
           open_port(
@@ -158,6 +164,7 @@ defmodule Rekindle.Test.DesktopWindow do
       rescue
         error ->
           close_port(weston)
+          close_port(xvfb)
           reraise error, __STACKTRACE__
       end
 
@@ -184,6 +191,7 @@ defmodule Rekindle.Test.DesktopWindow do
       after
         close_port(debug)
         close_port(weston)
+        close_port(xvfb)
       end
 
     observed = diagnostics([output, read(trace)], log)
@@ -213,15 +221,61 @@ defmodule Rekindle.Test.DesktopWindow do
     )
   end
 
-  defp wait_for_socket!(runtime, socket) do
+  defp start_xvfb!(executable) do
+    port =
+      open_port(
+        executable,
+        ["-displayfd", "1", "-screen", "0", "1280x720x24", "-nolisten", "tcp", "-noreset"],
+        []
+      )
+
+    deadline = System.monotonic_time(:millisecond) + 5_000
+
+    try do
+      {port, ":#{wait_for_display!(port, deadline, "")}"}
+    rescue
+      error ->
+        close_port(port)
+        reraise error, __STACKTRACE__
+    end
+  end
+
+  defp wait_for_display!(port, deadline, output) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, data}} ->
+        output = output <> data
+
+        case Regex.run(~r/(?:^|\r?\n)(\d+)\r?\n/, output, capture: :all_but_first) do
+          [display] -> display
+          nil -> wait_for_display!(port, deadline, output)
+        end
+
+      {^port, {:exit_status, status}} ->
+        raise "Xvfb exited with status #{status}\n#{String.slice(output, 0, 8_000)}"
+    after
+      remaining ->
+        raise "Xvfb did not report a display number\n#{String.slice(output, 0, 8_000)}"
+    end
+  end
+
+  defp wait_for_socket!(runtime, socket, log) do
     path = Path.join(runtime, socket)
     deadline = System.monotonic_time(:millisecond) + 5_000
-    wait_for_path!(path, deadline, "Weston did not create its Wayland socket")
+
+    wait_for_path!(
+      path,
+      deadline,
+      fn ->
+        "Weston did not create its Wayland socket\n#{String.slice(read(log), 0, 8_000)}"
+      end
+    )
   end
 
   defp wait_for_file!(path) do
     deadline = System.monotonic_time(:millisecond) + 5_000
-    wait_for_path!(path, deadline, "weston-debug did not create its protocol trace")
+    wait_for_path!(path, deadline, fn -> "weston-debug did not create its protocol trace" end)
   end
 
   defp wait_for_path!(path, deadline, message) do
@@ -234,7 +288,7 @@ defmodule Rekindle.Test.DesktopWindow do
         wait_for_path!(path, deadline, message)
 
       true ->
-        raise message
+        raise message.()
     end
   end
 
@@ -279,7 +333,7 @@ defmodule Rekindle.Test.DesktopWindow do
   end
 
   defp tools do
-    [weston_debug: "weston-debug", weston: "weston", timeout: "timeout"]
+    [weston_debug: "weston-debug", weston: "weston", timeout: "timeout", xvfb: "Xvfb"]
     |> Enum.reduce_while({:ok, %{}}, fn name, {:ok, tools} ->
       {key, executable} = name
 
