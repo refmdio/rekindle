@@ -414,7 +414,7 @@ defmodule Rekindle.DevelopmentTest do
     runtime = request("/__rekindle/runtime.js", options)
 
     assert page.status == 200
-    assert page.resp_body =~ ~s(<canvas id="the_canvas_id"></canvas>)
+    assert page.resp_body =~ Rekindle.Phoenix.web_host(:egui)
     assert runtime.resp_body =~ ~s|getContext("webgl2")|
     refute runtime.resp_body =~ "navigator.gpu"
   end

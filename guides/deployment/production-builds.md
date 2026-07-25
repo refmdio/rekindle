@@ -37,16 +37,22 @@ publication failures.
 
 ## Phoenix Web entry
 
-Use the configured endpoint when a Phoenix template or component needs the
-logical Web entry module:
+Render the selected integration's host markup before loading the logical Web
+entry module. For example, an egui application can use this HEEx:
 
-```elixir
-Rekindle.Phoenix.web_entry_path(MyAppWeb.Endpoint)
+```heex
+<%= Phoenix.HTML.raw(Rekindle.Phoenix.web_host(:egui)) %>
+<script
+  type="module"
+  src={Rekindle.Phoenix.web_entry_path(MyAppWeb.Endpoint)}
+></script>
 ```
 
-Phoenix resolves the path through its static manifest after `phx.digest`. The
-module loads and starts the selected immutable Web generation. Include it as a
-module script after the host element required by the selected UI integration.
+`web_host/1` returns fixed trusted markup owned by the integration. GPUI returns
+an empty string, egui returns `<canvas id="the_canvas_id"></canvas>`, and Slint
+returns `<canvas id="canvas"></canvas>`. `web_entry_path/1` resolves through the
+endpoint's static manifest after `phx.digest`; loading that module starts the
+selected immutable Web generation.
 
 The exact Rekindle generation remains under `.rekindle/release`. Its
 `priv/static` copy is deployment output, so Phoenix can add digested and

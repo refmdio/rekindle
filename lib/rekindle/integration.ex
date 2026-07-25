@@ -45,6 +45,9 @@ defmodule Rekindle.Integration do
   @spec dependency(name()) :: String.t()
   def dependency(name), do: @integrations |> Map.fetch!(name) |> Map.fetch!(:dependency)
 
+  @spec host(name()) :: String.t()
+  def host(name), do: @integrations |> Map.fetch!(name) |> Map.fetch!(:host)
+
   @spec render(name(), [target()], keyword()) :: %{String.t() => String.t()}
   def render(name, targets, options \\ []) do
     integration = Map.fetch!(@integrations, name)

@@ -79,8 +79,13 @@ defmodule Rekindle.IntegrationsTest do
 
     for name <- Integration.names() do
       assert {:ok, %{host: host}} = Integration.fetch(name)
+      assert Rekindle.Phoenix.web_host(name) == host
       refute host =~ ~r/rekindle/i
     end
+
+    assert Rekindle.Phoenix.web_host(:gpui) == ""
+    assert Rekindle.Phoenix.web_host(:egui) == ~s(<canvas id="the_canvas_id"></canvas>)
+    assert Rekindle.Phoenix.web_host(:slint) == ~s(<canvas id="canvas"></canvas>)
   end
 
   test "requires rendered surface pixels without browser failures" do
@@ -253,7 +258,7 @@ defmodule Rekindle.IntegrationsTest do
         env: environment
       ]
 
-      assert {:ok, web} = Rekindle.build(:web, options)
+      assert {:ok, web} = Rekindle.build(:web, Keyword.put(options, :profile, :release))
       assert web.metadata.package == package
       assert web.metadata.rust_target == "wasm32-unknown-unknown"
       assert File.regular?(web.artifact)

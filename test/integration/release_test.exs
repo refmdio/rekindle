@@ -3,6 +3,10 @@ defmodule Rekindle.ReleaseTest do
 
   @moduletag timeout: 120_000
 
+  defmodule Endpoint do
+    def static_path(path), do: Process.get({__MODULE__, path})
+  end
+
   test "publishes Phoenix and desktop release artifacts without disturbing sibling files" do
     root = tmp_dir()
     repository = Path.expand("../..", __DIR__)
@@ -42,6 +46,15 @@ defmodule Rekindle.ReleaseTest do
     digest_manifest = read_json(Path.join(root, "priv/static/cache_manifest.json"))
     digested_entry = digest_manifest["latest"]["rekindle/entry.js"]
     assert is_binary(digested_entry)
+    Process.put({Endpoint, "/rekindle/entry.js"}, "/" <> digested_entry)
+    on_exit(fn -> Process.delete({Endpoint, "/rekindle/entry.js"}) end)
+
+    assert Rekindle.Phoenix.web_entry_path(Endpoint) == "/" <> digested_entry
+
+    for integration <- [:gpui, :egui, :slint] do
+      assert is_binary(Rekindle.Phoenix.web_host(integration))
+      assert Rekindle.Phoenix.web_entry_path(Endpoint) == "/" <> digested_entry
+    end
 
     assert File.read!(Path.join(root, "priv/static/#{digested_entry}")) ==
              File.read!(web_entry_path)

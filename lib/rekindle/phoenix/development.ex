@@ -18,12 +18,11 @@ defmodule Rekindle.Phoenix.Development do
 
   @impl Plug
   def call(%Plug.Conn{method: "GET", path_info: @prefix} = conn, options) do
-    with {:ok, project} <- project(options),
-         {:ok, integration} <- Rekindle.Integration.fetch(project.integration) do
+    with {:ok, project} <- project(options) do
       conn
       |> no_store()
       |> put_resp_content_type("text/html")
-      |> send_resp(200, page(integration.host))
+      |> send_resp(200, page(Rekindle.Phoenix.web_host(project.integration)))
       |> halt()
     else
       _error -> unavailable(conn)
