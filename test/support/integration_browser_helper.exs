@@ -39,7 +39,7 @@ defmodule Rekindle.Test.IntegrationBrowser do
     port = :httpd.info(server) |> Keyword.fetch!(:port)
 
     try do
-      with_webdriver(driver, browser, profile, graphics, fn webdriver_port, session ->
+      with_webdriver!(driver, browser, profile, graphics, fn webdriver_port, session ->
         webdriver_request!(
           :post,
           webdriver_port,
@@ -61,7 +61,8 @@ defmodule Rekindle.Test.IntegrationBrowser do
     end
   end
 
-  defp with_webdriver(driver, browser, profile, graphics, function) do
+  @doc false
+  def with_webdriver!(driver, browser, profile, graphics, function) do
     port = available_port()
 
     driver_port =
@@ -378,7 +379,8 @@ defmodule Rekindle.Test.IntegrationBrowser do
     match?({:ok, _response}, webdriver_request(:get, port, "/status", nil))
   end
 
-  defp webdriver_request!(method, port, path, body) do
+  @doc false
+  def webdriver_request!(method, port, path, body) do
     case webdriver_request(method, port, path, body) do
       {:ok, response} -> response
       {:error, reason} -> flunk("ChromeDriver request failed: #{inspect(reason)}")

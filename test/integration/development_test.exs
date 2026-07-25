@@ -5,6 +5,7 @@ defmodule Rekindle.DevelopmentTest do
   alias Rekindle.Development.Builder
   alias Rekindle.Desktop.Development, as: DesktopDevelopment
   alias Rekindle.Phoenix.Development
+  alias Rekindle.Test.IntegrationBrowser
 
   setup do
     root =
@@ -687,7 +688,7 @@ defmodule Rekindle.DevelopmentTest do
   end
 
   @tag timeout: 60_000
-  test "recovers after the current selection transport disconnects", %{root: root} do
+  test "serializes polls and recovers after a rejected selection request", %{root: root} do
     selector =
       browser_selector(
         String.duplicate("a", 64),
@@ -716,6 +717,121 @@ defmodule Rekindle.DevelopmentTest do
     assert output =~ ~s(data-requests-at-initialization="2")
     assert output =~ ~s(data-rekindle-error-count="1")
     assert output =~ "TypeError: selection transport disconnected"
+  end
+
+  @tag timeout: 60_000
+  test "recovers after the development endpoint disconnects and restarts", %{root: root} do
+    browser = System.find_executable("chromium") || flunk("Chromium is required")
+    driver = System.find_executable("chromedriver") || flunk("ChromeDriver is required")
+    host_root = Path.join(root, "browser-endpoint-recovery")
+    profile = Path.join(host_root, "profile")
+    generation = String.duplicate("a", 64)
+    File.mkdir_p!(Path.join(host_root, "__rekindle"))
+
+    Application.put_env(:rekindle_development_test, Rekindle,
+      integration: :egui,
+      targets: [web: []]
+    )
+
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+    runtime = request("/__rekindle/runtime.js", options).resp_body
+
+    observer =
+      """
+      <script>
+        HTMLCanvasElement.prototype.getContext = () => ({});
+        const originalConsoleError = console.error.bind(console);
+        console.error = (...values) => {
+          const error = values.find((value) => value instanceof Error);
+          const message = error ? `${error.name}: ${error.message}` : values.join(" ");
+          const root = document.documentElement;
+          root.dataset.rekindleErrorCount =
+            String(Number(root.dataset.rekindleErrorCount || "0") + 1);
+          root.dataset.rekindleErrors =
+            [root.dataset.rekindleErrors, message].filter(Boolean).join(" | ");
+          originalConsoleError(...values);
+        };
+      </script>
+      """
+
+    page =
+      options
+      |> then(&request("/__rekindle", &1).resp_body)
+      |> String.replace(
+        ~s(<script type="module" src="/__rekindle/runtime.js"></script>),
+        observer <> ~s(<script type="module" src="/__rekindle/runtime.js"></script>)
+      )
+
+    module =
+      """
+      export default async function initialize() {
+        const root = document.documentElement;
+        root.dataset.initializers =
+          String(Number(root.dataset.initializers || "0") + 1);
+        root.dataset.applicationStarted = "true";
+      }
+      """
+
+    selector =
+      browser_selector(generation, module)
+
+    File.write!(Path.join(host_root, "index.html"), page)
+    File.write!(Path.join(host_root, "__rekindle/runtime.js"), runtime)
+
+    {:ok, server} = start_development_httpd(host_root, 0)
+    port = :httpd.info(server) |> Keyword.fetch!(:port)
+
+    try do
+      IntegrationBrowser.with_webdriver!(
+        driver,
+        browser,
+        profile,
+        :webgl2,
+        fn webdriver_port, session ->
+          IntegrationBrowser.webdriver_request!(
+            :post,
+            webdriver_port,
+            "/session/#{session}/url",
+            %{"url" => "http://127.0.0.1:#{port}/"}
+          )
+
+          Process.sleep(300)
+          assert :ok = :inets.stop(:httpd, server)
+          Process.sleep(600)
+
+          disconnected =
+            development_browser_state(webdriver_port, session)
+
+          assert disconnected["applicationStarted"] == nil
+          assert disconnected["errorCount"] >= 1
+          assert disconnected["errors"] =~ "TypeError"
+
+          File.write!(Path.join(host_root, "__rekindle/current"), selector)
+          {:ok, restarted} = start_development_httpd(host_root, port)
+
+          try do
+            assert_until(
+              fn ->
+                development_browser_state(webdriver_port, session)["applicationStarted"] == "true"
+              end,
+              1_000
+            )
+
+            recovered = development_browser_state(webdriver_port, session)
+            assert recovered["initializers"] == "1"
+            assert recovered["errorCount"] >= 1
+            assert recovered["errors"] =~ "TypeError"
+
+            Process.sleep(500)
+            assert development_browser_state(webdriver_port, session)["initializers"] == "1"
+          after
+            :inets.stop(:httpd, restarted)
+          end
+        end
+      )
+    after
+      :inets.stop(:httpd, server)
+    end
   end
 
   test "does not expose unselected or malformed Web paths", %{root: root} do
@@ -1751,6 +1867,42 @@ defmodule Rekindle.DevelopmentTest do
              )
 
     output
+  end
+
+  defp start_development_httpd(root, port) do
+    :inets.start(:httpd,
+      bind_address: ~c"127.0.0.1",
+      port: port,
+      server_name: ~c"rekindle-development-recovery-test",
+      server_root: String.to_charlist(root),
+      document_root: String.to_charlist(root),
+      modules: [:mod_alias, :mod_dir, :mod_get, :mod_head],
+      directory_index: [~c"index.html"],
+      mime_types: [
+        {~c"html", ~c"text/html"},
+        {~c"js", ~c"text/javascript"}
+      ]
+    )
+  end
+
+  defp development_browser_state(port, session) do
+    IntegrationBrowser.webdriver_request!(
+      :post,
+      port,
+      "/session/#{session}/execute/sync",
+      %{
+        "script" => """
+        const root = document.documentElement.dataset;
+        return {
+          applicationStarted: root.applicationStarted || null,
+          initializers: root.initializers || null,
+          errorCount: Number(root.rekindleErrorCount || "0"),
+          errors: root.rekindleErrors || ""
+        };
+        """,
+        "args" => []
+      }
+    )["value"]
   end
 
   defp start_launcher(root, supervisor) do
