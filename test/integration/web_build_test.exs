@@ -196,7 +196,7 @@ defmodule Rekindle.WebBuildTest do
       end
 
       try do
-        assert {:error, %Rekindle.Web.Error{kind: :mkdir}} =
+        assert {:error, %Rekindle.Web.Error{kind: :cleanup}} =
                  Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
 
         assert external |> File.ls!() |> Enum.sort() == external_root_names
@@ -316,6 +316,47 @@ defmodule Rekindle.WebBuildTest do
     assert File.read!(entry) == selected
     assert File.regular?(first.artifact)
     refute File.exists?(destination)
+  end
+
+  test "preserves the selected release when retention cleanup fails", %{root: root} do
+    tools = fake_tools(root, "success-one")
+    assert {:ok, selected} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, candidate} = build(root, tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    namespace = Path.join(root, "priv/static/rekindle")
+    web_root = Path.join(namespace, "web")
+    backup = Path.join(root, "public-web-backup")
+    selector = File.read!(Path.join(namespace, "entry.js"))
+    selected_manifest = File.read!(selected.metadata.manifest)
+    selected_artifact = File.read!(selected.artifact)
+    relative_manifest = Path.relative_to(selected.metadata.manifest, web_root)
+    relative_artifact = Path.relative_to(selected.artifact, web_root)
+
+    File.rename!(web_root, backup)
+    File.write!(web_root, "not a directory")
+
+    try do
+      assert {:error, %Rekindle.Web.Error{kind: :cleanup}} =
+               Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+      assert File.read!(Path.join(namespace, "entry.js")) == selector
+      assert File.read!(Path.join(backup, relative_manifest)) == selected_manifest
+      assert File.read!(Path.join(backup, relative_artifact)) == selected_artifact
+    after
+      File.rm!(web_root)
+      File.rename!(backup, web_root)
+    end
+
+    assert File.read!(Path.join(namespace, "entry.js")) == selector
+    assert File.read!(selected.metadata.manifest) == selected_manifest
+    assert File.read!(selected.artifact) == selected_artifact
+
+    refute File.exists?(Path.join([web_root, candidate.metadata.generation]))
   end
 
   test "serializes concurrent Web releases in the same public namespace", %{root: root} do

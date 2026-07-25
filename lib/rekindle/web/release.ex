@@ -36,8 +36,9 @@ defmodule Rekindle.Web.Release do
 
   defp publish_locked(project, namespace, source, manifest, result) do
     destination = Path.join([namespace, "web", manifest["generation"]])
+    previous = selected_generation(Path.join(namespace, "entry.js"))
 
-    with :ok <- owned_directory(project, Path.join(namespace, "web")),
+    with :ok <- cleanup(project, namespace, manifest["generation"], previous),
          {:ok, published?} <- publish_generation(project, source, destination, manifest) do
       finish_publication(
         project,
@@ -51,10 +52,7 @@ defmodule Rekindle.Web.Release do
   end
 
   defp finish_publication(project, namespace, destination, manifest, result, published?) do
-    previous = selected_generation(Path.join(namespace, "entry.js"))
-
-    with :ok <- select(project, namespace, manifest),
-         :ok <- cleanup(project, namespace, manifest["generation"], previous) do
+    with :ok <- select(project, namespace, manifest) do
       {:ok,
        %{
          result
@@ -211,19 +209,22 @@ defmodule Rekindle.Web.Release do
 
     case OwnedPath.validate_directory(project.root, root) do
       :ok ->
+        generations = generation_directories(root)
+
         retained =
-          root
-          |> generation_directories()
+          generations
           |> Enum.sort_by(fn {_path, modified} -> modified end, :desc)
           |> keep(selected, previous)
 
-        root
-        |> generation_directories()
+        generations
         |> Enum.map(&elem(&1, 0))
         |> Enum.reject(&MapSet.member?(retained, &1))
         |> Enum.each(&remove(project, &1))
 
         remove_temporaries(project, root)
+        :ok
+
+      {:error, :enoent} ->
         :ok
 
       {:error, reason} ->
@@ -252,16 +253,23 @@ defmodule Rekindle.Web.Release do
   end
 
   defp keep(generations, selected, previous) do
-    preferred =
+    preferred_names =
       [selected, previous]
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
+
+    preferred =
+      preferred_names
       |> Enum.flat_map(fn name ->
         Enum.filter(generations, &(Path.basename(elem(&1, 0)) == name))
       end)
 
-    (preferred ++ Enum.reject(generations, &(&1 in preferred)))
-    |> Enum.take(@retained)
+    recent =
+      generations
+      |> Enum.reject(&(&1 in preferred))
+      |> Enum.take(max(@retained - length(preferred_names), 0))
+
+    (preferred ++ recent)
     |> MapSet.new(&elem(&1, 0))
   end
 
