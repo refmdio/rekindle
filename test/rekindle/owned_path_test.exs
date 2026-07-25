@@ -80,6 +80,32 @@ defmodule Rekindle.OwnedPathTest do
     refute File.exists?(file)
   end
 
+  test "reads only regular project-owned files" do
+    root = temporary_root()
+    directory = Path.join([root, ".rekindle", "dev"])
+    path = Path.join(directory, "marker.json")
+    target = Path.join(directory, "target.json")
+    assert :ok = OwnedPath.ensure_directory(root, directory)
+    File.write!(path, "regular")
+    File.write!(target, "linked")
+
+    assert {:ok, "regular"} = OwnedPath.read_file(root, path)
+
+    for kind <- [:symlink, :fifo] do
+      File.rm!(path)
+
+      case kind do
+        :symlink -> File.ln_s!("target.json", path)
+        :fifo -> assert {"", 0} = System.cmd("mkfifo", [path])
+      end
+
+      expected_type = if kind == :fifo, do: :other, else: kind
+
+      assert {:error, {:unsafe_owned_path, ^path, ^expected_type}} =
+               OwnedPath.read_file(root, path)
+    end
+  end
+
   test "refuses removal through a linked state ancestor" do
     root = temporary_root()
     external = temporary_root()

@@ -236,8 +236,7 @@ defmodule Rekindle.Desktop.Development do
        ) do
     with manifest_path when is_binary(manifest_path) <- metadata[:manifest],
          :ok <- OwnedPath.validate_parent(root, manifest_path),
-         {:ok, contents} <- File.read(manifest_path),
-         {:ok, manifest} <- Jason.decode(contents),
+         {:ok, manifest} <- Manifest.read(Path.dirname(manifest_path)),
          true <- manifest["generation"] == metadata[:generation],
          true <- manifest["target"] == metadata[:rust_target],
          true <- is_binary(manifest["executable"]),
@@ -257,7 +256,7 @@ defmodule Rekindle.Desktop.Development do
     marker_path = Path.join(directory, "desktop-last-running.json")
 
     with :ok <- OwnedPath.validate_directory(root, directory),
-         {:ok, contents} <- File.read(marker_path),
+         {:ok, contents} <- OwnedPath.read_file(root, marker_path),
          {:ok,
           %{
             "generation" => generation,
@@ -269,8 +268,7 @@ defmodule Rekindle.Desktop.Development do
          expected = Path.join(["desktop", target, generation, "manifest.json"]),
          true <- relative_manifest == expected,
          manifest_path = Path.join(directory, relative_manifest),
-         {:ok, manifest_contents} <- File.read(manifest_path),
-         {:ok, manifest} <- Jason.decode(manifest_contents),
+         {:ok, manifest} <- Manifest.read(Path.dirname(manifest_path)),
          true <- manifest["generation"] == generation,
          true <- manifest["target"] == target,
          :ok <- Manifest.validate(Path.dirname(manifest_path), manifest) do

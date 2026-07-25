@@ -225,24 +225,16 @@ defmodule Rekindle.Development.Cleanup do
 
   defp selected_web(root) do
     path = Path.join([root, ".rekindle", "dev", "web-current.json"])
-
-    case OwnedPath.validate_parent(root, path) do
-      :ok -> read_generation(path)
-      {:error, _reason} -> nil
-    end
+    read_generation(root, path)
   end
 
   defp selected_desktop(root) do
     path = Path.join([root, ".rekindle", "dev", "desktop-last-running.json"])
-
-    case OwnedPath.validate_parent(root, path) do
-      :ok -> read_desktop_generation(path)
-      {:error, _reason} -> %{}
-    end
+    read_desktop_generation(root, path)
   end
 
-  defp read_desktop_generation(path) do
-    case File.read(path) do
+  defp read_desktop_generation(root, path) do
+    case OwnedPath.read_file(root, path) do
       {:ok, contents} ->
         case Jason.decode(contents) do
           {:ok, %{"generation" => generation, "target" => target}}
@@ -262,8 +254,8 @@ defmodule Rekindle.Development.Cleanup do
     end
   end
 
-  defp read_generation(path) do
-    with {:ok, contents} <- File.read(path),
+  defp read_generation(root, path) do
+    with {:ok, contents} <- OwnedPath.read_file(root, path),
          {:ok, %{"generation" => generation}} <- Jason.decode(contents),
          true <- is_binary(generation),
          true <- Regex.match?(@generation, generation) do

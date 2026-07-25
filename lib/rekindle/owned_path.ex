@@ -25,6 +25,17 @@ defmodule Rekindle.OwnedPath do
     validate_directory(project_root, Path.dirname(path))
   end
 
+  @spec read_file(Path.t(), Path.t()) :: {:ok, binary()} | {:error, reason()}
+  def read_file(project_root, path) do
+    with :ok <- validate_parent(project_root, path) do
+      case File.lstat(path) do
+        {:ok, %{type: :regular}} -> File.read(path)
+        {:ok, %{type: type}} -> {:error, {:unsafe_owned_path, path, type}}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
   @spec remove_directory(Path.t(), Path.t()) :: :ok | {:error, reason()}
   def remove_directory(project_root, path) do
     with :ok <- validate_parent(project_root, path) do

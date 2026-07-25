@@ -138,8 +138,7 @@ defmodule Rekindle.Phoenix.Development do
   defp current(project) do
     selector_path = Path.join([project.root, ".rekindle", "dev", "web-current.json"])
 
-    with :ok <- OwnedPath.validate_parent(project.root, selector_path),
-         {:ok, contents} <- File.read(selector_path),
+    with {:ok, contents} <- OwnedPath.read_file(project.root, selector_path),
          {:ok, %{"generation" => generation}} <- Jason.decode(contents),
          true <- Regex.match?(@generation, generation),
          {:ok, manifest} <- manifest(project, generation) do
@@ -149,16 +148,14 @@ defmodule Rekindle.Phoenix.Development do
 
   defp manifest(project, generation) do
     root = Path.join([project.root, ".rekindle", "dev", "web", generation])
-    path = Path.join(root, "manifest.json")
 
     with :ok <- OwnedPath.validate_directory(project.root, root),
-         {:ok, contents} <- File.read(path),
          {:ok,
           %{
             "generation" => ^generation,
             "entry" => entry,
             "members" => members
-          } = manifest} <- Jason.decode(contents),
+          } = manifest} <- Manifest.read(root),
          true <- safe_member?(entry),
          true <- is_list(members),
          true <- Enum.any?(members, &(&1["path"] == entry)) do
@@ -180,8 +177,7 @@ defmodule Rekindle.Phoenix.Development do
   defp build_error(project) do
     path = error_path(project)
 
-    with :ok <- OwnedPath.validate_parent(project.root, path),
-         {:ok, contents} <- File.read(path),
+    with {:ok, contents} <- OwnedPath.read_file(project.root, path),
          {:ok, %{"error" => message}} when is_binary(message) <- Jason.decode(contents) do
       {:ok, message}
     else

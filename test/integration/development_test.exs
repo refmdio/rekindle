@@ -373,6 +373,36 @@ defmodule Rekindle.DevelopmentTest do
     assert request("/__rekindle/current", options).status == 200
   end
 
+  test "rejects linked and special Web runtime state without blocking requests", %{root: root} do
+    generation = publish_web(root, "export default 'ready';")
+    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+    selector = Path.join(root, ".rekindle/dev/web-current.json")
+    error = Path.join(root, ".rekindle/dev/web-error.json")
+    manifest = Path.join([root, ".rekindle", "dev", "web", generation, "manifest.json"])
+
+    for kind <- [:symlink, :fifo] do
+      with_special_file(selector, kind, Jason.encode!(%{"generation" => generation}), fn ->
+        assert {:ok, %{status: 503}} =
+                 bounded(fn -> request("/__rekindle/current", options) end)
+      end)
+
+      with_special_file(error, kind, Jason.encode!(%{"error" => "linked"}), fn ->
+        assert {:ok, %{status: 200}} =
+                 bounded(fn -> request("/__rekindle/current", options) end)
+      end)
+
+      with_special_file(manifest, kind, "{}", fn ->
+        assert {:ok, %{status: 503}} =
+                 bounded(fn -> request("/__rekindle/current", options) end)
+
+        assert {:ok, %{status: 404}} =
+                 bounded(fn ->
+                   request("/__rekindle/web/#{generation}/app.js", options)
+                 end)
+      end)
+    end
+  end
+
   test "uses WebGL2 diagnostics for egui without requiring WebGPU", %{root: root} do
     Application.put_env(:rekindle_development_test, Rekindle,
       integration: :egui,
@@ -1001,6 +1031,53 @@ defmodule Rekindle.DevelopmentTest do
   end
 
   @tag capture_log: true
+  test "rejects linked and special desktop runtime state without blocking", %{root: root} do
+    supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+    launcher = start_launcher(root, supervisor)
+    stable = desktop_result(root, "stable-special-state", :running)
+
+    DesktopDevelopment.replace(launcher, stable)
+    assert_receive {DesktopDevelopment, {:ready, ^stable}}, 1_000
+    %{current: %{pid: stable_pid}} = DesktopDevelopment.status(launcher)
+
+    for kind <- [:symlink, :fifo] do
+      candidate = desktop_result(root, "candidate-#{kind}", :running)
+
+      with_special_file(candidate.metadata.manifest, kind, "{}", fn ->
+        DesktopDevelopment.replace(launcher, candidate)
+
+        assert_receive {DesktopDevelopment,
+                        {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}}},
+                       1_000
+
+        assert %{current: %{pid: ^stable_pid}, candidate: nil} =
+                 DesktopDevelopment.status(launcher)
+      end)
+    end
+
+    stop_supervised(DesktopDevelopment)
+    marker = Path.join(root, ".rekindle/dev/desktop-last-running.json")
+
+    for kind <- [:symlink, :fifo] do
+      with_special_file(marker, kind, "{}", fn ->
+        assert {:ok, {:ok, restarted}} =
+                 bounded(fn ->
+                   GenServer.start(
+                     DesktopDevelopment,
+                     project_root: root,
+                     supervisor: supervisor,
+                     readiness: 75,
+                     notify: nil
+                   )
+                 end)
+
+        assert DesktopDevelopment.status(restarted) == %{current: nil, candidate: nil}
+        GenServer.stop(restarted)
+      end)
+    end
+  end
+
+  @tag capture_log: true
   test "keeps the running desktop process when its replacement exits early", %{root: root} do
     supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
     launcher = start_launcher(root, supervisor)
@@ -1501,6 +1578,35 @@ defmodule Rekindle.DevelopmentTest do
     assert File.read!(selector) == selected_selector
     assert File.dir?(Path.join(web_root, selected))
     assert length(Path.wildcard(Path.join(web_root, String.duplicate("?", 64)))) == 2
+  end
+
+  @tag capture_log: true
+  test "skips linked and special selectors during startup cleanup without blocking", %{root: root} do
+    generation = publish_web(root, "export default 'selected';")
+    desktop = desktop_result(root, "selected-cleanup", :running)
+    selector = Path.join(root, ".rekindle/dev/web-current.json")
+    marker = Path.join(root, ".rekindle/dev/desktop-last-running.json")
+
+    File.write!(
+      marker,
+      Jason.encode!(%{
+        "generation" => desktop.metadata.generation,
+        "target" => desktop.metadata.rust_target,
+        "manifest" =>
+          Path.relative_to(desktop.metadata.manifest, Path.join(root, ".rekindle/dev"))
+      })
+    )
+
+    {:ok, project} =
+      Rekindle.Config.load(:rekindle_development_test, project_root: root)
+
+    for kind <- [:symlink, :fifo] do
+      with_special_file(selector, kind, Jason.encode!(%{"generation" => generation}), fn ->
+        with_special_file(marker, kind, "{}", fn ->
+          assert {:ok, :ok} = bounded(fn -> Rekindle.Development.Cleanup.startup(project) end)
+        end)
+      end)
+    end
   end
 
   test "does not read or mutate development state through a linked state root", %{root: root} do
@@ -2038,6 +2144,40 @@ defmodule Rekindle.DevelopmentTest do
     |> Path.join(".rekindle/dev/desktop-last-running.json")
     |> File.read!()
     |> Jason.decode!()
+  end
+
+  defp bounded(function) do
+    task = Task.async(function)
+    Task.yield(task, 2_000) || Task.shutdown(task, :brutal_kill)
+  end
+
+  defp with_special_file(path, kind, fallback, function) do
+    backup = path <> ".special-backup"
+    existed? = File.exists?(path)
+
+    if existed? do
+      File.rename!(path, backup)
+    else
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(backup, fallback)
+    end
+
+    case kind do
+      :symlink -> File.ln_s!(Path.basename(backup), path)
+      :fifo -> assert {"", 0} = System.cmd("mkfifo", [path])
+    end
+
+    try do
+      function.()
+    after
+      if match?({:ok, _stat}, File.lstat(path)), do: File.rm!(path)
+
+      if existed? and match?({:ok, _stat}, File.lstat(backup)) do
+        File.rename!(backup, path)
+      else
+        if match?({:ok, _stat}, File.lstat(backup)), do: File.rm!(backup)
+      end
+    end
   end
 
   defp assert_until(fun, attempts \\ 50)
