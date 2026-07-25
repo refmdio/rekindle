@@ -130,6 +130,19 @@ defmodule Rekindle.Test.IntegrationBrowser do
       ]
   end
 
+  defp browser_arguments(:dom, profile) do
+    common_browser_arguments(profile) ++
+      [
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-extensions",
+        "--disable-gpu",
+        "--disable-sync",
+        "--metrics-recording-only"
+      ]
+  end
+
   defp common_browser_arguments(profile) do
     [
       "--headless=new",

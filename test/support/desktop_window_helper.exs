@@ -141,6 +141,8 @@ defmodule Rekindle.Test.DesktopWindow do
       "--log=#{log}",
       "--",
       tools.env,
+      "WAYLAND_DISPLAY=#{socket}",
+      "XDG_SESSION_TYPE=wayland",
       "WINIT_UNIX_BACKEND=wayland",
       tools.timeout,
       "--signal=TERM",

@@ -58,15 +58,22 @@ jobs:
             libxkbcommon-x11-dev \
             mesa-vulkan-drivers \
             pkg-config \
+            vulkan-tools \
             weston
 
       - name: Check acceptance prerequisites
         run: |
           test -r /proc/self/stat
-          for executable in chromium chromedriver inotifywait kill pkill setsid weston; do
+          for executable in chromium chromedriver inotifywait kill pkill setsid vulkaninfo weston; do
             command -v "$executable"
           done
           pkg-config --exists fontconfig wayland-client xkbcommon xkbcommon-x11
+          lavapipe_icd="$(
+            find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit
+          )"
+          test -n "$lavapipe_icd"
+          echo "VK_DRIVER_FILES=$lavapipe_icd" >> "$GITHUB_ENV"
+          VK_DRIVER_FILES="$lavapipe_icd" vulkaninfo --summary | grep -Eiq 'llvmpipe|lavapipe'
           timeout 30 chromium \
             --headless=new \
             --no-sandbox \

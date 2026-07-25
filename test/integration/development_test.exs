@@ -503,7 +503,7 @@ defmodule Rekindle.DevelopmentTest do
         "http://127.0.0.1:#{port}/"
       ]
 
-      output = run_browser!(browser, arguments, host_root, 30_000)
+      output = run_browser!(browser, arguments, profile)
 
       assert output =~ ~s(data-rekindle-status="ready")
       assert output =~ ~s(data-rekindle-generation="#{second}")
@@ -591,7 +591,7 @@ defmodule Rekindle.DevelopmentTest do
       "file://#{page_path}"
     ]
 
-    output = run_browser!(browser, arguments, directory, 30_000)
+    output = run_browser!(browser, arguments, profile)
 
     assert output =~ ~s(data-requests-at-initialization="2")
     assert output =~ ~s(data-initializers="1")
@@ -1879,7 +1879,7 @@ defmodule Rekindle.DevelopmentTest do
       "file://#{page_path}"
     ]
 
-    output = run_browser!(browser, arguments, directory, 20_000)
+    output = run_browser!(browser, arguments, profile)
 
     output
   end
@@ -1958,33 +1958,41 @@ defmodule Rekindle.DevelopmentTest do
       "file://#{page_path}"
     ]
 
-    output = run_browser!(browser, arguments, directory, 15_000)
+    output = run_browser!(browser, arguments, profile)
 
     output
   end
 
-  defp run_browser!(browser, arguments, directory, timeout) do
-    timeout_executable = System.find_executable("timeout") || flunk("timeout is required")
-    seconds = div(timeout + 999, 1_000)
+  defp run_browser!(browser, arguments, profile) do
+    driver = System.find_executable("chromedriver") || flunk("ChromeDriver is required")
+    url = List.last(arguments)
 
-    {output, status} =
-      System.cmd(
-        timeout_executable,
-        [
-          "--signal=TERM",
-          "--kill-after=5s",
-          "#{seconds}s",
-          browser
-          | arguments
-        ],
-        cd: directory,
-        stderr_to_stdout: true
+    virtual_time =
+      Enum.find_value(arguments, 0, fn
+        "--virtual-time-budget=" <> milliseconds -> String.to_integer(milliseconds)
+        _argument -> nil
+      end)
+
+    IntegrationBrowser.with_webdriver!(driver, browser, profile, :dom, fn port, session ->
+      IntegrationBrowser.webdriver_request!(
+        :post,
+        port,
+        "/session/#{session}/url",
+        %{"url" => url}
       )
 
-    assert status == 0,
-           "Chromium exited with status #{status}:\n#{String.slice(output, 0, 1_000_000)}"
+      Process.sleep(virtual_time + 250)
 
-    output
+      IntegrationBrowser.webdriver_request!(
+        :post,
+        port,
+        "/session/#{session}/execute/sync",
+        %{
+          "script" => "return document.documentElement.outerHTML;",
+          "args" => []
+        }
+      )["value"]
+    end)
   end
 
   defp start_development_httpd(root, port) do
