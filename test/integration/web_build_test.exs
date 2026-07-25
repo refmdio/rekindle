@@ -318,6 +318,125 @@ defmodule Rekindle.WebBuildTest do
     refute File.exists?(destination)
   end
 
+  test "inspects the selected release before retention", %{root: root} do
+    tools = fake_tools(root, "success-one")
+    assert {:ok, first} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, selected} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-three")
+    assert {:ok, candidate} = build(root, tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    namespace = Path.join(root, "priv/static/rekindle")
+    web_root = Path.join(namespace, "web")
+    entry = Path.join(namespace, "entry.js")
+    selector = File.read!(entry)
+    selected_manifest = File.read!(selected.metadata.manifest)
+    selected_artifact = File.read!(selected.artifact)
+    generations = release_generations(web_root)
+
+    File.touch!(Path.dirname(first.artifact), {{2030, 1, 1}, {0, 0, 0}})
+    File.chmod!(entry, 0o000)
+    File.chmod!(namespace, 0o555)
+
+    publication =
+      try do
+        Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+      after
+        File.chmod!(namespace, 0o755)
+        File.chmod!(entry, 0o644)
+      end
+
+    assert {:error, %Rekindle.Web.Error{kind: :cleanup}} = publication
+    assert File.read!(entry) == selector
+    assert File.read!(selected.metadata.manifest) == selected_manifest
+    assert File.read!(selected.artifact) == selected_artifact
+    assert release_generations(web_root) == generations
+    refute File.exists?(Path.join(web_root, candidate.metadata.generation))
+
+    assert {:ok, published} =
+             Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+    assert published.metadata.generation == candidate.metadata.generation
+
+    assert release_generations(web_root) ==
+             MapSet.new([selected.metadata.generation, candidate.metadata.generation])
+  end
+
+  test "rejects noncanonical release selectors before retention", %{root: root} do
+    tools = fake_tools(root, "success-one")
+    assert {:ok, selected} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, candidate} = build(root, tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    namespace = Path.join(root, "priv/static/rekindle")
+    web_root = Path.join(namespace, "web")
+    entry = Path.join(namespace, "entry.js")
+    selector = File.read!(entry)
+    generations = release_generations(web_root)
+
+    for kind <- [:symlink, :fifo, :malformed, :mismatched_generation] do
+      backup = Path.join(root, "release-selector-#{kind}")
+      File.rename!(entry, backup)
+
+      expected =
+        case kind do
+          :symlink ->
+            File.ln_s!(backup, entry)
+            selector
+
+          :fifo ->
+            assert {"", 0} = System.cmd("mkfifo", [entry])
+            nil
+
+          :malformed ->
+            File.write!(entry, "not a release selector")
+            "not a release selector"
+
+          :mismatched_generation ->
+            mismatched =
+              String.replace(
+                selector,
+                "./web/#{selected.metadata.generation}/",
+                "./web/#{String.duplicate("f", 64)}/"
+              )
+
+            File.write!(entry, mismatched)
+            mismatched
+        end
+
+      try do
+        selector_type = File.lstat!(entry).type
+
+        assert {:error, %Rekindle.Web.Error{kind: :cleanup}} =
+                 Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+        assert File.lstat!(entry).type == selector_type
+        if expected, do: assert(File.read!(entry) == expected)
+        assert release_generations(web_root) == generations
+        refute File.exists?(Path.join(web_root, candidate.metadata.generation))
+      after
+        File.rm!(entry)
+        File.rename!(backup, entry)
+      end
+    end
+
+    assert File.read!(entry) == selector
+
+    assert {:ok, published} =
+             Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+    assert published.metadata.generation == candidate.metadata.generation
+  end
+
   test "preserves the selected release when retention cleanup fails", %{root: root} do
     tools = fake_tools(root, "success-one")
     assert {:ok, selected} = build(root, tools, profile: :release)

@@ -36,9 +36,9 @@ defmodule Rekindle.Web.Release do
 
   defp publish_locked(project, namespace, source, manifest, result) do
     destination = Path.join([namespace, "web", manifest["generation"]])
-    previous = selected_generation(Path.join(namespace, "entry.js"))
 
-    with :ok <- cleanup(project, namespace, manifest["generation"], previous),
+    with {:ok, previous} <- selected_generation(Path.join(namespace, "entry.js")),
+         :ok <- cleanup(project, namespace, manifest["generation"], previous),
          {:ok, published?} <- publish_generation(project, source, destination, manifest) do
       finish_publication(
         project,
@@ -303,16 +303,62 @@ defmodule Rekindle.Web.Release do
   end
 
   defp selected_generation(path) do
-    with {:ok, contents} <- File.read(path),
-         [generation] <-
+    case File.lstat(path) do
+      {:ok, %{type: :regular}} ->
+        with {:ok, contents} <- File.read(path),
+             {:ok, generation} <- parse_selector(contents) do
+          {:ok, generation}
+        else
+          {:error, %Error{} = error} -> {:error, error}
+          {:error, reason} -> file_error(:cleanup, path, reason)
+        end
+
+      {:ok, _stat} ->
+        error(:cleanup, "Web release selector is not a regular file: #{path}")
+
+      {:error, :enoent} ->
+        {:ok, nil}
+
+      {:error, reason} ->
+        file_error(:cleanup, path, reason)
+    end
+  end
+
+  defp parse_selector(contents) do
+    with [generation, encoded_module] <-
            Regex.run(
-             ~r/\A\/\/ Rekindle generation: ([0-9a-f]{64})\n/,
+             ~r/\A\/\/ Rekindle generation: ([0-9a-f]{64})\nimport init from (.+);\nawait init\(\);\n\z/,
              contents,
              capture: :all_but_first
-           ) do
-      generation
+           ),
+         {:ok, module} when is_binary(module) <- Jason.decode(encoded_module),
+         true <- Jason.encode!(module) == encoded_module,
+         {:ok, _entry} <- selector_entry(module, generation) do
+      {:ok, generation}
     else
-      _error -> nil
+      _error -> error(:cleanup, "Web release selector is invalid")
+    end
+  end
+
+  defp selector_entry(module, generation) do
+    prefix = "./web/#{generation}/"
+
+    if String.starts_with?(module, prefix) do
+      entry = String.replace_prefix(module, prefix, "")
+      root = "/generation"
+      expanded = Path.expand(entry, root)
+
+      if entry != "" and
+           Path.type(entry) == :relative and
+           expanded != root and
+           String.starts_with?(expanded, root <> "/") and
+           Path.relative_to(expanded, root) == entry do
+        {:ok, entry}
+      else
+        :error
+      end
+    else
+      :error
     end
   end
 
