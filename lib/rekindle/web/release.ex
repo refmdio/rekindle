@@ -209,21 +209,21 @@ defmodule Rekindle.Web.Release do
 
     case OwnedPath.validate_directory(project.root, root) do
       :ok ->
-        generations = generation_directories(root)
+        with {:ok, generations} <- generation_directories(root) do
+          retained =
+            generations
+            |> Enum.sort_by(fn {_path, modified} -> modified end, :desc)
+            |> keep(selected, previous)
 
-        retained =
-          generations
-          |> Enum.sort_by(fn {_path, modified} -> modified end, :desc)
-          |> keep(selected, previous)
+          stale =
+            generations
+            |> Enum.map(&elem(&1, 0))
+            |> Enum.reject(&MapSet.member?(retained, &1))
 
-        stale =
-          generations
-          |> Enum.map(&elem(&1, 0))
-          |> Enum.reject(&MapSet.member?(retained, &1))
-
-        with :ok <- remove_generations(project, stale) do
-          remove_temporaries(project, root)
-          :ok
+          with :ok <- remove_generations(project, stale) do
+            remove_temporaries(project, root)
+            :ok
+          end
         end
 
       {:error, :enoent} ->
@@ -235,22 +235,28 @@ defmodule Rekindle.Web.Release do
   end
 
   defp generation_directories(root) do
-    case File.ls(root) do
-      {:ok, names} ->
-        Enum.flat_map(names, fn name ->
+    with {:ok, names} <- File.ls(root) do
+      Enum.reduce_while(names, {:ok, []}, fn name, {:ok, generations} ->
+        if Regex.match?(@generation, name) do
           path = Path.join(root, name)
 
-          with true <- Regex.match?(@generation, name),
-               {:ok, %{type: :directory, mtime: modified}} <- File.stat(path, time: :posix),
-               {:ok, %{type: :directory}} <- File.lstat(path) do
-            [{path, modified}]
-          else
-            _error -> []
-          end
-        end)
+          case File.lstat(path, time: :posix) do
+            {:ok, %{type: :directory, mtime: modified}} ->
+              {:cont, {:ok, [{path, modified} | generations]}}
 
-      _error ->
-        []
+            {:ok, _stat} ->
+              {:halt, error(:cleanup, "Web release generation path is not a directory: #{path}")}
+
+            {:error, reason} ->
+              {:halt, file_error(:cleanup, path, reason)}
+          end
+        else
+          {:cont, {:ok, generations}}
+        end
+      end)
+    else
+      {:error, reason} ->
+        file_error(:cleanup, root, reason)
     end
   end
 

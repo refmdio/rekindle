@@ -406,6 +406,87 @@ defmodule Rekindle.WebBuildTest do
              MapSet.new([second.metadata.generation, candidate.metadata.generation])
   end
 
+  test "does not activate a release when generations cannot be enumerated", %{root: root} do
+    tools = fake_tools(root, "success-one")
+    assert {:ok, first} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, second} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-three")
+    assert {:ok, candidate} = build(root, tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    namespace = Path.join(root, "priv/static/rekindle")
+    web_root = Path.join(namespace, "web")
+    selector = File.read!(Path.join(namespace, "entry.js"))
+    selected_manifest = File.read!(second.metadata.manifest)
+    selected_artifact = File.read!(second.artifact)
+
+    File.chmod!(web_root, 0o333)
+
+    publication =
+      try do
+        Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+      after
+        File.chmod!(web_root, 0o755)
+      end
+
+    assert {:error, %Rekindle.Web.Error{kind: :cleanup}} = publication
+    assert File.read!(Path.join(namespace, "entry.js")) == selector
+    assert File.read!(second.metadata.manifest) == selected_manifest
+    assert File.read!(second.artifact) == selected_artifact
+    refute File.exists?(Path.join(web_root, candidate.metadata.generation))
+
+    assert release_generations(web_root) ==
+             MapSet.new([first.metadata.generation, second.metadata.generation])
+
+    assert {:ok, published} =
+             Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+    assert published.metadata.generation == candidate.metadata.generation
+
+    assert release_generations(web_root) ==
+             MapSet.new([second.metadata.generation, candidate.metadata.generation])
+  end
+
+  test "does not ignore a canonical generation entry that is not a directory", %{root: root} do
+    tools = fake_tools(root, "success-one")
+    assert {:ok, selected} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, candidate} = build(root, tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    namespace = Path.join(root, "priv/static/rekindle")
+    web_root = Path.join(namespace, "web")
+    selector = File.read!(Path.join(namespace, "entry.js"))
+    selected_manifest = File.read!(selected.metadata.manifest)
+    selected_artifact = File.read!(selected.artifact)
+    linked_generation = Path.join(web_root, String.duplicate("f", 64))
+
+    File.ln_s!(Path.dirname(selected.artifact), linked_generation)
+
+    assert {:error, %Rekindle.Web.Error{kind: :cleanup}} =
+             Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+    assert File.read!(Path.join(namespace, "entry.js")) == selector
+    assert File.read!(selected.metadata.manifest) == selected_manifest
+    assert File.read!(selected.artifact) == selected_artifact
+    refute File.exists?(Path.join(web_root, candidate.metadata.generation))
+
+    File.rm!(linked_generation)
+
+    assert {:ok, published} =
+             Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+    assert published.metadata.generation == candidate.metadata.generation
+  end
+
   test "serializes concurrent Web releases in the same public namespace", %{root: root} do
     tools = fake_tools(root, "success-one")
     assert {:ok, first} = build(root, tools)
