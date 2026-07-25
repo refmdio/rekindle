@@ -86,9 +86,9 @@ jobs:
         run: |
           echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
           echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
-          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup target add --toolchain stable wasm32-unknown-unknown
-          rustup toolchain install nightly --profile minimal --component rustfmt
+          rustup toolchain install nightly --profile minimal --component rustfmt --component clippy
           rustup target add --toolchain nightly wasm32-unknown-unknown
           rustup run stable rustc --print target-libdir --target wasm32-unknown-unknown
           rustup run nightly rustc --print target-libdir --target wasm32-unknown-unknown
