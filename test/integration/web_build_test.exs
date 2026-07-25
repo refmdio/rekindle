@@ -437,6 +437,134 @@ defmodule Rekindle.WebBuildTest do
     assert published.metadata.generation == candidate.metadata.generation
   end
 
+  test "binds a release selector to the selected manifest entry", %{root: root} do
+    tools = fake_tools(root, "success-one")
+    assert {:ok, first} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, selected} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-three")
+    assert {:ok, candidate} = build(root, tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    namespace = Path.join(root, "priv/static/rekindle")
+    web_root = Path.join(namespace, "web")
+    entry = Path.join(namespace, "entry.js")
+    selector = File.read!(entry)
+    manifest = read_json(selected.metadata.manifest)
+    selected_manifest = File.read!(selected.metadata.manifest)
+    selected_artifact = File.read!(selected.artifact)
+    generations = release_generations(web_root)
+
+    other_member =
+      manifest["members"]
+      |> Enum.find(&(&1["path"] != manifest["entry"]))
+      |> Map.fetch!("path")
+
+    for invalid_entry <- ["missing.js", other_member] do
+      invalid_selector = release_selector(selected.metadata.generation, invalid_entry)
+      File.write!(entry, invalid_selector)
+
+      assert {:error, %Rekindle.Web.Error{kind: :invalid_manifest}} =
+               Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+      assert File.read!(entry) == invalid_selector
+      assert File.read!(selected.metadata.manifest) == selected_manifest
+      assert File.read!(selected.artifact) == selected_artifact
+      assert release_generations(web_root) == generations
+      refute File.exists?(Path.join(web_root, candidate.metadata.generation))
+    end
+
+    File.write!(entry, selector)
+
+    assert {:ok, published} =
+             Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+    assert published.metadata.generation == candidate.metadata.generation
+
+    assert release_generations(web_root) ==
+             MapSet.new([selected.metadata.generation, candidate.metadata.generation])
+
+    refute File.exists?(Path.join(web_root, first.metadata.generation))
+  end
+
+  test "validates the selected deployment before retention", %{root: root} do
+    tools = fake_tools(root, "success-one")
+    assert {:ok, selected} = build(root, tools, profile: :release)
+
+    File.write!(tools.mode, "success-two")
+    assert {:ok, candidate} = build(root, tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_web_build_test, project_root: root)
+
+    namespace = Path.join(root, "priv/static/rekindle")
+    web_root = Path.join(namespace, "web")
+    entry = Path.join(namespace, "entry.js")
+    selector = File.read!(entry)
+    generation_root = Path.dirname(selected.artifact)
+    manifest_path = selected.metadata.manifest
+    manifest = File.read!(manifest_path)
+    artifact = File.read!(selected.artifact)
+    generations = release_generations(web_root)
+
+    corruptions = [
+      {:missing_manifest, manifest_path},
+      {:tampered_manifest, manifest_path},
+      {:missing_member, selected.artifact},
+      {:tampered_member, selected.artifact},
+      {:linked_member, selected.artifact},
+      {:special_member, selected.artifact},
+      {:linked_generation, generation_root},
+      {:special_generation, generation_root}
+    ]
+
+    for {kind, path} <- corruptions do
+      backup = path <> ".selected-backup"
+      File.rename!(path, backup)
+
+      case kind do
+        :tampered_manifest ->
+          File.write!(path, "{}")
+
+        :tampered_member ->
+          File.write!(path, "changed")
+
+        kind when kind in [:linked_member, :linked_generation] ->
+          File.ln_s!(backup, path)
+
+        kind when kind in [:special_member, :special_generation] ->
+          assert {"", 0} = System.cmd("mkfifo", [path])
+
+        _kind ->
+          :ok
+      end
+
+      try do
+        assert {:error, %Rekindle.Web.Error{}} =
+                 Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+        assert File.read!(entry) == selector
+        assert release_generations(web_root) == generations
+        refute File.exists?(Path.join(web_root, candidate.metadata.generation))
+      after
+        if File.exists?(path) or match?({:ok, _stat}, File.lstat(path)), do: File.rm!(path)
+        File.rename!(backup, path)
+      end
+
+      assert File.read!(manifest_path) == manifest
+      assert File.read!(selected.artifact) == artifact
+    end
+
+    assert {:ok, published} =
+             Rekindle.Web.Release.publish(project, %{candidate | profile: :release})
+
+    assert published.metadata.generation == candidate.metadata.generation
+  end
+
   test "preserves the selected release when retention cleanup fails", %{root: root} do
     tools = fake_tools(root, "success-one")
     assert {:ok, selected} = build(root, tools, profile: :release)
@@ -1283,6 +1411,16 @@ defmodule Rekindle.WebBuildTest do
              )
 
     %{generation: generation, module: module}
+  end
+
+  defp release_selector(generation, entry) do
+    module = Jason.encode!("./web/#{generation}/#{entry}")
+
+    """
+    // Rekindle generation: #{generation}
+    import init from #{module};
+    await init();
+    """
   end
 
   defp release_generations(root) do

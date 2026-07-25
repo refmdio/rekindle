@@ -37,7 +37,7 @@ defmodule Rekindle.Web.Release do
   defp publish_locked(project, namespace, source, manifest, result) do
     destination = Path.join([namespace, "web", manifest["generation"]])
 
-    with {:ok, previous} <- selected_generation(Path.join(namespace, "entry.js")),
+    with {:ok, previous} <- selected_generation(project, namespace),
          :ok <- cleanup(project, namespace, manifest["generation"], previous),
          {:ok, published?} <- publish_generation(project, source, destination, manifest) do
       finish_publication(
@@ -302,12 +302,21 @@ defmodule Rekindle.Web.Release do
     end)
   end
 
-  defp selected_generation(path) do
+  defp selected_generation(project, namespace) do
+    path = Path.join(namespace, "entry.js")
+
+    with {:ok, selected} <- read_selector(project, path) do
+      validate_selected_generation(project, namespace, selected)
+    end
+  end
+
+  defp read_selector(project, path) do
     case File.lstat(path) do
       {:ok, %{type: :regular}} ->
-        with {:ok, contents} <- File.read(path),
-             {:ok, generation} <- parse_selector(contents) do
-          {:ok, generation}
+        with :ok <- selector_parent(project, path),
+             {:ok, contents} <- File.read(path),
+             {:ok, selected} <- parse_selector(contents) do
+          {:ok, selected}
         else
           {:error, %Error{} = error} -> {:error, error}
           {:error, reason} -> file_error(:cleanup, path, reason)
@@ -333,8 +342,8 @@ defmodule Rekindle.Web.Release do
            ),
          {:ok, module} when is_binary(module) <- Jason.decode(encoded_module),
          true <- Jason.encode!(module) == encoded_module,
-         {:ok, _entry} <- selector_entry(module, generation) do
-      {:ok, generation}
+         {:ok, entry} <- selector_entry(module, generation) do
+      {:ok, {generation, entry}}
     else
       _error -> error(:cleanup, "Web release selector is invalid")
     end
@@ -359,6 +368,39 @@ defmodule Rekindle.Web.Release do
       end
     else
       :error
+    end
+  end
+
+  defp validate_selected_generation(_project, _namespace, nil), do: {:ok, nil}
+
+  defp validate_selected_generation(project, namespace, {generation, entry}) do
+    root = Path.join([namespace, "web", generation])
+
+    with :ok <- selected_directory(project, root),
+         {:ok, manifest} <- read_manifest(root),
+         :ok <- Manifest.validate_deployment(root, manifest),
+         true <- manifest["generation"] == generation and manifest["entry"] == entry do
+      {:ok, generation}
+    else
+      false ->
+        error(:invalid_manifest, "Web release selector does not match its selected manifest")
+
+      {:error, %Error{} = error} ->
+        {:error, error}
+    end
+  end
+
+  defp selector_parent(project, path) do
+    case OwnedPath.validate_parent(project.root, path) do
+      :ok -> :ok
+      {:error, reason} -> file_error(:cleanup, path, reason)
+    end
+  end
+
+  defp selected_directory(project, path) do
+    case OwnedPath.validate_directory(project.root, path) do
+      :ok -> :ok
+      {:error, reason} -> file_error(:cleanup, path, reason)
     end
   end
 
