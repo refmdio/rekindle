@@ -4,16 +4,16 @@ defmodule Rekindle.Test.DesktopWindow do
   @default_timeout 15_000
   @weston_timeout 20_000
   @event_parsers [
-    {~r/get_xdg_surface\(new id xdg_surface#(\d+), wl_surface#(\d+)\)/, :xdg_surface},
-    {~r/xdg_surface#(\d+)\.get_toplevel\(new id xdg_toplevel#(\d+)\)/, :toplevel},
-    {~r/xdg_toplevel#(\d+)\.configure\(/, :toplevel_configure},
-    {~r/xdg_surface#(\d+)\.configure\((\d+)\)/, :surface_configure},
-    {~r/xdg_surface#(\d+)\.ack_configure\((\d+)\)/, :ack},
-    {~r/wl_surface#(\d+)\.attach\(wl_buffer#/, :attach},
-    {~r/wl_surface#(\d+)\.commit\(\)/, :commit},
-    {~r/(?:xdg_surface|xdg_toplevel|wl_surface)#(\d+)\.destroy\(\)/, :destroy},
-    {~r/wl_display#\d+\.delete_id\((\d+)\)/, :destroy},
-    {~r/create_surface\(new id wl_surface#(\d+)\)/, :destroy}
+    {~r/get_xdg_surface\(new id xdg_surface[#@](\d+), wl_surface[#@](\d+)\)/, :xdg_surface},
+    {~r/xdg_surface[#@](\d+)\.get_toplevel\(new id xdg_toplevel[#@](\d+)\)/, :toplevel},
+    {~r/xdg_toplevel[#@](\d+)\.configure\(/, :toplevel_configure},
+    {~r/xdg_surface[#@](\d+)\.configure\((\d+)\)/, :surface_configure},
+    {~r/xdg_surface[#@](\d+)\.ack_configure\((\d+)\)/, :ack},
+    {~r/wl_surface[#@](\d+)\.attach\(wl_buffer[#@]/, :attach},
+    {~r/wl_surface[#@](\d+)\.commit\(\)/, :commit},
+    {~r/(?:xdg_surface|xdg_toplevel|wl_surface)[#@](\d+)\.destroy\(\)/, :destroy},
+    {~r/wl_display[#@]\d+\.delete_id\((\d+)\)/, :destroy},
+    {~r/create_surface\(new id wl_surface[#@](\d+)\)/, :destroy}
   ]
 
   def assert_starts!(executable, integration) do
@@ -131,13 +131,16 @@ defmodule Rekindle.Test.DesktopWindow do
       duration(@weston_timeout),
       tools.weston,
       "--backend=headless",
+      "--renderer=pixman",
       "--fake-seat",
+      "--shell=kiosk",
       "--socket=#{socket}",
       "--idle-time=0",
+      "--debug",
+      "--logger-scopes=proto",
       "--log=#{log}",
       "--",
       tools.env,
-      "WAYLAND_DEBUG=client",
       "WINIT_UNIX_BACKEND=wayland",
       tools.timeout,
       "--signal=TERM",
@@ -161,10 +164,11 @@ defmodule Rekindle.Test.DesktopWindow do
 
     cond do
       status == 124 ->
-        {:error, "desktop observer timed out\n#{diagnostics(output, log)}"}
+        {:error,
+         "desktop observer timed out\n#{String.slice(diagnostics(output, log), 0, 8_000)}"}
 
       true ->
-        {:ok, output}
+        {:ok, diagnostics(output, log)}
     end
   end
 
@@ -236,6 +240,5 @@ defmodule Rekindle.Test.DesktopWindow do
   defp diagnostics(output, log) do
     [output, if(File.regular?(log), do: File.read!(log), else: "")]
     |> Enum.join("\n")
-    |> String.slice(0, 8_000)
   end
 end

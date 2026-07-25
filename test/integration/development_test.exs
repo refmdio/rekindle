@@ -503,12 +503,7 @@ defmodule Rekindle.DevelopmentTest do
         "http://127.0.0.1:#{port}/"
       ]
 
-      assert {:ok, %{status: 0, output: output}} =
-               Rekindle.Toolchain.Process.run(browser, arguments,
-                 cd: host_root,
-                 timeout: 30_000,
-                 output_limit: 1_000_000
-               )
+      output = run_browser!(browser, arguments, host_root, 30_000)
 
       assert output =~ ~s(data-rekindle-status="ready")
       assert output =~ ~s(data-rekindle-generation="#{second}")
@@ -596,12 +591,7 @@ defmodule Rekindle.DevelopmentTest do
       "file://#{page_path}"
     ]
 
-    assert {:ok, %{status: 0, output: output}} =
-             Rekindle.Toolchain.Process.run(browser, arguments,
-               cd: directory,
-               timeout: 30_000,
-               output_limit: 1_000_000
-             )
+    output = run_browser!(browser, arguments, directory, 30_000)
 
     assert output =~ ~s(data-requests-at-initialization="2")
     assert output =~ ~s(data-initializers="1")
@@ -1889,12 +1879,7 @@ defmodule Rekindle.DevelopmentTest do
       "file://#{page_path}"
     ]
 
-    assert {:ok, %{status: 0, output: output}} =
-             Rekindle.Toolchain.Process.run(browser, arguments,
-               cd: directory,
-               timeout: 20_000,
-               output_limit: 1_000_000
-             )
+    output = run_browser!(browser, arguments, directory, 20_000)
 
     output
   end
@@ -1973,12 +1958,31 @@ defmodule Rekindle.DevelopmentTest do
       "file://#{page_path}"
     ]
 
-    assert {:ok, %{status: 0, output: output}} =
-             Rekindle.Toolchain.Process.run(browser, arguments,
-               cd: directory,
-               timeout: 15_000,
-               output_limit: 1_000_000
-             )
+    output = run_browser!(browser, arguments, directory, 15_000)
+
+    output
+  end
+
+  defp run_browser!(browser, arguments, directory, timeout) do
+    timeout_executable = System.find_executable("timeout") || flunk("timeout is required")
+    seconds = div(timeout + 999, 1_000)
+
+    {output, status} =
+      System.cmd(
+        timeout_executable,
+        [
+          "--signal=TERM",
+          "--kill-after=5s",
+          "#{seconds}s",
+          browser
+          | arguments
+        ],
+        cd: directory,
+        stderr_to_stdout: true
+      )
+
+    assert status == 0,
+           "Chromium exited with status #{status}:\n#{String.slice(output, 0, 1_000_000)}"
 
     output
   end

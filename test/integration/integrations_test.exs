@@ -168,6 +168,18 @@ defmodule Rekindle.IntegrationsTest do
 
     assert {:error, _message} = DesktopWindow.classify_protocol(reused_id)
 
+    server_trace = """
+    [proto] client 0x1 rq xdg_wm_base@8.get_xdg_surface(new id xdg_surface@14, wl_surface@13)
+    [proto] client 0x1 rq xdg_surface@14.get_toplevel(new id xdg_toplevel@15)
+    [proto] client 0x1 ev xdg_toplevel@15.configure(500, 500, array[0])
+    [proto] client 0x1 ev xdg_surface@14.configure(1)
+    [proto] client 0x1 rq xdg_surface@14.ack_configure(1)
+    [proto] client 0x1 rq wl_surface@13.attach(wl_buffer@20, 0, 0)
+    [proto] client 0x1 rq wl_surface@13.commit()
+    """
+
+    assert :ok = DesktopWindow.classify_protocol(server_trace)
+
     previous_debug = System.get_env("WAYLAND_DEBUG")
     System.put_env("WAYLAND_DEBUG", "server")
 
