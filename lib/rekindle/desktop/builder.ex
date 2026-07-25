@@ -129,22 +129,13 @@ defmodule Rekindle.Desktop.Builder do
   end
 
   defp validate_published(root, expected_generation) do
-    path = Path.join(root, "manifest.json")
-
-    with {:ok, contents} <- File.read(path),
-         {:ok, manifest} <- Jason.decode(contents),
+    with {:ok, manifest} <- Manifest.read(root),
          true <- manifest["generation"] == expected_generation,
          :ok <- Manifest.validate(root, manifest) do
       :ok
     else
       false ->
         error(:invalid_manifest, "desktop generation does not match its directory")
-
-      {:error, %Jason.DecodeError{} = error} ->
-        error(:invalid_manifest, "desktop manifest is invalid: #{Exception.message(error)}")
-
-      {:error, reason} when is_atom(reason) ->
-        file_error(:manifest_read, path, reason)
 
       {:error, %Error{} = error} ->
         {:error, error}

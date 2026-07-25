@@ -5,6 +5,32 @@ defmodule Rekindle.Desktop.Manifest do
 
   @version 1
 
+  @doc false
+  @spec read(Path.t()) :: {:ok, map()} | {:error, Error.t()}
+  def read(root) do
+    path = Path.join(root, "manifest.json")
+
+    case File.lstat(path) do
+      {:ok, %{type: :regular}} ->
+        with {:ok, contents} <- File.read(path),
+             {:ok, manifest} <- Jason.decode(contents) do
+          {:ok, manifest}
+        else
+          {:error, %Jason.DecodeError{} = error} ->
+            error(:invalid_manifest, "desktop manifest is invalid: #{Exception.message(error)}")
+
+          {:error, reason} ->
+            file_error(:manifest_read, path, reason)
+        end
+
+      {:ok, _stat} ->
+        error(:invalid_manifest, "desktop manifest is not a regular file: #{path}")
+
+      {:error, reason} ->
+        file_error(:manifest_read, path, reason)
+    end
+  end
+
   @spec create(Path.t(), String.t(), String.t(), String.t(), String.t(), atom() | String.t()) ::
           {:ok, map()} | {:error, Error.t()}
   def create(root, executable, target, package, binary, integration) do

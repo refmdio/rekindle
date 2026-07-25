@@ -22,7 +22,7 @@ defmodule Rekindle.Desktop.Release do
       Path.join([project.root, "dist", "rekindle", "desktop", metadata.rust_target])
 
     with :ok <- validate_source(project, source_root),
-         {:ok, source_manifest} <- read_manifest(metadata.manifest),
+         {:ok, source_manifest} <- Manifest.read(source_root),
          :ok <- Manifest.validate(source_root, source_manifest),
          true <- source_manifest["generation"] == metadata.generation,
          true <- source_manifest["target"] == metadata.rust_target,
@@ -252,22 +252,6 @@ defmodule Rekindle.Desktop.Release do
   defp rollback(_project, _root, _executable, false), do: :ok
 
   defp content_name(manifest), do: "application-" <> manifest["sha256"]
-
-  defp read_manifest(path) do
-    with {:ok, contents} <- File.read(path),
-         {:ok, manifest} <- Jason.decode(contents) do
-      {:ok, manifest}
-    else
-      {:error, %Jason.DecodeError{} = error} ->
-        error(
-          :invalid_manifest,
-          "desktop release manifest is invalid: #{Exception.message(error)}"
-        )
-
-      {:error, reason} ->
-        file_error(:manifest_read, path, reason)
-    end
-  end
 
   defp validate_source(project, source) do
     case OwnedPath.validate_directory(project.root, source) do

@@ -157,6 +157,86 @@ defmodule Rekindle.DesktopBuildTest do
     refute File.exists?(tools.launched)
   end
 
+  test "rejects linked and special desktop release source manifests before reading", %{
+    root: root
+  } do
+    tools = fake_tools(root, executable?: true)
+    assert {:ok, candidate} = build(root, tools)
+
+    assert {:ok, project} =
+             Rekindle.Config.load(:rekindle_desktop_build_test, project_root: root)
+
+    manifest_path = candidate.metadata.manifest
+    manifest = File.read!(manifest_path)
+    release_root = Path.join([root, "dist", "rekindle", "desktop", tools.target])
+
+    for kind <- [:symlink, :fifo] do
+      backup = manifest_path <> ".source-backup"
+      File.rename!(manifest_path, backup)
+
+      case kind do
+        :symlink -> File.ln_s!(backup, manifest_path)
+        :fifo -> assert {"", 0} = System.cmd("mkfifo", [manifest_path])
+      end
+
+      try do
+        assert {:ok, {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}}} =
+                 bounded(fn ->
+                   Rekindle.Desktop.Release.publish(project, %{candidate | profile: :release})
+                 end)
+
+        refute File.exists?(Path.join(release_root, "manifest.json"))
+      after
+        File.rm!(manifest_path)
+        File.rename!(backup, manifest_path)
+      end
+
+      assert File.read!(manifest_path) == manifest
+    end
+
+    assert {:ok, published} =
+             Rekindle.Desktop.Release.publish(project, %{candidate | profile: :release})
+
+    assert published.metadata.generation =~ ~r/^[0-9a-f]{64}$/
+    assert File.regular?(published.artifact)
+    refute File.exists?(tools.launched)
+  end
+
+  test "rejects linked and special canonical desktop manifests before reuse", %{root: root} do
+    tools = fake_tools(root, executable?: true)
+    assert {:ok, selected} = build(root, tools)
+
+    manifest_path = selected.metadata.manifest
+    manifest = File.read!(manifest_path)
+    artifact = File.read!(selected.artifact)
+
+    for kind <- [:symlink, :fifo] do
+      backup = manifest_path <> ".reuse-backup"
+      File.rename!(manifest_path, backup)
+
+      case kind do
+        :symlink -> File.ln_s!(backup, manifest_path)
+        :fifo -> assert {"", 0} = System.cmd("mkfifo", [manifest_path])
+      end
+
+      try do
+        assert {:ok, {:error, %Rekindle.Desktop.Error{kind: :invalid_manifest}}} =
+                 bounded(fn -> build(root, tools) end)
+
+        assert File.read!(selected.artifact) == artifact
+        refute File.exists?(Path.join(root, ".rekindle/dev/desktop-last-running.json"))
+      after
+        File.rm!(manifest_path)
+        File.rename!(backup, manifest_path)
+      end
+
+      assert File.read!(manifest_path) == manifest
+    end
+
+    assert {:ok, reused} = build(root, tools)
+    assert reused.metadata.generation == selected.metadata.generation
+  end
+
   test "rejects linked and special desktop release destination ancestors", %{root: root} do
     selected_tools = fake_tools(root, executable?: true, marker: "selected")
     assert {:ok, selected} = build(root, selected_tools, profile: :release)
@@ -678,6 +758,11 @@ defmodule Rekindle.DesktopBuildTest do
   defp executable?(path) do
     {:ok, %{mode: mode}} = File.stat(path)
     Bitwise.band(mode, 0o111) != 0
+  end
+
+  defp bounded(function) do
+    task = Task.async(function)
+    Task.yield(task, 2_000) || Task.shutdown(task, :brutal_kill)
   end
 
   defp sha256(contents),
