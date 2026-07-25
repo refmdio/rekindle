@@ -64,7 +64,7 @@ jobs:
       - name: Check acceptance prerequisites
         run: |
           test -r /proc/self/stat
-          for executable in chromium chromedriver inotifywait kill pkill setsid vulkaninfo weston; do
+          for executable in chromium chromedriver inotifywait kill pkill setsid vulkaninfo weston weston-debug; do
             command -v "$executable"
           done
           pkg-config --exists fontconfig wayland-client xkbcommon xkbcommon-x11

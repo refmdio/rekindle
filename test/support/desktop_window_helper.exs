@@ -2,7 +2,6 @@ defmodule Rekindle.Test.DesktopWindow do
   import ExUnit.Assertions
 
   @default_timeout 15_000
-  @weston_timeout 20_000
   @event_parsers [
     {~r/get_xdg_surface\(new id xdg_surface[#@](\d+), wl_surface[#@](\d+)\)/, :xdg_surface},
     {~r/xdg_surface[#@](\d+)\.get_toplevel\(new id xdg_toplevel[#@](\d+)\)/, :toplevel},
@@ -124,27 +123,45 @@ defmodule Rekindle.Test.DesktopWindow do
   defp run(tools, runtime, executable, arguments, timeout) do
     socket = "rekindle-#{resource_id()}"
     log = Path.join(runtime, "weston.log")
+    trace = Path.join(runtime, "wayland-protocol.log")
+
+    weston =
+      open_port(
+        tools.weston,
+        [
+          "--backend=headless",
+          "--renderer=pixman",
+          "--fake-seat",
+          "--shell=kiosk",
+          "--socket=#{socket}",
+          "--idle-time=0",
+          "--debug",
+          "--log=#{log}"
+        ],
+        [{"XDG_RUNTIME_DIR", runtime}, {"DISPLAY", nil}]
+      )
+
+    debug =
+      try do
+        wait_for_socket!(runtime, socket)
+
+        port =
+          open_port(
+            tools.weston_debug,
+            ["--output", trace, "proto"],
+            [{"XDG_RUNTIME_DIR", runtime}, {"WAYLAND_DISPLAY", socket}]
+          )
+
+        wait_for_file!(trace)
+        Process.sleep(50)
+        port
+      rescue
+        error ->
+          close_port(weston)
+          reraise error, __STACKTRACE__
+      end
 
     command = [
-      "--signal=TERM",
-      "--kill-after=1s",
-      duration(@weston_timeout),
-      tools.weston,
-      "--backend=headless",
-      "--renderer=pixman",
-      "--fake-seat",
-      "--shell=kiosk",
-      "--socket=#{socket}",
-      "--idle-time=0",
-      "--debug",
-      "--logger-scopes=proto",
-      "--log=#{log}",
-      "--",
-      tools.env,
-      "WAYLAND_DISPLAY=#{socket}",
-      "XDG_SESSION_TYPE=wayland",
-      "WINIT_UNIX_BACKEND=wayland",
-      tools.timeout,
       "--signal=TERM",
       "--kill-after=1s",
       duration(timeout),
@@ -153,25 +170,80 @@ defmodule Rekindle.Test.DesktopWindow do
     ]
 
     {output, status} =
-      System.cmd(tools.timeout, command,
-        env: [
-          {"XDG_RUNTIME_DIR", runtime},
-          {"WAYLAND_DEBUG", nil},
-          {"WAYLAND_DISPLAY", nil},
-          {"WINIT_UNIX_BACKEND", nil},
-          {"DISPLAY", nil}
-        ],
-        stderr_to_stdout: true
-      )
+      try do
+        System.cmd(tools.timeout, command,
+          env: [
+            {"XDG_RUNTIME_DIR", runtime},
+            {"WAYLAND_DISPLAY", socket},
+            {"XDG_SESSION_TYPE", "wayland"},
+            {"WINIT_UNIX_BACKEND", "wayland"},
+            {"DISPLAY", nil}
+          ],
+          stderr_to_stdout: true
+        )
+      after
+        close_port(debug)
+        close_port(weston)
+      end
 
+    observed = diagnostics([output, read(trace)], log)
+
+    if status in [0, 124] do
+      {:ok, observed}
+    else
+      {:error,
+       "desktop process exited with status #{status}\n#{String.slice(observed, 0, 8_000)}"}
+    end
+  end
+
+  defp open_port(executable, arguments, environment) do
+    Port.open(
+      {:spawn_executable, String.to_charlist(executable)},
+      [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        args: Enum.map(arguments, &String.to_charlist/1),
+        env:
+          Enum.map(environment, fn
+            {name, nil} -> {String.to_charlist(name), false}
+            {name, value} -> {String.to_charlist(name), String.to_charlist(value)}
+          end)
+      ]
+    )
+  end
+
+  defp wait_for_socket!(runtime, socket) do
+    path = Path.join(runtime, socket)
+    deadline = System.monotonic_time(:millisecond) + 5_000
+    wait_for_path!(path, deadline, "Weston did not create its Wayland socket")
+  end
+
+  defp wait_for_file!(path) do
+    deadline = System.monotonic_time(:millisecond) + 5_000
+    wait_for_path!(path, deadline, "weston-debug did not create its protocol trace")
+  end
+
+  defp wait_for_path!(path, deadline, message) do
     cond do
-      status == 124 ->
-        {:error,
-         "desktop observer timed out\n#{String.slice(diagnostics(output, log), 0, 8_000)}"}
+      File.exists?(path) ->
+        :ok
+
+      System.monotonic_time(:millisecond) < deadline ->
+        Process.sleep(25)
+        wait_for_path!(path, deadline, message)
 
       true ->
-        {:ok, diagnostics(output, log)}
+        raise message
     end
+  end
+
+  defp close_port(port) do
+    if Port.info(port), do: Port.close(port)
+  end
+
+  defp read(path) do
+    if File.regular?(path), do: File.read!(path), else: ""
   end
 
   defp event(line) do
@@ -207,11 +279,13 @@ defmodule Rekindle.Test.DesktopWindow do
   end
 
   defp tools do
-    [:weston, :timeout, :env]
+    [weston_debug: "weston-debug", weston: "weston", timeout: "timeout"]
     |> Enum.reduce_while({:ok, %{}}, fn name, {:ok, tools} ->
-      case System.find_executable(Atom.to_string(name)) do
-        nil -> {:halt, {:error, "#{name} executable is required for desktop startup tests"}}
-        path -> {:cont, {:ok, Map.put(tools, name, path)}}
+      {key, executable} = name
+
+      case System.find_executable(executable) do
+        nil -> {:halt, {:error, "#{executable} executable is required for desktop startup tests"}}
+        path -> {:cont, {:ok, Map.put(tools, key, path)}}
       end
     end)
   end
@@ -240,7 +314,8 @@ defmodule Rekindle.Test.DesktopWindow do
   defp duration(milliseconds), do: "#{milliseconds / 1_000}s"
 
   defp diagnostics(output, log) do
-    [output, if(File.regular?(log), do: File.read!(log), else: "")]
+    [output, read(log)]
+    |> List.flatten()
     |> Enum.join("\n")
   end
 end
