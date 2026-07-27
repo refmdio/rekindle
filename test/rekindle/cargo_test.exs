@@ -454,6 +454,20 @@ defmodule Rekindle.Cargo.ProcessTest do
              Process.run("/usr/bin/sleep", ["10"], cd: File.cwd!(), timeout: 20)
   end
 
+  test "rejects invalid process options before starting a command" do
+    assert {:error, {:invalid_option, :timeout}} =
+             Process.run("/usr/bin/true", [], cd: File.cwd!(), timeout: :invalid)
+
+    assert {:error, {:invalid_option, :output_limit}} =
+             Process.run("/usr/bin/true", [], cd: File.cwd!(), output_limit: -1)
+
+    assert {:error, {:invalid_option, :cd}} =
+             Process.run("/usr/bin/true", [])
+
+    assert {:error, {:invalid_option, :env}} =
+             Process.run("/usr/bin/true", [], cd: File.cwd!(), env: [{"KEY", nil}])
+  end
+
   test "stops the command when its owning task stops" do
     root =
       Path.join(

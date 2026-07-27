@@ -98,6 +98,9 @@ defmodule Rekindle.Web.Builder do
 
       {:error, {:start, reason}} ->
         error(:start_failed, "wasm-bindgen could not start: #{Exception.message(reason)}")
+
+      {:error, {:invalid_option, option}} ->
+        error(:invalid_option, "invalid wasm-bindgen process option: #{option}")
     end
   end
 

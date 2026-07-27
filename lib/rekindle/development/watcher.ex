@@ -52,7 +52,7 @@ defmodule Rekindle.Development.Watcher do
   @spec targets(Path.t(), Path.t(), Path.t()) :: [:web | :desktop]
   def targets(root, path, target_directory) do
     expanded = Path.expand(path)
-    relative = path |> Path.expand() |> Path.relative_to(root)
+    relative = Path.relative_to(expanded, root)
 
     cond do
       Path.type(relative) == :absolute ->

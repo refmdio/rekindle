@@ -238,7 +238,13 @@ if Code.ensure_loaded?(Igniter) do
 
             missing ->
               separator = if content == "" or String.ends_with?(content, "\n"), do: "", else: "\n"
-              content <> separator <> Enum.join(missing, "\n") <> "\n"
+
+              IO.iodata_to_binary([
+                content,
+                separator,
+                Enum.intersperse(missing, "\n"),
+                "\n"
+              ])
           end
 
         Rewrite.Source.update(source, :content, updated)

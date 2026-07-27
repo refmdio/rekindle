@@ -148,6 +148,9 @@ defmodule Rekindle.Cargo do
 
         {:error, {:start, reason}} ->
           error(:start_failed, "cargo build could not start: #{Exception.message(reason)}")
+
+        {:error, {:invalid_option, option}} ->
+          error(:invalid_option, "invalid cargo process option: #{option}")
       end
     end
   end

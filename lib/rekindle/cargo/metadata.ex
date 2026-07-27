@@ -166,4 +166,7 @@ defmodule Rekindle.Cargo.Metadata do
 
   defp process_error(kind, operation, {:start, error}),
     do: {:error, Error.new(kind, "#{operation} could not start: #{Exception.message(error)}")}
+
+  defp process_error(_kind, operation, {:invalid_option, option}),
+    do: {:error, Error.new(:invalid_option, "invalid #{operation} process option: #{option}")}
 end

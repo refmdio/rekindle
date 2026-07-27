@@ -171,6 +171,9 @@ defmodule Rekindle.Toolchain do
       {:error, {:start, _reason} = reason} ->
         process_error(:install_failed, "cargo install wasm-bindgen-cli #{version}", reason)
 
+      {:error, {:invalid_option, _option} = reason} ->
+        process_error(:install_failed, "cargo install wasm-bindgen-cli #{version}", reason)
+
       {:error, reason} ->
         error(
           :cache_unavailable,
@@ -273,6 +276,9 @@ defmodule Rekindle.Toolchain do
 
   defp process_error(kind, operation, {:start, reason}),
     do: error(kind, "#{operation} could not start: #{Exception.message(reason)}")
+
+  defp process_error(_kind, operation, {:invalid_option, option}),
+    do: error(:invalid_option, "invalid #{operation} process option: #{option}")
 
   defp error(kind, message, options \\ []),
     do: {:error, Error.new(kind, message, options)}

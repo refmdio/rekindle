@@ -72,6 +72,11 @@ defmodule Rekindle.DesktopBuildTest do
     assert second.artifact == first.artifact
     assert File.read!(second.artifact) =~ "# second"
     assert File.read!(Path.join(destination, "keep.txt")) == "keep"
+
+    refute destination
+           |> Path.dirname()
+           |> File.ls!()
+           |> Enum.any?(&String.starts_with?(&1, ".tmp-"))
   end
 
   test "rejects an invalid manifest or non-executable artifact", %{root: root} do

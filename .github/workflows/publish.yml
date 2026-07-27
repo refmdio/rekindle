@@ -116,6 +116,8 @@ jobs:
         run: |
           mix format --check-formatted
           mix compile --warnings-as-errors
+          mix reach.check --arch --dead-code
+          mix reach.check --smells --strict
           mix test
           mix docs --warnings-as-errors
 

@@ -11,12 +11,54 @@ defmodule Rekindle.Toolchain.Process do
           output: binary()
         }
 
-  @type failure :: :timeout | :output_limit | {:start, Exception.t()}
+  @type option_name :: :cd | :env | :output_limit | :timeout
+  @type failure ::
+          :timeout
+          | :output_limit
+          | {:invalid_option, option_name()}
+          | {:start, Exception.t()}
 
   @spec run(Path.t(), [String.t()], keyword()) :: {:ok, t()} | {:error, failure()}
   def run(executable, arguments, options \\ []) do
+    timeout = Keyword.get(options, :timeout, :infinity)
     output_limit = Keyword.get(options, :output_limit, @default_output_limit)
 
+    with :ok <- validate_options(options, timeout, output_limit),
+         {:ok, port} <-
+           open_port(executable, arguments, options, output_limit) do
+      collect(port, deadline(timeout), output_limit, [], 0)
+    end
+  end
+
+  defp validate_options(options, timeout, output_limit) do
+    cond do
+      not (timeout == :infinity or (is_integer(timeout) and timeout >= 0)) ->
+        {:error, {:invalid_option, :timeout}}
+
+      not (is_integer(output_limit) and output_limit >= 0) ->
+        {:error, {:invalid_option, :output_limit}}
+
+      not (is_binary(options[:cd]) and options[:cd] != "") ->
+        {:error, {:invalid_option, :cd}}
+
+      not valid_environment?(Keyword.get(options, :env, [])) ->
+        {:error, {:invalid_option, :env}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp valid_environment?(values) when is_list(values) or is_map(values) do
+    Enum.all?(values, fn
+      {key, value} when is_binary(key) and is_binary(value) -> true
+      _value -> false
+    end)
+  end
+
+  defp valid_environment?(_values), do: false
+
+  defp open_port(executable, arguments, options, output_limit) do
     port_options =
       [
         :binary,
@@ -32,25 +74,17 @@ defmodule Rekindle.Toolchain.Process do
           executable
           | arguments
         ],
-        cd: Keyword.fetch!(options, :cd)
+        cd: options[:cd]
       ] ++ environment(options)
 
-    try do
-      port =
-        MuonTrap.muontrap_path()
-        |> String.to_charlist()
-        |> then(&Port.open({:spawn_executable, &1}, port_options))
+    port =
+      MuonTrap.muontrap_path()
+      |> String.to_charlist()
+      |> then(&Port.open({:spawn_executable, &1}, port_options))
 
-      collect(
-        port,
-        deadline(Keyword.get(options, :timeout, :infinity)),
-        output_limit,
-        [],
-        0
-      )
-    rescue
-      error -> {:error, {:start, error}}
-    end
+    {:ok, port}
+  rescue
+    error in [ArgumentError, ErlangError] -> {:error, {:start, error}}
   end
 
   defp collect(port, deadline, limit, chunks, size) do

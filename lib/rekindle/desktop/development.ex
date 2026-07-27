@@ -123,7 +123,7 @@ defmodule Rekindle.Desktop.Development do
 
     DynamicSupervisor.start_child(state.supervisor, child)
   rescue
-    error -> {:error, error}
+    error in [ArgumentError] -> {:error, error}
   end
 
   defp validate(

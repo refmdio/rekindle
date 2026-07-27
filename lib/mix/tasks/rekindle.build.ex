@@ -47,9 +47,7 @@ defmodule Mix.Tasks.Rekindle.Build do
           error.output
 
         diagnostics ->
-          diagnostics
-          |> Enum.map(&(&1.rendered || &1.message))
-          |> Enum.join("\n")
+          Enum.map_join(diagnostics, "\n", &(&1.rendered || &1.message))
       end
 
     if rendered != "" do

@@ -32,28 +32,22 @@ defmodule Rekindle.Desktop.Release do
   end
 
   defp publish_files(source, destination, manifest) do
-    with :ok <- File.mkdir_p(destination),
-         {:ok, temporary} <- Publication.temporary_directory(destination, ".tmp-release-") do
+    parent = Path.dirname(destination)
+
+    with :ok <- File.mkdir_p(parent),
+         {:ok, temporary} <- Publication.temporary_directory(parent, ".tmp-release-") do
       try do
         executable = manifest["executable"]
 
-        with :ok <-
+        with :ok <- copy_existing(destination, temporary),
+             :ok <-
                copy_executable(
                  Path.join(source, executable),
                  Path.join(temporary, executable)
                ),
              :ok <- File.write(Path.join(temporary, "manifest.json"), Jason.encode!(manifest)),
              :ok <- Manifest.validate(temporary, manifest),
-             :ok <-
-               File.rename(
-                 Path.join(temporary, executable),
-                 Path.join(destination, executable)
-               ),
-             :ok <-
-               File.rename(
-                 Path.join(temporary, "manifest.json"),
-                 Path.join(destination, "manifest.json")
-               ) do
+             :ok <- replace_directory(temporary, destination) do
           :ok
         else
           {:error, %Error{} = error} -> {:error, error}
@@ -64,6 +58,66 @@ defmodule Rekindle.Desktop.Release do
       end
     else
       {:error, reason} -> file_error(:publish, destination, reason)
+    end
+  end
+
+  defp copy_existing(source, destination) do
+    case File.stat(source) do
+      {:ok, %{type: :directory}} ->
+        case File.cp_r(source, destination) do
+          {:ok, _paths} -> :ok
+          {:error, reason, path} -> file_error(:copy, path, reason)
+        end
+
+      {:ok, _stat} ->
+        error(:invalid_destination, "desktop release destination is not a directory: #{source}")
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        file_error(:copy, source, reason)
+    end
+  end
+
+  defp replace_directory(source, destination) do
+    case File.stat(destination) do
+      {:ok, %{type: :directory}} -> replace_existing_directory(source, destination)
+      {:ok, _stat} -> {:error, :enotdir}
+      {:error, :enoent} -> File.rename(source, destination)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp replace_existing_directory(source, destination) do
+    parent = Path.dirname(destination)
+
+    with {:ok, backup} <- Publication.temporary_directory(parent, ".tmp-backup-"),
+         :ok <- File.rmdir(backup),
+         :ok <- File.rename(destination, backup) do
+      case File.rename(source, destination) do
+        :ok ->
+          File.rm_rf(backup)
+          :ok
+
+        {:error, reason} ->
+          rollback_directory(backup, destination, reason)
+      end
+    end
+  end
+
+  defp rollback_directory(backup, destination, publish_reason) do
+    case File.rename(backup, destination) do
+      :ok ->
+        {:error, publish_reason}
+
+      {:error, rollback_reason} ->
+        error(
+          :publish,
+          "cannot replace #{destination}: #{:file.format_error(publish_reason)}; " <>
+            "previous release remains at #{backup} because rollback failed: " <>
+            :file.format_error(rollback_reason)
+        )
     end
   end
 
