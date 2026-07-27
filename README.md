@@ -48,8 +48,8 @@ mix rekindle.dev
 
 See the
 [Getting Started guide](guides/introduction/getting-started.md) for existing
-Phoenix applications and the remaining setup options. Complete guides and API
-documentation are published on [HexDocs](https://rekindle.hexdocs.pm).
+Phoenix applications and the remaining setup options. Read the complete guides
+and API documentation on [HexDocs](https://rekindle.hexdocs.pm).
 
 ## License
 
