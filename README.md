@@ -36,12 +36,12 @@ mix igniter.new my_app \
   --targets web,desktop
 ```
 
-Then prepare the required tools and start development:
+Then prepare the project and start Phoenix:
 
 ```console
 cd my_app
-mix rekindle.setup
-mix rekindle.dev
+mix setup
+mix phx.server
 ```
 
 See the

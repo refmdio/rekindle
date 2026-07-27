@@ -267,30 +267,6 @@ defmodule Rekindle.InstallTest do
     assert "/client/target/" in ignore_lines(install(without_cargo_target))
   end
 
-  test "rekindle.dev delegates arguments to phx.server" do
-    phoenix_task = :code.which(Mix.Tasks.Phx.Server)
-    rekindle_ebin = Mix.Tasks.Rekindle.Dev |> :code.which() |> Path.dirname()
-    elixir = System.find_executable("elixir")
-
-    script = """
-    Application.ensure_all_started(:mix)
-    Code.prepend_path(#{inspect(rekindle_ebin)})
-
-    defmodule Mix.Tasks.Phx.Server do
-      use Mix.Task
-      def run(arguments), do: IO.puts("delegated:" <> Base.encode64(:erlang.term_to_binary(arguments)))
-    end
-
-    Code.ensure_loaded!(Mix.Tasks.Rekindle.Dev)
-    Mix.Tasks.Rekindle.Dev.run(["--open"])
-    """
-
-    {output, 0} = System.cmd(elixir, ["-e", script], stderr_to_stdout: true)
-    [encoded] = Regex.run(~r/^delegated:(.+)$/m, output, capture: :all_but_first)
-    assert encoded |> Base.decode64!() |> :erlang.binary_to_term([:safe]) == ["--open"]
-    assert :code.which(Mix.Tasks.Phx.Server) == phoenix_task
-  end
-
   test "desktop-only installation does not add browser hooks" do
     installed = install(project(), integration: "gpui", targets: ["desktop"])
     refute content(installed, "lib/demo_web/endpoint.ex") =~ "Rekindle.Phoenix.Development"

@@ -7,7 +7,7 @@ Prepare the toolchain and start both targets:
 
 ```console
 mix setup
-mix rekindle.dev
+mix phx.server
 ```
 
 Open [localhost:4000](http://localhost:4000) for the Web client. The native

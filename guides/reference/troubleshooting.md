@@ -36,7 +36,7 @@ endpoint has `code_reloader: true`. Use the development Mix environment and
 start the application with:
 
 ```console
-mix rekindle.dev
+mix phx.server
 ```
 
 ## A remote browser cannot use WebGPU

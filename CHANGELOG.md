@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Use Phoenix's standard `mix phx.server` command for development and remove
+  the redundant `mix rekindle.dev` wrapper.
+
 ## 0.1.2 - 2026-07-28
 
 - Resolve Cargo through rustup using the generated client toolchain.

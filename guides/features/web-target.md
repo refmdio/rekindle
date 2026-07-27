@@ -6,7 +6,7 @@ generation.
 
 ## Development
 
-`mix rekindle.dev` watches the client and publishes successful builds below
+`mix phx.server` watches the client and publishes successful builds below
 `.rekindle/dev`. The browser runtime detects a new generation only after it is
 complete. A failed build leaves the previous generation active.
 

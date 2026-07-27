@@ -6,7 +6,7 @@ required native libraries depend on the selected UI integration.
 
 ## Development
 
-`mix rekindle.dev` builds the desktop target after client changes. Rekindle
+`mix phx.server` builds the desktop target after client changes. Rekindle
 validates a successful build, stops the current process, removes its disposable
 build directory, and starts the replacement. If the replacement exits, no
 previous executable is restarted.

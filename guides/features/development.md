@@ -3,15 +3,17 @@
 Rekindle runs the Cargo build and development lifecycle from Mix. Cargo remains
 the source of truth for Rust dependencies and incremental compilation.
 
-## Prepare tools
+## Prepare the project
 
-Prepare every enabled target:
+The installer adds the required Rust tooling setup to the Phoenix project's
+standard setup alias:
 
 ```console
-mix rekindle.setup
+mix setup
 ```
 
-Limit setup to one target when necessary:
+Run Rekindle setup directly to prepare one target without the rest of the
+project setup:
 
 ```console
 mix rekindle.setup web
@@ -37,10 +39,8 @@ integration, and pinned Web tooling.
 Start Phoenix and the Rekindle development services together:
 
 ```console
-mix rekindle.dev
+mix phx.server
 ```
-
-Arguments are passed through to `mix phx.server`.
 
 Files below `client/` are watched and rebuilt through Cargo. A successful Web
 build publishes an immutable development generation for the polling browser
