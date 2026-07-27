@@ -7,8 +7,8 @@ generation.
 ## Development
 
 `mix rekindle.dev` watches the client and publishes successful builds below
-`.rekindle/dev`. Connected browsers are notified only after a complete
-generation is available. A failed build leaves the previous generation active.
+`.rekindle/dev`. The browser runtime detects a new generation only after it is
+complete. A failed build leaves the previous generation active.
 
 Run one build without the development server:
 

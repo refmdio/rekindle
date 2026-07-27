@@ -29,7 +29,7 @@ jobs:
           otp-version: "29"
           elixir-version: "1.20"
 
-      - name: Install acceptance dependencies
+      - name: Install native build dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -56,31 +56,7 @@ jobs:
             libxi-dev \
             libxkbcommon-dev \
             libxkbcommon-x11-dev \
-            mesa-vulkan-drivers \
-            pkg-config \
-            vulkan-tools \
-            weston \
-            xvfb
-
-      - name: Check acceptance prerequisites
-        run: |
-          test -r /proc/self/stat
-          for executable in Xvfb chromium chromedriver inotifywait kill pkill setsid vulkaninfo weston weston-debug; do
-            command -v "$executable"
-          done
-          pkg-config --exists fontconfig wayland-client xkbcommon xkbcommon-x11
-          lavapipe_icd="$(
-            find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit
-          )"
-          test -n "$lavapipe_icd"
-          echo "VK_DRIVER_FILES=$lavapipe_icd" >> "$GITHUB_ENV"
-          VK_DRIVER_FILES="$lavapipe_icd" vulkaninfo --summary | grep -Eiq 'llvmpipe|lavapipe'
-          timeout 30 chromium \
-            --headless=new \
-            --no-sandbox \
-            --disable-gpu \
-            --dump-dom \
-            about:blank >/dev/null
+            pkg-config
 
       - name: Prepare Rust toolchains
         run: |

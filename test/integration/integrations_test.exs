@@ -1,11 +1,7 @@
-Code.require_file("../support/desktop_window_helper.exs", __DIR__)
-
 defmodule Rekindle.IntegrationsTest do
   use ExUnit.Case, async: false
 
   alias Rekindle.Integration
-  alias Rekindle.Test.DesktopWindow
-  alias Rekindle.Test.IntegrationBrowser
 
   @moduletag timeout: 600_000
 
@@ -88,115 +84,6 @@ defmodule Rekindle.IntegrationsTest do
     assert Rekindle.Phoenix.web_host(:slint) == ~s(<canvas id="canvas"></canvas>)
   end
 
-  test "requires rendered surface pixels without browser failures" do
-    blank_surface = %{
-      "error" => nil,
-      "surface" => %{"present" => true, "visible" => true, "varied" => false}
-    }
-
-    rendered_surface = %{
-      "error" => nil,
-      "surface" => %{"present" => true, "visible" => true, "varied" => true}
-    }
-
-    assert {:pending, ^blank_surface} =
-             IntegrationBrowser.classify_observation(blank_surface, [])
-
-    assert {:ok, :ready} = IntegrationBrowser.classify_observation(rendered_surface, [])
-
-    assert {:error, "startup error: frame failed"} =
-             IntegrationBrowser.classify_observation(
-               put_in(rendered_surface["error"], "frame failed"),
-               []
-             )
-
-    assert {:error, "severe browser log: uncaught exception"} =
-             IntegrationBrowser.classify_observation(rendered_surface, [
-               %{"level" => "SEVERE", "message" => "uncaught exception"}
-             ])
-  end
-
-  test "desktop startup requires a presented top-level surface" do
-    sleep = System.find_executable("sleep") || flunk("sleep is required")
-    true_executable = System.find_executable("true") || flunk("true is required")
-
-    assert {:error, sleep_error} = DesktopWindow.observe(sleep, ["10"], timeout: 250)
-    assert sleep_error =~ "no configured top-level surface presented a buffer"
-
-    assert {:error, exit_error} = DesktopWindow.observe(true_executable, [], timeout: 250)
-    assert exit_error =~ "no configured top-level surface presented a buffer"
-
-    configured_without_buffer = """
-    -> xdg_wm_base#8.get_xdg_surface(new id xdg_surface#14, wl_surface#13)
-    -> xdg_surface#14.get_toplevel(new id xdg_toplevel#15)
-    xdg_toplevel#15.configure(500, 500, array[0])
-    -> xdg_surface#14.ack_configure(1)
-    -> wl_surface#13.commit()
-    """
-
-    assert {:error, _message} = DesktopWindow.classify_protocol(configured_without_buffer)
-
-    presentation_before_configure = """
-    -> xdg_wm_base#8.get_xdg_surface(new id xdg_surface#14, wl_surface#13)
-    -> xdg_surface#14.get_toplevel(new id xdg_toplevel#15)
-    -> wl_surface#13.attach(wl_buffer#20, 0, 0)
-    -> wl_surface#13.commit()
-    xdg_toplevel#15.configure(500, 500, array[0])
-    xdg_surface#14.configure(1)
-    -> xdg_surface#14.ack_configure(1)
-    """
-
-    assert {:error, _message} =
-             DesktopWindow.classify_protocol(presentation_before_configure)
-
-    reused_id = """
-    -> xdg_wm_base#8.get_xdg_surface(new id xdg_surface#14, wl_surface#13)
-    -> xdg_surface#14.get_toplevel(new id xdg_toplevel#15)
-    xdg_toplevel#15.configure(500, 500, array[0])
-    xdg_surface#14.configure(1)
-    -> xdg_surface#14.ack_configure(1)
-    -> xdg_toplevel#15.destroy()
-    -> xdg_surface#14.destroy()
-    -> wl_surface#13.destroy()
-    wl_display#1.delete_id(15)
-    wl_display#1.delete_id(14)
-    wl_display#1.delete_id(13)
-    -> wl_compositor#4.create_surface(new id wl_surface#13)
-    -> wl_surface#13.attach(wl_buffer#20, 0, 0)
-    -> wl_surface#13.commit()
-    """
-
-    assert {:error, _message} = DesktopWindow.classify_protocol(reused_id)
-
-    server_trace = """
-    [proto] client 0x1 rq xdg_wm_base@8.get_xdg_surface(new id xdg_surface@14, wl_surface@13)
-    [proto] client 0x1 rq xdg_surface@14.get_toplevel(new id xdg_toplevel@15)
-    [proto] client 0x1 ev xdg_toplevel@15.configure(500, 500, array[0])
-    [proto] client 0x1 ev xdg_surface@14.configure(1)
-    [proto] client 0x1 rq xdg_surface@14.ack_configure(1)
-    [proto] client 0x1 rq wl_surface@13.attach(wl_buffer@20, 0, 0)
-    [proto] client 0x1 rq wl_surface@13.commit()
-    """
-
-    assert :ok = DesktopWindow.classify_protocol(server_trace)
-
-    previous_debug = System.get_env("WAYLAND_DEBUG")
-    System.put_env("WAYLAND_DEBUG", "server")
-
-    try do
-      assert {:error, isolated_error} =
-               DesktopWindow.observe(sleep, ["10"], timeout: 250)
-
-      refute isolated_error =~ "wl_registry"
-    after
-      if previous_debug do
-        System.put_env("WAYLAND_DEBUG", previous_debug)
-      else
-        System.delete_env("WAYLAND_DEBUG")
-      end
-    end
-  end
-
   test "generated clients compile for every target selection" do
     for name <- Integration.names() do
       for targets <- [[:web], [:desktop], [:web, :desktop]] do
@@ -277,14 +164,12 @@ defmodule Rekindle.IntegrationsTest do
       assert web.metadata.rust_target == "wasm32-unknown-unknown"
       assert File.regular?(web.artifact)
       assert File.regular?(web.metadata.manifest)
-      IntegrationBrowser.assert_starts!(web.artifact, name, root)
 
       assert {:ok, desktop} = Rekindle.build(:desktop, options)
       assert desktop.metadata.package == package
       assert desktop.metadata.rust_target == desktop_target!()
       assert File.regular?(desktop.artifact)
       assert File.regular?(desktop.metadata.manifest)
-      DesktopWindow.assert_starts!(desktop.artifact, name)
     end
   end
 

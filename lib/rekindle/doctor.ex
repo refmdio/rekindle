@@ -27,7 +27,6 @@ defmodule Rekindle.Doctor do
       |> check_rust_targets(targets, options)
       |> check_wasm_bindgen(targets, options)
       |> check_cargo(project, targets, options)
-      |> check_outputs(project, targets)
 
     finish(checks)
   end
@@ -141,52 +140,6 @@ defmodule Rekindle.Doctor do
 
       {:error, error} ->
         [failed(:"#{target_name}_binary", Exception.message(error))]
-    end
-  end
-
-  defp check_outputs(checks, project, targets) do
-    paths =
-      [state: Path.join(project.root, ".rekindle")] ++
-        if(:web in targets, do: [web_output: project.public_dir], else: []) ++
-        if(:desktop in targets,
-          do: [desktop_output: Path.join(project.root, "dist/rekindle")],
-          else: []
-        )
-
-    checks ++
-      Enum.map(paths, fn {name, path} ->
-        if writable_parent?(path) do
-          passed(name, "#{path} can be written")
-        else
-          failed(name, "#{path} has no writable parent directory")
-        end
-      end)
-  end
-
-  defp writable_parent?(path) do
-    case File.lstat(path) do
-      {:ok, %{type: :directory, access: access}} ->
-        access in [:write, :read_write] and searchable?(path)
-
-      {:ok, _stat} ->
-        false
-
-      {:error, :enoent} ->
-        parent = Path.dirname(path)
-        parent != path and writable_parent?(parent)
-
-      {:error, _reason} ->
-        false
-    end
-  end
-
-  defp searchable?(path) do
-    case System.find_executable("test") do
-      nil ->
-        false
-
-      executable ->
-        match?({"", 0}, System.cmd(executable, ["-x", path], stderr_to_stdout: true))
     end
   end
 

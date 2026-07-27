@@ -43,8 +43,8 @@ mix rekindle.dev
 Arguments are passed through to `mix phx.server`.
 
 Files below `client/` are watched and rebuilt through Cargo. A successful Web
-build publishes an immutable development generation and notifies connected
-browsers. For a desktop replacement, Rekindle stops the current process before
+build publishes an immutable development generation for the polling browser
+runtime. For a desktop replacement, Rekindle stops the current process before
 starting the replacement. If the replacement exits, Rekindle reports the exit
 and waits for the next successful build.
 
