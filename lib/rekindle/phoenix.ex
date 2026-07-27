@@ -2,11 +2,12 @@ defmodule Rekindle.Phoenix do
   @moduledoc """
   Connects Rekindle's Web artifacts to a Phoenix endpoint.
 
-  The installer adds the development endpoint plug and static delivery.
+  The installer adds the development endpoint plug, static delivery, and the
+  selected integration's host and module script to the Phoenix root layout.
   `web_entry_path/1` selects the development runtime while code reloading is
   enabled and resolves the production entry module through the application's
   Phoenix static-path implementation otherwise. `web_host/1` supplies the host
-  markup required by the selected UI integration.
+  markup required by the selected UI integration when a custom layout needs it.
   """
 
   @type integration :: :gpui | :egui | :slint

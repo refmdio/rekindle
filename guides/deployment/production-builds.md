@@ -37,8 +37,9 @@ publication failures.
 
 ## Phoenix Web entry
 
-Render the selected integration's host markup before loading the logical Web
-entry module. For example, an egui application can use this HEEx:
+The installer adds the selected integration's host markup and logical Web entry
+module to the Phoenix root layout. An egui installation, for example, adds the
+equivalent of:
 
 ```heex
 <%= Phoenix.HTML.raw(Rekindle.Phoenix.web_host(:egui)) %>
@@ -53,6 +54,9 @@ an empty string, egui returns `<canvas id="the_canvas_id"></canvas>`, and Slint
 returns `<canvas id="canvas"></canvas>`. `web_entry_path/1` resolves through the
 endpoint's static manifest after `phx.digest`; loading that module starts the
 selected immutable Web generation.
+
+The helper functions remain public for applications that intentionally move
+the generated host or script to another layout.
 
 The exact Rekindle generation remains under `.rekindle/release`. Its
 `priv/static` copy is deployment output, so Phoenix can add digested and

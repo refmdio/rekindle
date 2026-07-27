@@ -32,6 +32,12 @@ defmodule Rekindle.InstallTest do
     assert endpoint =~ ~s(from: {:demo, "priv/static/rekindle"})
     assert endpoint =~ "plug(Rekindle.Phoenix.Development, otp_app: :demo)"
 
+    assert index(endpoint, "Phoenix.CodeReloader") <
+             index(endpoint, "Rekindle.Phoenix.Development")
+
+    layout = content(installed, "lib/demo_web/components/layouts/root.html.heex")
+    assert layout =~ "Rekindle.Phoenix.web_entry_path(DemoWeb.Endpoint)"
+
     mix = content(installed, "mix.exs")
     assert mix =~ ~s(setup: ["deps.get", "rekindle.setup"])
     assert mix =~ "\"rekindle.setup\""
@@ -92,9 +98,25 @@ defmodule Rekindle.InstallTest do
       if "web" in targets do
         assert "/priv/static/rekindle/" in ignores
         assert mix =~ "\"rekindle.build web --release\""
+
+        layout = content(installed, "lib/demo_web/components/layouts/root.html.heex")
+        endpoint = "Rekindle.Phoenix.web_entry_path(DemoWeb.Endpoint)"
+        assert length(Regex.scan(~r/Rekindle\.Phoenix\.web_entry_path/, layout)) == 1
+        assert layout =~ endpoint
+
+        host = Rekindle.Integration.host(String.to_existing_atom(integration))
+
+        if host == "" do
+          refute layout =~ "<canvas"
+        else
+          assert layout =~ host
+        end
       else
         refute "/priv/static/rekindle/" in ignores
         refute mix =~ "\"rekindle.build web --release\""
+
+        refute content(installed, "lib/demo_web/components/layouts/root.html.heex") =~
+                 "Rekindle"
       end
 
       if "desktop" in targets do
@@ -166,8 +188,11 @@ defmodule Rekindle.InstallTest do
             use Phoenix.Endpoint, otp_app: :demo
 
             if code_reloading? do
+              plug Phoenix.CodeReloader
               plug Rekindle.Phoenix.Development, otp_app: :demo
             end
+
+            plug DemoWeb.Router
           end
           """
         })
@@ -176,6 +201,85 @@ defmodule Rekindle.InstallTest do
     endpoint = content(installed, "lib/demo_web/endpoint.ex")
     assert endpoint =~ "plug(Plug.Static"
     assert length(Regex.scan(~r/Rekindle\.Phoenix\.Development/, endpoint)) == 1
+  end
+
+  test "rejects incomplete or conflicting Phoenix Web hooks before changing files" do
+    cases = [
+      {
+        update_content(project(), "lib/demo_web/endpoint.ex", fn endpoint ->
+          String.replace(
+            endpoint,
+            "plug Phoenix.CodeReloader",
+            """
+            plug Rekindle.Phoenix.Development, otp_app: :demo
+                plug Phoenix.CodeReloader
+            """
+          )
+        end),
+        "must follow Phoenix.CodeReloader"
+      },
+      {
+        update_content(project(), "lib/demo_web/endpoint.ex", fn endpoint ->
+          String.replace(
+            endpoint,
+            "plug Phoenix.CodeReloader",
+            """
+            plug Phoenix.CodeReloader
+                plug Plug.Telemetry, event_prefix: [:demo, :endpoint]
+                plug Rekindle.Phoenix.Development, otp_app: :demo
+            """
+          )
+        end),
+        "must follow Phoenix.CodeReloader"
+      },
+      {
+        update_content(project(), "lib/demo_web/components/layouts/root.html.heex", fn layout ->
+          String.replace(
+            layout,
+            "{@inner_content}",
+            """
+            {@inner_content}
+                <script type="module" src="/custom.js"></script>
+                <script type="module" src={Rekindle.Phoenix.web_entry_path(Other.Endpoint)}></script>
+            """
+          )
+        end),
+        "partial or mismatched"
+      },
+      {
+        update_content(project(), "lib/demo_web/components/layouts/root.html.heex", fn layout ->
+          String.replace(
+            layout,
+            "{@inner_content}",
+            ~s|{@inner_content}<canvas id="canvas"></canvas>|
+          )
+        end),
+        "DOM identifier"
+      },
+      {
+        update_content(project(), "lib/demo_web/components/layouts/root.html.heex", fn layout ->
+          String.replace(
+            layout,
+            "{@inner_content}",
+            ~s|{@inner_content}<canvas id='canvas'></canvas>|
+          )
+        end),
+        "DOM identifier"
+      },
+      {
+        update_content(project(), "lib/demo_web/components/layouts/root.html.heex", fn layout ->
+          String.replace(layout, "</body>", "")
+        end),
+        "exactly one closing body"
+      }
+    ]
+
+    for {original, message} <- cases do
+      rejected = install(original, integration: "slint", targets: ["web"])
+
+      assert Enum.any?(rejected.issues, &String.contains?(&1, message))
+      assert changed_contents(rejected) == changed_contents(original)
+    end
   end
 
   test "does not stage installation when a generated client path already exists" do
@@ -882,7 +986,32 @@ defmodule Rekindle.InstallTest do
             "lib/demo_web/endpoint.ex" => """
             defmodule DemoWeb.Endpoint do
               use Phoenix.Endpoint, otp_app: :demo
+
+              if code_reloading? do
+                plug Phoenix.CodeReloader
+              end
+
+              plug DemoWeb.Router
             end
+            """,
+            "lib/demo_web/components/layouts.ex" => """
+            defmodule DemoWeb.Layouts do
+              use Phoenix.Component
+
+              embed_templates "layouts/*"
+            end
+            """,
+            "lib/demo_web/components/layouts/root.html.heex" => """
+            <!DOCTYPE html>
+            <html lang="en">
+              <head>
+                <meta charset="utf-8" />
+                <meta name="viewport" content="width=device-width, initial-scale=1" />
+              </head>
+              <body>
+                {@inner_content}
+              </body>
+            </html>
             """,
             "mix.exs" => """
             defmodule Demo.MixProject do

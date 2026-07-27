@@ -2,13 +2,10 @@
 
 Rekindle provides project templates for GPUI, egui/eframe, and Slint. An
 integration selects the Rust dependencies, platform bootstrap code, browser
-host element, and graphics backend expected by the generated client.
-
-For a production Phoenix page, obtain that host element with
-`Rekindle.Phoenix.web_host/1` and load
-`Rekindle.Phoenix.web_entry_path/1` after it. The
-[Production Builds](../deployment/production-builds.md) guide contains a
-complete HEEx example.
+host element, and graphics backend expected by the generated client. The
+installer adds the selected host and Rekindle's module script to the Phoenix
+root layout, so the Rust UI runs inside the application's normal pages in both
+development and production.
 
 ## GPUI
 

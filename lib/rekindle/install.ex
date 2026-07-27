@@ -22,8 +22,10 @@ if Code.ensure_loaded?(Igniter) do
            {:ok, existing} <- existing_selection(igniter, app),
            {:ok, selection, mode} <-
              select(requested, existing, Igniter.exists?(igniter, "client/Cargo.toml")),
-           {:ok, selection} <- validate_client(igniter, selection, mode) do
-        install(igniter, app, endpoint, selection, mode)
+           {:ok, selection} <- validate_client(igniter, selection, mode),
+           {:ok, igniter, phoenix} <-
+             PhoenixInstall.prepare(igniter, app, endpoint, selection) do
+        install(igniter, app, endpoint, selection, mode, phoenix)
       else
         {:error, message} -> Igniter.add_issue(igniter, message)
       end
@@ -201,7 +203,7 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp install(igniter, app, endpoint, selection, mode) do
+    defp install(igniter, app, endpoint, selection, mode, phoenix) do
       igniter
       |> maybe_generate_client(selection, mode)
       |> configure(app, selection)
@@ -210,7 +212,7 @@ if Code.ensure_loaded?(Igniter) do
          {:code,
           Sourceror.parse_string!("[otp_app: #{inspect(app)}, endpoint: #{inspect(endpoint)}]")}}
       )
-      |> PhoenixInstall.endpoint(app, endpoint, selection)
+      |> PhoenixInstall.install(app, endpoint, selection, phoenix)
       |> TaskAliases.add_alias(:setup, "rekindle.setup", if_exists: :append)
       |> maybe_add_web_alias(selection.targets)
       |> update_ignores(selection, mode)

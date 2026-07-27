@@ -410,13 +410,14 @@ defmodule Rekindle.DevelopmentTest do
     )
 
     options = Development.init(otp_app: :rekindle_development_test, project_root: root)
-    page = request("/__rekindle", options)
     runtime = request("/__rekindle/runtime.js", options)
 
-    assert page.status == 200
-    assert page.resp_body =~ Rekindle.Phoenix.web_host(:egui)
     assert runtime.resp_body =~ ~s|getContext("webgl2")|
     refute runtime.resp_body =~ "navigator.gpu"
+
+    page = request("/__rekindle", options)
+    refute page.halted
+    refute page.state == :sent
   end
 
   @tag timeout: 60_000
@@ -435,7 +436,7 @@ defmodule Rekindle.DevelopmentTest do
     )
 
     options = Development.init(otp_app: :rekindle_development_test, project_root: root)
-    page = request("/__rekindle", options).resp_body
+    page = development_page(:egui)
     runtime = request("/__rekindle/runtime.js", options).resp_body
 
     selector_override =
@@ -779,8 +780,8 @@ defmodule Rekindle.DevelopmentTest do
       """
 
     page =
-      options
-      |> then(&request("/__rekindle", &1).resp_body)
+      :egui
+      |> development_page()
       |> String.replace(
         ~s(<script type="module" src="/__rekindle/runtime.js"></script>),
         observer <> ~s(<script type="module" src="/__rekindle/runtime.js"></script>)
@@ -1792,6 +1793,16 @@ defmodule Rekindle.DevelopmentTest do
     })
   end
 
+  defp development_page(integration) do
+    """
+    <!doctype html>
+    <html><body>
+      #{Rekindle.Phoenix.web_host(integration)}
+      <script type="module" src="/__rekindle/runtime.js"></script>
+    </body></html>
+    """
+  end
+
   defp run_browser_responses(root, integration, setup, transform, responses) do
     browser = System.find_executable("chromium") || flunk("Chromium is required")
 
@@ -1813,7 +1824,6 @@ defmodule Rekindle.DevelopmentTest do
       <html><body>
         <canvas id="the_canvas_id"></canvas>
         <canvas id="canvas"></canvas>
-        <pre id="rekindle-error" hidden></pre>
         <script>
           #{setup}
           const responses = #{Jason.encode!(responses)};

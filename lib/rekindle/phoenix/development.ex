@@ -17,18 +17,6 @@ defmodule Rekindle.Phoenix.Development do
   def init(options), do: options
 
   @impl Plug
-  def call(%Plug.Conn{method: "GET", path_info: @prefix} = conn, options) do
-    with {:ok, project} <- project(options) do
-      conn
-      |> no_store()
-      |> put_resp_content_type("text/html")
-      |> send_resp(200, page(Rekindle.Phoenix.web_host(project.integration)))
-      |> halt()
-    else
-      _error -> unavailable(conn)
-    end
-  end
-
   def call(
         %Plug.Conn{method: "GET", path_info: @prefix ++ ["runtime.js"]} = conn,
         options
@@ -188,35 +176,30 @@ defmodule Rekindle.Phoenix.Development do
 
   defp path(generation, entry), do: "/__rekindle/web/#{generation}/#{entry}"
 
-  defp page(host) do
-    """
-    <!doctype html>
-    <html lang="en">
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Rekindle</title>
-        <style>
-          html, body { height: 100%; margin: 0; }
-          canvas { width: 100%; height: 100%; display: block; }
-          #rekindle-error { box-sizing: border-box; padding: 1rem; white-space: pre-wrap; }
-        </style>
-      </head>
-      <body>
-        #{host}
-        <pre id="rekindle-error" hidden></pre>
-        <script type="module" src="/__rekindle/runtime.js"></script>
-      </body>
-    </html>
-    """
-  end
-
   defp runtime(graphics) do
     """
     const currentUrl = new URL("./current", import.meta.url);
-    const errorView = document.getElementById("rekindle-error");
+    const errorView = ensureErrorView();
     let activeGeneration;
     let loading = false;
+
+    function ensureErrorView() {
+      const existing = document.getElementById("rekindle-error");
+      if (existing) return existing;
+
+      const view = document.createElement("pre");
+      view.id = "rekindle-error";
+      view.hidden = true;
+      view.setAttribute("role", "alert");
+      Object.assign(view.style, {
+        boxSizing: "border-box",
+        margin: "0",
+        padding: "1rem",
+        whiteSpace: "pre-wrap"
+      });
+      document.body.appendChild(view);
+      return view;
+    }
 
     function report(error) {
       const message = error instanceof Error ? error.message : String(error);
