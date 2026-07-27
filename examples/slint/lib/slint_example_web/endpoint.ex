@@ -8,13 +8,13 @@ defmodule SlintExampleWeb.Endpoint do
   @session_options [
     store: :cookie,
     key: "_slint_example_key",
-    signing_salt: "VXsv5xY8",
+    signing_salt: "Vc5DtZAq",
     same_site: "Lax"
   ]
 
-  # socket "/live", Phoenix.LiveView.Socket,
-  #   websocket: [connect_info: [session: @session_options]],
-  #   longpoll: [connect_info: [session: @session_options]]
+  socket "/live", Phoenix.LiveView.Socket,
+    websocket: [connect_info: [session: @session_options]],
+    longpoll: [connect_info: [session: @session_options]]
 
   # Serve at "/" the static files from "priv/static" directory.
   #
@@ -35,7 +35,6 @@ defmodule SlintExampleWeb.Endpoint do
     plug Phoenix.LiveReloader
     plug Phoenix.CodeReloader
     plug Rekindle.Phoenix.Development, otp_app: :slint_example
-    plug Phoenix.Ecto.CheckRepoStatus, otp_app: :slint_example
   end
 
   plug Plug.RequestId

@@ -13,7 +13,7 @@ config :gpui_example, GpuiExampleWeb.Endpoint,
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
-  secret_key_base: "yK+++t6ZDVTu6TpoQGH3pVZn7P6GQPbPTT4jANVKkxjBNki+/ldF4YKQaPMfCQk5",
+  secret_key_base: "MQHafkKFGqPNQR1e7Une/UkjQh5L53Vr8UC65Xo2PErAagGGbdF3QDSt1MM4gLuC",
   watchers: []
 
 # ## SSL Support

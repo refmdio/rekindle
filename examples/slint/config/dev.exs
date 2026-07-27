@@ -13,7 +13,7 @@ config :slint_example, SlintExampleWeb.Endpoint,
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
-  secret_key_base: "ItNEAYG70Bo7oLfocVy5RgavkmQU3NJzKKjPZaZWQJdRlANDEwiO5gq+V52tmWgq",
+  secret_key_base: "pdvp0KjW+woV3K7o5ZtL0iJG5Sg9lQeZqukFyIP9+TfSJjToygcPH12OiDCkhG90",
   watchers: []
 
 # ## SSL Support

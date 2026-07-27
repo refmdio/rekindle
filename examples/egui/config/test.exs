@@ -4,7 +4,7 @@ import Config
 # you can enable the server option below.
 config :egui_example, EguiExampleWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
-  secret_key_base: "8pV/jIAsvKDJmbuaupibM/r7sGJ4K0lMLqevtcrlMCoqe15KOIrCs3fw1F9pDcRN",
+  secret_key_base: "UYJiKwbc+Po8nJ6kZsB+2l/78bYAWseb1cwR+CtgXfNMHUuijAnt8A5Z1Axk9VaN",
   server: false
 
 # Print only warnings and errors during test

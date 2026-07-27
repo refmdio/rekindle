@@ -8,13 +8,13 @@ defmodule GpuiExampleWeb.Endpoint do
   @session_options [
     store: :cookie,
     key: "_gpui_example_key",
-    signing_salt: "uWBk+29v",
+    signing_salt: "PwWB1QMz",
     same_site: "Lax"
   ]
 
-  # socket "/live", Phoenix.LiveView.Socket,
-  #   websocket: [connect_info: [session: @session_options]],
-  #   longpoll: [connect_info: [session: @session_options]]
+  socket "/live", Phoenix.LiveView.Socket,
+    websocket: [connect_info: [session: @session_options]],
+    longpoll: [connect_info: [session: @session_options]]
 
   # Serve at "/" the static files from "priv/static" directory.
   #
@@ -35,7 +35,6 @@ defmodule GpuiExampleWeb.Endpoint do
     plug Phoenix.LiveReloader
     plug Phoenix.CodeReloader
     plug Rekindle.Phoenix.Development, otp_app: :gpui_example
-    plug Phoenix.Ecto.CheckRepoStatus, otp_app: :gpui_example
   end
 
   plug Plug.RequestId

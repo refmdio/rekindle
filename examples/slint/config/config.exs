@@ -24,7 +24,12 @@ config :slint_example, SlintExampleWeb.Endpoint,
     layout: false
   ],
   pubsub_server: SlintExample.PubSub,
-  live_view: [signing_salt: "AUzXMHPa"]
+  live_view: [signing_salt: "hFxAFKyo"]
+
+# Configure LiveView
+config :phoenix_live_view,
+  # the attribute set on all root tags. Used for Phoenix.LiveView.ColocatedCSS.
+  root_tag_attribute: "phx-r"
 
 # Configure Elixir's Logger
 config :logger, :default_formatter,

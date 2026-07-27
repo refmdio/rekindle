@@ -13,7 +13,7 @@ config :egui_example, EguiExampleWeb.Endpoint,
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
-  secret_key_base: "adLkTUqu8iDkSxyAiiWrOgvyKD5T2s09+9pCm3cvea9o1xj2MXO4pFv0gVJhUqiq",
+  secret_key_base: "0yysEM3SpiSLUnxZjIiPQqQmU4CmnYXupToVMkn9Uohb9ppTOX3d+t0Fsl5l6Ms2",
   watchers: []
 
 # ## SSL Support

@@ -4,7 +4,7 @@ import Config
 # you can enable the server option below.
 config :gpui_example, GpuiExampleWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
-  secret_key_base: "ugSuWap7NXscrGDW6kFqYYjZ8/308Wye7UGJnTc+18V4SxBbxuk0M4iEIu6iHQkF",
+  secret_key_base: "+w5tp7re6GlLRZd5I/jdIlsDC8wRpx4/MzJNcUSD5Q6rWTzn4AL49vApvvVEuMan",
   server: false
 
 # Print only warnings and errors during test

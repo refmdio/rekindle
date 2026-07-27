@@ -4,7 +4,7 @@ import Config
 # you can enable the server option below.
 config :slint_example, SlintExampleWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
-  secret_key_base: "+PggviD//QbtRMl356G++wLvn6JShwMPNe7UsBnr+4ogAIfM96EPvs532bcMcJLn",
+  secret_key_base: "puAmxGe+qjyjUNN01BV/GWiJH6srqnjs+KynVnCTYX50tOMIdbPp+U/ZMSZjflf1",
   server: false
 
 # Print only warnings and errors during test

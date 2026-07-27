@@ -40,6 +40,8 @@ defmodule EguiExample.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
+      {:rekindle, "~> 0.1"},
+      {:igniter, "~> 0.6", only: [:dev, :test]},
       {:phoenix, "~> 1.8.9"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
@@ -49,9 +51,7 @@ defmodule EguiExample.MixProject do
       {:telemetry_poller, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
-      {:bandit, "~> 1.5"},
-      {:igniter, "~> 0.8", only: [:dev, :test]},
-      {:rekindle, [path: "../..", override: true]}
+      {:bandit, "~> 1.5"}
     ]
   end
 
@@ -65,7 +65,7 @@ defmodule EguiExample.MixProject do
     [
       setup: ["deps.get", "rekindle.setup"],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
-      "assets.deploy": ["rekindle.build web --release"]
+      "assets.deploy": "rekindle.build web --release"
     ]
   end
 end

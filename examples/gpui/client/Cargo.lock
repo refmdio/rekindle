@@ -871,6 +871,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "client"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui_platform",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "cocoa"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4395,15 +4404,6 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
-
-[[package]]
-name = "client"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "gpui_platform",
- "wasm-bindgen",
-]
 
 [[package]]
 name = "renderdoc-sys"

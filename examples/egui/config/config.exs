@@ -24,7 +24,12 @@ config :egui_example, EguiExampleWeb.Endpoint,
     layout: false
   ],
   pubsub_server: EguiExample.PubSub,
-  live_view: [signing_salt: "XUy16Wkv"]
+  live_view: [signing_salt: "mZBiGqWp"]
+
+# Configure LiveView
+config :phoenix_live_view,
+  # the attribute set on all root tags. Used for Phoenix.LiveView.ColocatedCSS.
+  root_tag_attribute: "phx-r"
 
 # Configure Elixir's Logger
 config :logger, :default_formatter,
