@@ -1,0 +1,31 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+desktop = []
+web = []
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+slint = "=1.16.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+slint = { version = "=1.16.1", default-features = false, features = ["compat-1-2", "renderer-femtovg", "backend-winit", "std"] }
+wasm-bindgen = "=0.2.126"
+
+[build-dependencies]
+slint-build = "=1.16.1"
+
+
+[[bin]]
+name = "web"
+path = "src/bin/web.rs"
+required-features = ["web"]
+
+
+[[bin]]
+name = "desktop"
+path = "src/bin/desktop.rs"
+required-features = ["desktop"]

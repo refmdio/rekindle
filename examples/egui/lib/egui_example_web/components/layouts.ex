@@ -1,9 +1,9 @@
-defmodule GpuiExampleWeb.Layouts do
+defmodule EguiExampleWeb.Layouts do
   @moduledoc """
   This module holds layouts and related functionality
   used by your application.
   """
-  use GpuiExampleWeb, :html
+  use EguiExampleWeb, :html
 
   # Embed all files in layouts/* within this module.
   # The default root.html.heex file contains the HTML

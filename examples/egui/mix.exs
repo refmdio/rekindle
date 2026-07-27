@@ -1,9 +1,9 @@
-defmodule GpuiExample.MixProject do
+defmodule EguiExample.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :gpui_example,
+      app: :egui_example,
       version: "0.1.0",
       elixir: "~> 1.17",
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -20,7 +20,7 @@ defmodule GpuiExample.MixProject do
   # Type `mix help compile.app` for more information.
   def application do
     [
-      mod: {GpuiExample.Application, []},
+      mod: {EguiExample.Application, []},
       extra_applications: [:logger, :runtime_tools]
     ]
   end

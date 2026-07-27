@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="csrf-token" content={get_csrf_token()} />
-    <.live_title default="GpuiExample" suffix=" · Phoenix Framework" phx-no-format>{assigns[:page_title]}</.live_title>
+    <.live_title default="SlintExample" suffix=" · Phoenix Framework" phx-no-format>{assigns[:page_title]}</.live_title>
     <link phx-track-static rel="stylesheet" href={~p"/assets/css/app.css"} />
     <script defer phx-track-static type="text/javascript" src={~p"/assets/js/app.js"}>
     </script>
@@ -47,6 +47,7 @@
   </head>
   <body>
     {@inner_content}
-    <script type="module" src={Rekindle.Phoenix.web_entry_path(GpuiExampleWeb.Endpoint)}></script>
+    <canvas id="canvas"></canvas>
+    <script type="module" src={Rekindle.Phoenix.web_entry_path(SlintExampleWeb.Endpoint)}></script>
   </body>
 </html>
