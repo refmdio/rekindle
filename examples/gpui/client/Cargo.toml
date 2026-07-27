@@ -1,0 +1,35 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+desktop = []
+web = []
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "18f35ffac2da72ccdfb0e1bf756218fa1995162b" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "18f35ffac2da72ccdfb0e1bf756218fa1995162b", features = ["wayland", "x11"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.126"
+
+
+[[bin]]
+name = "web"
+path = "src/bin/web.rs"
+required-features = ["web"]
+
+
+[[bin]]
+name = "desktop"
+path = "src/bin/desktop.rs"
+required-features = ["desktop"]
+
+
+[profile.dev]
+debug = "limited"
+
+[profile.release]
+lto = "thin"

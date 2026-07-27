@@ -1,0 +1,20 @@
+#![no_main]
+
+use std::cell::OnceCell;
+
+thread_local! {
+    static APPLICATION: OnceCell<gpui::ApplicationHandle> = const { OnceCell::new() };
+}
+
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn start() {
+    gpui_platform::web_init();
+
+    let application = gpui_platform::application().run_embedded(client::open);
+    APPLICATION.with(|slot| {
+        assert!(
+            slot.set(application).is_ok(),
+            "the application was already started"
+        );
+    });
+}
