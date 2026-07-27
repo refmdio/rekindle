@@ -148,7 +148,7 @@ defmodule Rekindle.ReleaseTest do
   end
 
   defp write_fixture(root, repository) do
-    target = Rekindle.Toolchain.desktop_target()
+    {:ok, target} = Rekindle.Toolchain.host_target()
     mode = Path.join(root, "build-mode")
     order = Path.join(root, "release-order")
     launched = Path.join(root, "desktop-launched")

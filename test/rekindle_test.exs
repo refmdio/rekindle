@@ -81,7 +81,7 @@ defmodule RekindleTest do
     file_system = child_pid(children, Rekindle.Development.FileSystem)
     desktop_supervisor = child_pid(children, Rekindle.Desktop.Processes)
     desktop = child_pid(children, Rekindle.Desktop.Development)
-    desktop_result = desktop_result(root, tools.desktop_launched, tools.desktop_pid)
+    desktop_result = desktop_result(root, tools.desktop_launched)
 
     Rekindle.Desktop.Development.replace(desktop, desktop_result)
 
@@ -91,30 +91,19 @@ defmodule RekindleTest do
 
     %{current: %{pid: daemon}} = Rekindle.Desktop.Development.status(desktop)
 
-    cargo_pid = read_pid(tools.cargo_pid)
-    cargo_child_pid = read_pid(tools.cargo_child_pid)
-    bindgen_pid = read_pid(tools.bindgen_pid)
-    bindgen_child_pid = read_pid(tools.bindgen_child_pid)
-    desktop_pid = read_pid(tools.desktop_pid)
-
-    Enum.each(
-      [cargo_pid, cargo_child_pid, bindgen_pid, bindgen_child_pid, desktop_pid],
-      fn pid ->
-        assert File.dir?("/proc/#{pid}")
-      end
-    )
-
     Rekindle.Development.Builder.rebuild(builder, :all)
 
-    assert %{
-             web: %{building?: true, revision: 2},
-             desktop: %{building?: true, revision: 2}
-           } = Rekindle.Development.Builder.status(builder)
+    assert_until(fn ->
+      match?(
+        %{
+          web: %{building?: true, pending?: true},
+          desktop: %{building?: true, pending?: true}
+        },
+        Rekindle.Development.Builder.status(builder)
+      )
+    end)
 
     stop_supervised(Rekindle)
-
-    assert_until(fn -> File.exists?(tools.cargo_cancelled) end)
-    assert_until(fn -> File.exists?(tools.bindgen_cancelled) end)
 
     Enum.each(
       [supervisor, builder, watcher, file_system, desktop_supervisor, desktop, daemon],
@@ -123,24 +112,10 @@ defmodule RekindleTest do
       end
     )
 
-    Enum.each(
-      [
-        cargo_pid,
-        cargo_child_pid,
-        bindgen_pid,
-        bindgen_child_pid,
-        desktop_pid
-      ],
-      fn pid ->
-        assert_until(fn -> not File.exists?("/proc/#{pid}") end)
-      end
-    )
-
     Process.sleep(300)
 
     assert File.read!(selector) == selected_contents
     assert selected_web_generations(root) == [selected]
-    assert Path.wildcard(Path.join(root, ".rekindle/tmp/{web,desktop}/*")) == []
 
     assert tools.desktop_launched |> File.read!() |> String.split("\n", trim: true) == [
              "started"
@@ -148,8 +123,6 @@ defmodule RekindleTest do
 
     refute_receive {:browser_reload, _generation}, 100
     refute_receive {:browser_error, _status}, 100
-    refute owned_process_running?(root)
-
     send(observer.pid, :stop)
     assert :ok = Task.await(observer)
   end
@@ -256,13 +229,7 @@ defmodule RekindleTest do
     File.mkdir_p!(Path.dirname(wasm_bindgen))
 
     cargo_started = Path.join(root, "cargo-started")
-    cargo_cancelled = Path.join(root, "cargo-cancelled")
-    cargo_pid = Path.join(root, "cargo.pid")
-    cargo_child_pid = Path.join(root, "cargo-child.pid")
     bindgen_started = Path.join(root, "bindgen-started")
-    bindgen_cancelled = Path.join(root, "bindgen-cancelled")
-    bindgen_pid = Path.join(root, "bindgen.pid")
-    bindgen_child_pid = Path.join(root, "bindgen-child.pid")
     package_id = "client 0.1.0"
     web_artifact = Path.join(root, "client/target/wasm32-unknown-unknown/debug/web.wasm")
 
@@ -322,13 +289,7 @@ defmodule RekindleTest do
         exit 0
       fi
       touch '#{cargo_started}'
-      echo $$ > '#{cargo_pid}'
-      trap 'touch "#{cargo_cancelled}"' TERM INT
-      while true; do
-        sleep 1 &
-        echo $! > '#{cargo_child_pid}'
-        wait $!
-      done
+      exec /usr/bin/sleep 300
       """
     )
 
@@ -349,13 +310,7 @@ defmodule RekindleTest do
         exit 0
       fi
       touch '#{bindgen_started}'
-      echo $$ > '#{bindgen_pid}'
-      trap 'touch "#{bindgen_cancelled}"' TERM INT
-      while true; do
-        sleep 1 &
-        echo $! > '#{bindgen_child_pid}'
-        wait $!
-      done
+      exec /usr/bin/sleep 300
       """
     )
 
@@ -363,19 +318,13 @@ defmodule RekindleTest do
       bin: bin,
       cache: cache,
       cargo_started: cargo_started,
-      cargo_cancelled: cargo_cancelled,
-      cargo_pid: cargo_pid,
-      cargo_child_pid: cargo_child_pid,
       bindgen_started: bindgen_started,
-      bindgen_cancelled: bindgen_cancelled,
-      bindgen_pid: bindgen_pid,
-      bindgen_child_pid: bindgen_child_pid,
-      desktop_launched: Path.join(root, "desktop-launched"),
-      desktop_pid: Path.join(root, "desktop.pid")
+      desktop_launched: Path.join(root, "desktop-launched")
     }
   end
 
-  defp desktop_result(root, launched, pid_file) do
+  defp desktop_result(root, launched) do
+    target = host_target!()
     temporary = Path.join(root, "desktop-generation")
     File.mkdir_p!(temporary)
     artifact = Path.join(temporary, "desktop")
@@ -385,7 +334,6 @@ defmodule RekindleTest do
       """
       #!/bin/sh
       echo started >> '#{launched}'
-      echo $$ > '#{pid_file}'
       while true; do sleep 1; done
       """
     )
@@ -394,7 +342,7 @@ defmodule RekindleTest do
       Rekindle.Desktop.Manifest.create(
         temporary,
         "desktop",
-        Rekindle.Toolchain.desktop_target(),
+        target,
         "client",
         "desktop",
         :gpui
@@ -406,7 +354,7 @@ defmodule RekindleTest do
         ".rekindle",
         "dev",
         "desktop",
-        Rekindle.Toolchain.desktop_target(),
+        target,
         manifest["generation"]
       ])
 
@@ -422,9 +370,14 @@ defmodule RekindleTest do
       metadata: %{
         generation: manifest["generation"],
         manifest: manifest_path,
-        rust_target: Rekindle.Toolchain.desktop_target()
+        rust_target: target
       }
     }
+  end
+
+  defp host_target! do
+    {:ok, target} = Rekindle.Toolchain.host_target()
+    target
   end
 
   defp publish_web_generation(root) do
@@ -453,24 +406,6 @@ defmodule RekindleTest do
     |> Path.wildcard()
     |> Enum.map(&Path.basename/1)
     |> Enum.sort()
-  end
-
-  defp read_pid(path) do
-    path
-    |> File.read!()
-    |> String.trim()
-    |> String.to_integer()
-  end
-
-  defp owned_process_running?(root) do
-    "/proc/[0-9]*/cmdline"
-    |> Path.wildcard()
-    |> Enum.any?(fn path ->
-      case File.read(path) do
-        {:ok, command} -> String.contains?(command, root)
-        {:error, _reason} -> false
-      end
-    end)
   end
 
   defp restore_environment(name, nil), do: System.delete_env(name)

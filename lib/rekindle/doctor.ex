@@ -7,7 +7,6 @@ defmodule Rekindle.Doctor do
   alias Rekindle.Integration
   alias Rekindle.Toolchain
   alias Rekindle.Toolchain.Check
-  alias Rekindle.Toolchain.Process, as: ToolchainProcess
 
   @spec run(atom(), keyword()) :: {:ok, [Check.t()]} | {:error, [Check.t()]}
   def run(otp_app, options \\ []) do
@@ -23,7 +22,6 @@ defmodule Rekindle.Doctor do
 
     checks =
       [passed(:configuration, "Rekindle configuration is valid")]
-      |> check_process_controls()
       |> check_cargo_readiness(options)
       |> check_executable(:rustup, Toolchain.rustup_path(options))
       |> check_rust_targets(targets, options)
@@ -32,19 +30,6 @@ defmodule Rekindle.Doctor do
       |> check_outputs(project, targets)
 
     finish(checks)
-  end
-
-  defp check_process_controls(checks) do
-    check =
-      case ToolchainProcess.process_control_preflight() do
-        :ok ->
-          passed(:process_controls, "procfs, setsid, pkill, and kill are operational")
-
-        {:error, {:start, error}} ->
-          failed(:process_controls, Exception.message(error))
-      end
-
-    checks ++ [check]
   end
 
   defp check_cargo_readiness(checks, options) do

@@ -150,7 +150,6 @@ defmodule Rekindle.ToolingIntegrationTest do
 
     assert {:ok, checks} = Doctor.run(:rekindle_tooling_test, context.options)
     assert Enum.all?(checks, &(&1.status == :ok))
-    assert check!(checks, :process_controls).message =~ "procfs"
     assert Enum.any?(checks, &(&1.name == :web_integration))
     assert Enum.any?(checks, &(&1.name == :desktop_binary))
 
@@ -163,24 +162,6 @@ defmodule Rekindle.ToolingIntegrationTest do
     assert_trace_cwds(context.root, "rustup", Path.join(context.root, "client"))
     assert_trace_cwds(context.root, "cargo", Path.join(context.root, "client"))
     assert_trace_cwds(context.root, "wasm-bindgen", Path.join(context.root, "client"))
-  end
-
-  test "Doctor reports missing process controls without mutating the project", context do
-    bin = Path.join(context.root, "process-controls")
-    previous_path = System.fetch_env!("PATH")
-    File.mkdir_p!(bin)
-
-    for name <- ["setsid", "pkill"] do
-      File.ln_s!(System.find_executable(name), Path.join(bin, name))
-    end
-
-    on_exit(fn -> System.put_env("PATH", previous_path) end)
-    System.put_env("PATH", bin)
-    before = snapshot(context.root)
-
-    assert {:error, checks} = Doctor.run(:rekindle_tooling_test, context.options)
-    assert check!(checks, :process_controls).message == "kill executable was not found"
-    assert snapshot(context.root) == before
   end
 
   test "Doctor applies the Cargo readiness contract without mutating the project", context do

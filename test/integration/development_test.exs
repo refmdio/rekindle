@@ -82,8 +82,10 @@ defmodule Rekindle.DevelopmentTest do
     Builder.rebuild(builder, :all)
 
     assert_receive {:trace, ^builder, :receive, {:"$gen_cast", {:rebuild, :all}}}
-    assert_receive {:trace, ^builder, :receive, {:build, :web, 1}}
-    assert_receive {:trace, ^builder, :receive, {:build, :desktop, 1}}
+    assert_receive {:trace, ^builder, :receive, {:build, :web, web_token}}
+    assert is_reference(web_token)
+    assert_receive {:trace, ^builder, :receive, {:build, :desktop, desktop_token}}
+    assert is_reference(desktop_token)
 
     assert_receive {:started, :web, web}
     assert_receive {:started, :desktop, desktop}
@@ -120,28 +122,16 @@ defmodule Rekindle.DevelopmentTest do
     end
   end
 
-  test "supersedes a running build and only reports the newest result", %{root: root} do
+  test "finishes the active build and queues one newer build", %{root: root} do
     test = self()
     counter = start_supervised!({Agent, fn -> 0 end})
 
-    build = fn target, options ->
+    build = fn target, _options ->
       attempt = Agent.get_and_update(counter, &{&1 + 1, &1 + 1})
       send(test, {:started, attempt, self()})
 
-      if attempt == 1 do
-        expected_cancel = options[:cancel_ref]
-
-        receive do
-          {:rekindle_cancel, ^expected_cancel} ->
-            send(test, {:cancelled, attempt})
-        after
-          1_000 ->
-            flunk("build was not cancelled")
-        end
-      else
-        receive do
-          :finish -> :ok
-        end
+      receive do
+        :finish -> :ok
       end
 
       {:ok, result(root, target, Integer.to_string(attempt))}
@@ -154,60 +144,20 @@ defmodule Rekindle.DevelopmentTest do
 
     builder = start_builder(root, build, activate: activate)
     Builder.rebuild(builder, :web)
-    assert_receive {:started, 1, _pid}
+    assert_receive {:started, 1, first}
 
     Builder.rebuild(builder, :web)
-    assert_receive {:cancelled, 1}
+    refute_receive {:started, 2, _pid}, 30
+
+    send(first, :finish)
+    assert_receive {:activated, "1"}
+    assert_receive {Builder, :web, {:ok, %Result{metadata: %{generation: "1"}}}}
     assert_receive {:started, 2, second}
-    refute_receive {:activated, "1"}, 30
-    refute_receive {Builder, :web, _result}, 30
 
     send(second, :finish)
 
     assert_receive {:activated, "2"}
     assert_receive {Builder, :web, {:ok, %Result{metadata: %{generation: "2"}}}}
-  end
-
-  @tag capture_log: true
-  test "removes a generation published by a superseded build", %{root: root} do
-    test = self()
-    selected = publish_web(root, "export default 'selected';")
-    stale = String.duplicate("f", 64)
-    stale_root = Path.join([root, ".rekindle", "dev", "web", stale])
-    File.mkdir_p!(stale_root)
-    manifest = Path.join(stale_root, "manifest.json")
-    File.write!(manifest, "{}")
-    counter = start_supervised!({Agent, fn -> 0 end})
-
-    build = fn _target, options ->
-      case Agent.get_and_update(counter, &{&1, &1 + 1}) do
-        0 ->
-          send(test, :stale_started)
-          cancel_ref = options[:cancel_ref]
-          receive do: ({:rekindle_cancel, ^cancel_ref} -> :ok)
-
-          {:ok,
-           %Result{
-             target: :web,
-             profile: :dev,
-             artifact: Path.join(stale_root, "app.js"),
-             metadata: %{generation: stale, manifest: manifest}
-           }}
-
-        1 ->
-          send(test, :current_started)
-          {:error, :expected_test_stop}
-      end
-    end
-
-    builder = start_builder(root, build)
-    Builder.rebuild(builder, :web)
-    assert_receive :stale_started
-    Builder.rebuild(builder, :web)
-    assert_receive :current_started
-
-    refute File.exists?(stale_root)
-    assert File.dir?(Path.join([root, ".rekindle", "dev", "web", selected]))
   end
 
   test "serializes stale Web cleanup with activation across VMs", %{root: root} do
@@ -284,30 +234,25 @@ defmodule Rekindle.DevelopmentTest do
     Builder.rebuild(builder, :desktop)
     assert_receive {Builder, :desktop, {:error, :compile_failed}}
 
-    assert %{desktop: %{building?: false, last_success: ^successful, revision: 2}} =
+    assert %{desktop: %{building?: false, last_success: ^successful, pending?: false}} =
              Builder.status(builder)
   end
 
-  test "cancels a running build when its supervisor stops", %{root: root} do
+  test "stops a running build task with its supervisor", %{root: root} do
     test = self()
 
-    build = fn _target, options ->
-      send(test, :build_started)
-      expected_cancel = options[:cancel_ref]
-
-      receive do
-        {:rekindle_cancel, ^expected_cancel} -> send(test, :build_cancelled)
-      end
-
-      {:error, :cancelled}
+    build = fn _target, _options ->
+      send(test, {:build_started, self()})
+      receive do: (:never -> :ok)
     end
 
     builder = start_builder(root, build)
     Builder.rebuild(builder, :web)
-    assert_receive :build_started
+    assert_receive {:build_started, task}
+    monitor = Process.monitor(task)
 
     stop_supervised(Builder)
-    assert_receive :build_cancelled
+    assert_receive {:DOWN, ^monitor, :process, ^task, _reason}
     refute Process.alive?(builder)
   end
 
@@ -1253,7 +1198,7 @@ defmodule Rekindle.DevelopmentTest do
         ".rekindle",
         "dev",
         "desktop",
-        Rekindle.Toolchain.desktop_target()
+        host_target!()
       ])
 
     generations = File.ls!(generation_root)
@@ -1383,7 +1328,7 @@ defmodule Rekindle.DevelopmentTest do
         ".rekindle",
         "dev",
         "desktop",
-        Rekindle.Toolchain.desktop_target()
+        host_target!()
       ])
 
     for value <- 1..20 do
@@ -2079,7 +2024,7 @@ defmodule Rekindle.DevelopmentTest do
 
     File.write!(source, body)
     File.chmod!(source, 0o755)
-    target = Rekindle.Toolchain.desktop_target()
+    target = host_target!()
     temporary = Path.join(root, "#{name}-generation")
     File.mkdir_p!(temporary)
     executable = "desktop"
@@ -2222,4 +2167,9 @@ defmodule Rekindle.DevelopmentTest do
   end
 
   defp assert_until(_fun, 0), do: flunk("condition did not become true")
+
+  defp host_target! do
+    {:ok, target} = Rekindle.Toolchain.host_target()
+    target
+  end
 end

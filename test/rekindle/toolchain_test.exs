@@ -3,15 +3,13 @@ defmodule Rekindle.ToolchainTest do
 
   alias Rekindle.Toolchain
 
-  test "accepts only the qualified desktop target" do
+  test "uses the rustc host target for desktop builds" do
     root = tmp_dir()
-    supported = fake_rustc(root, Toolchain.desktop_target())
-    unsupported = fake_rustc(root, "aarch64-unknown-linux-gnu")
+    x86 = fake_rustc(root, "x86_64-unknown-linux-gnu")
+    arm = fake_rustc(root, "aarch64-unknown-linux-gnu")
 
-    assert {:ok, "x86_64-unknown-linux-gnu"} = Toolchain.target(:desktop, rustc: supported)
-
-    assert {:error, %Toolchain.Error{kind: :unsupported_desktop_target}} =
-             Toolchain.target(:desktop, rustc: unsupported)
+    assert {:ok, "x86_64-unknown-linux-gnu"} = Toolchain.target(:desktop, rustc: x86)
+    assert {:ok, "aarch64-unknown-linux-gnu"} = Toolchain.target(:desktop, rustc: arm)
   end
 
   test "resolves only the requested version in the user cache" do

@@ -431,7 +431,7 @@ defmodule Rekindle.IntegrationsTest do
   end
 
   defp desktop_target! do
-    target = Rekindle.Toolchain.desktop_target()
+    {:ok, target} = Rekindle.Toolchain.host_target()
     assert {:ok, ^target} = Rekindle.Toolchain.target(:desktop)
     target
   end

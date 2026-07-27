@@ -66,7 +66,7 @@ defmodule Rekindle.Development.Builder do
          %{
            building?: not is_nil(target_state.running),
            last_success: target_state.last_success,
-           revision: target_state.revision
+           pending?: target_state.pending?
          }}
       end)
 
@@ -74,17 +74,17 @@ defmodule Rekindle.Development.Builder do
   end
 
   @impl GenServer
-  def handle_info({:build, target, revision}, state) do
+  def handle_info({:build, target, token}, state) do
     target_state = Map.fetch!(state.targets, target)
 
     state =
-      if revision == target_state.revision do
+      if match?({_timer, ^token}, target_state.timer) do
         target_state = %{target_state | timer: nil}
 
         if target_state.running do
           put_target(state, target, %{target_state | pending?: true})
         else
-          start_build(state, target, revision, target_state)
+          start_build(state, target, target_state)
         end
       else
         state
@@ -100,30 +100,20 @@ defmodule Rekindle.Development.Builder do
 
       {target, target_state} ->
         Process.demonitor(reference, [:flush])
-        current? = target_state.running.revision == target_state.revision
-
-        {target_state, result} =
-          if current? do
-            finish_current(state, target, target_state, result)
-          else
-            discard_result(state.project, result)
-            {%{target_state | running: nil}, :stale}
-          end
+        {target_state, result} = finish_current(state, target, target_state, result)
 
         state = put_target(state, target, target_state)
 
         state =
           if target_state.pending? and is_nil(target_state.timer) do
             target_state = %{target_state | pending?: false}
-            start_build(state, target, target_state.revision, target_state)
+            start_build(state, target, target_state)
           else
             state
           end
 
-        if result != :stale do
-          report(state.project, target, result)
-          notify(state.notify, target, result)
-        end
+        report(state.project, target, result)
+        notify(state.notify, target, result)
 
         {:noreply, state}
     end
@@ -136,14 +126,11 @@ defmodule Rekindle.Development.Builder do
 
       {target, target_state} ->
         result = {:error, {:build_process, reason}}
-        current? = target_state.running.revision == target_state.revision
         target_state = %{target_state | running: nil}
         state = put_target(state, target, target_state)
 
-        if current? do
-          report(state.project, target, result)
-          notify(state.notify, target, result)
-        end
+        report(state.project, target, result)
+        notify(state.notify, target, result)
 
         {:noreply, maybe_start_pending(state, target)}
     end
@@ -154,15 +141,10 @@ defmodule Rekindle.Development.Builder do
   @impl GenServer
   def terminate(_reason, state) do
     Enum.each(state.targets, fn {_target, target_state} ->
-      if target_state.timer, do: Process.cancel_timer(target_state.timer)
+      if target_state.timer, do: Process.cancel_timer(elem(target_state.timer, 0))
 
       if target_state.running do
-        send(target_state.running.pid, {:rekindle_cancel, target_state.running.cancel_ref})
-
-        case Task.yield(target_state.running.task, 1_500) do
-          nil -> Task.shutdown(target_state.running.task, :brutal_kill)
-          _result -> :ok
-        end
+        Task.shutdown(target_state.running.task, :brutal_kill)
       end
     end)
   end
@@ -172,24 +154,15 @@ defmodule Rekindle.Development.Builder do
     |> normalize_targets(state.targets)
     |> Enum.reduce(state, fn target, state ->
       target_state = Map.fetch!(state.targets, target)
-      revision = target_state.revision + 1
 
-      if target_state.timer, do: Process.cancel_timer(target_state.timer)
+      if target_state.timer, do: Process.cancel_timer(elem(target_state.timer, 0))
 
-      if target_state.running do
-        send(
-          target_state.running.pid,
-          {:rekindle_cancel, target_state.running.cancel_ref}
-        )
-      end
-
-      timer = Process.send_after(self(), {:build, target, revision}, state.debounce)
+      token = make_ref()
+      timer = Process.send_after(self(), {:build, target, token}, state.debounce)
 
       put_target(state, target, %{
         target_state
-        | revision: revision,
-          timer: timer,
-          pending?: false
+        | timer: {timer, token}
       })
     end)
   end
@@ -207,18 +180,14 @@ defmodule Rekindle.Development.Builder do
     |> Enum.filter(&Map.has_key?(targets, &1))
   end
 
-  defp start_build(state, target, revision, target_state) do
-    cancel_ref = make_ref()
+  defp start_build(state, target, target_state) do
     build = state.build
-    options = Keyword.put(state.build_options, :cancel_ref, cancel_ref)
-    task = Task.async(fn -> build.(target, options) end)
+    task = Task.async(fn -> build.(target, state.build_options) end)
 
     running = %{
       task: task,
       pid: task.pid,
-      reference: task.ref,
-      revision: revision,
-      cancel_ref: cancel_ref
+      reference: task.ref
     }
 
     put_target(state, target, %{target_state | running: running, pending?: false})
@@ -243,18 +212,12 @@ defmodule Rekindle.Development.Builder do
     {%{target_state | running: nil}, {:error, {:invalid_build_result, other}}}
   end
 
-  defp discard_result(project, {:ok, %Result{} = result}) do
-    Rekindle.Development.Cleanup.discard(project, result)
-  end
-
-  defp discard_result(_project, _result), do: :ok
-
   defp maybe_start_pending(state, target) do
     target_state = Map.fetch!(state.targets, target)
 
     if target_state.pending? and is_nil(target_state.timer) do
       target_state = %{target_state | pending?: false}
-      start_build(state, target, target_state.revision, target_state)
+      start_build(state, target, target_state)
     else
       state
     end
@@ -273,7 +236,7 @@ defmodule Rekindle.Development.Builder do
   end
 
   defp target_state do
-    %{revision: 0, timer: nil, running: nil, pending?: false, last_success: nil}
+    %{timer: nil, running: nil, pending?: false, last_success: nil}
   end
 
   defp build(project, target, options) do

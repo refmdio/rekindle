@@ -186,34 +186,12 @@ defmodule Rekindle.CargoTest do
              Cargo.resolve(metadata, project, target(:desktop))
   end
 
-  test "maps Cargo build timeout and cancellation", %{project: project} do
+  test "maps Cargo build timeout", %{project: project} do
     {cargo, _arguments_file, _started_file, _metadata_cwd_file, _build_cwd_file} =
       fake_cargo(project, :wait)
 
     assert {:error, %Cargo.Error{kind: :timeout}} =
              Cargo.build(project, target(:desktop), :dev, cargo: cargo, timeout: 100)
-
-    {cargo, _arguments_file, started_file, _metadata_cwd_file, _build_cwd_file} =
-      fake_cargo(project, :wait)
-
-    cancel_ref = make_ref()
-    parent = self()
-
-    task =
-      Task.async(fn ->
-        send(parent, {:cargo_runner, self()})
-
-        Cargo.build(project, target(:desktop), :dev,
-          cargo: cargo,
-          cancel_ref: cancel_ref
-        )
-      end)
-
-    assert_receive {:cargo_runner, runner}
-    assert wait_for_file(started_file, 50)
-    send(runner, {:rekindle_cancel, cancel_ref})
-
-    assert {:error, %Cargo.Error{kind: :cancelled}} = Task.await(task)
   end
 
   defp target(name) do
@@ -360,17 +338,6 @@ defmodule Rekindle.CargoTest do
       dependencies: ["gpui"]
     }
   end
-
-  defp wait_for_file(_path, 0), do: false
-
-  defp wait_for_file(path, attempts) do
-    if File.exists?(path) do
-      true
-    else
-      Process.sleep(10)
-      wait_for_file(path, attempts - 1)
-    end
-  end
 end
 
 defmodule Rekindle.Cargo.MessagesTest do
@@ -378,11 +345,6 @@ defmodule Rekindle.Cargo.MessagesTest do
 
   alias Rekindle.Cargo.Messages
   alias Rekindle.Toolchain.Process
-
-  test "validates the host process controls" do
-    assert File.regular?("/proc/self/stat")
-    assert :ok = Process.process_control_preflight()
-  end
 
   test "decodes compiler diagnostics and the matching artifact" do
     diagnostic =
@@ -505,248 +467,46 @@ defmodule Rekindle.Cargo.ProcessTest do
     assert result.truncated?
   end
 
-  test "does not launch when process group control is unavailable" do
-    root = tmp_dir()
-    bin = Path.join(root, "bin")
-    marker = Path.join(root, "started")
-    executable = Path.join(root, "mark-started")
-    previous_path = System.fetch_env!("PATH")
-
-    File.mkdir_p!(bin)
-    File.ln_s!(System.find_executable("setsid"), Path.join(bin, "setsid"))
-    File.ln_s!(System.find_executable("kill"), Path.join(bin, "kill"))
-    File.write!(executable, "#!/bin/sh\ntouch \"#{marker}\"\n")
-    File.chmod!(executable, 0o755)
-
-    on_exit(fn -> System.put_env("PATH", previous_path) end)
-    System.put_env("PATH", bin)
-
-    assert {:error, {:start, preflight_error}} = Process.process_control_preflight()
-    assert Exception.message(preflight_error) == "pkill executable was not found"
-
-    assert {:error, {:start, error}} = Process.run(executable, [], cd: root)
-    assert Exception.message(error) == "pkill executable was not found"
-    refute File.exists?(marker)
-  end
-
-  test "does not launch when process group control is not operational" do
-    root = tmp_dir()
-    bin = Path.join(root, "bin")
-    marker = Path.join(root, "started")
-    executable = Path.join(root, "mark-started")
-    previous_path = System.fetch_env!("PATH")
-
-    File.mkdir_p!(bin)
-
-    for name <- ["setsid", "kill"] do
-      File.ln_s!(System.find_executable(name), Path.join(bin, name))
-    end
-
-    File.write!(Path.join(bin, "pkill"), "#!/bin/sh\nexit 1\n")
-    File.chmod!(Path.join(bin, "pkill"), 0o755)
-    File.write!(executable, "#!/bin/sh\ntouch \"#{marker}\"\n")
-    File.chmod!(executable, 0o755)
-
-    on_exit(fn -> System.put_env("PATH", previous_path) end)
-    System.put_env("PATH", bin)
-
-    assert {:error, {:start, error}} = Process.run(executable, [], cd: root)
-    assert Exception.message(error) == "process group controls are not operational"
-    refute File.exists?(marker)
-  end
-
-  test "does not launch when group signaling falsely reports success" do
-    root = tmp_dir()
-    bin = Path.join(root, "bin")
-    marker = Path.join(root, "started")
-    executable = Path.join(root, "mark-started")
-    previous_path = System.fetch_env!("PATH")
-
-    File.mkdir_p!(bin)
-
-    for name <- ["setsid", "kill"] do
-      File.ln_s!(System.find_executable(name), Path.join(bin, name))
-    end
-
-    File.write!(Path.join(bin, "pkill"), "#!/bin/sh\nexit 0\n")
-    File.chmod!(Path.join(bin, "pkill"), 0o755)
-    File.write!(executable, "#!/bin/sh\ntouch \"#{marker}\"\n")
-    File.chmod!(executable, 0o755)
-    on_exit(fn -> System.put_env("PATH", previous_path) end)
-    System.put_env("PATH", bin)
-
-    assert {:error, {:start, error}} = Process.run(executable, [], cd: root, timeout: 100)
-    assert Exception.message(error) == "process group controls are not operational"
-    refute File.exists?(marker)
-  end
-
-  test "does not launch when direct signaling falsely reports success" do
-    root = tmp_dir()
-    bin = Path.join(root, "bin")
-    marker = Path.join(root, "started")
-    executable = Path.join(root, "mark-started")
-    previous_path = System.fetch_env!("PATH")
-
-    File.mkdir_p!(bin)
-
-    for name <- ["setsid", "pkill"] do
-      File.ln_s!(System.find_executable(name), Path.join(bin, name))
-    end
-
-    File.write!(Path.join(bin, "kill"), "#!/bin/sh\nexit 0\n")
-    File.chmod!(Path.join(bin, "kill"), 0o755)
-    File.write!(executable, "#!/bin/sh\ntouch \"#{marker}\"\n")
-    File.chmod!(executable, 0o755)
-    on_exit(fn -> System.put_env("PATH", previous_path) end)
-    System.put_env("PATH", bin)
-
-    assert {:error, {:start, error}} = Process.run(executable, [], cd: root)
-    assert Exception.message(error) == "process group controls are not operational"
-    refute File.exists?(marker)
-  end
-
-  test "does not launch when all signal controls falsely report success" do
-    root = tmp_dir()
-    bin = Path.join(root, "bin")
-    previous_path = System.fetch_env!("PATH")
-
-    File.mkdir_p!(bin)
-    File.ln_s!(System.find_executable("setsid"), Path.join(bin, "setsid"))
-
-    for name <- ["pkill", "kill"] do
-      File.write!(Path.join(bin, name), "#!/bin/sh\nexit 0\n")
-      File.chmod!(Path.join(bin, name), 0o755)
-    end
-
-    on_exit(fn -> System.put_env("PATH", previous_path) end)
-    System.put_env("PATH", bin)
-
-    timeout_parent = Path.join(root, "timeout-parent")
-    timeout_child = Path.join(root, "timeout-child")
-
-    assert {:error, {:start, error}} =
-             Process.run(wait_executable(root), [timeout_parent, timeout_child],
-               cd: root,
-               timeout: 100
-             )
-
-    assert Exception.message(error) == "process group controls are not operational"
-    refute File.exists?(timeout_parent)
-    refute File.exists?(timeout_child)
-
-    cancel_parent = Path.join(root, "cancel-parent")
-    cancel_child = Path.join(root, "cancel-child")
-
-    assert {:error, {:start, error}} =
-             Process.run(wait_executable(root), [cancel_parent, cancel_child],
-               cd: root,
-               cancel_ref: make_ref()
-             )
-
-    assert Exception.message(error) == "process group controls are not operational"
-    refute File.exists?(cancel_parent)
-    refute File.exists?(cancel_child)
-  end
-
-  test "times out and reaps the child" do
-    root = tmp_dir()
-    parent_pid_file = Path.join(root, "parent-pid")
-    child_pid_file = Path.join(root, "child-pid")
-    executable = wait_executable(root)
-
+  test "times out a directly owned command" do
     assert {:error, :timeout} =
-             Process.run(executable, [parent_pid_file, child_pid_file],
-               cd: File.cwd!(),
-               timeout: 100
-             )
-
-    refute_process(parent_pid_file)
-    refute_process(child_pid_file)
+             Process.run("/usr/bin/sleep", ["10"], cd: File.cwd!(), timeout: 20)
   end
 
-  test "cancels and closes the child" do
-    root = tmp_dir()
-    parent_pid_file = Path.join(root, "parent-pid")
-    child_pid_file = Path.join(root, "child-pid")
-    executable = wait_executable(root)
-    cancel_ref = make_ref()
-    parent = self()
-
-    task =
-      Task.async(fn ->
-        send(parent, {:runner, self()})
-
-        Process.run(executable, [parent_pid_file, child_pid_file],
-          cd: File.cwd!(),
-          cancel_ref: cancel_ref
-        )
-      end)
-
-    assert_receive {:runner, runner}
-    assert wait_for_file(child_pid_file, 50)
-    send(runner, {:rekindle_cancel, cancel_ref})
-    assert Task.await(task) == {:error, :cancelled}
-
-    refute_process(parent_pid_file)
-    refute_process(child_pid_file)
-  end
-
-  defp wait_executable(root) do
-    child = Path.join(root, "ignore-term")
-
-    File.write!(
-      child,
-      "#!/bin/sh\nprintf 'rekindle) child\\n' > /proc/self/comm\ntrap '' TERM\nwhile :; do /usr/bin/sleep 30; done\n"
-    )
-
-    File.chmod!(child, 0o755)
-    executable = Path.join(root, "wait")
-
-    File.write!(
-      executable,
-      "#!/bin/sh\necho $$ > \"$1\"\n\"#{child}\" &\necho $! > \"$2\"\nwait\n"
-    )
-
-    File.chmod!(executable, 0o755)
-    executable
-  end
-
-  defp refute_process(pid_file) do
-    pid = pid_file |> File.read!() |> String.trim()
-    refute wait_for_process_exit(pid, 50), "process #{pid} survived"
-  end
-
-  defp wait_for_process_exit(_pid, 0), do: true
-
-  defp wait_for_process_exit(pid, attempts) do
-    if File.exists?("/proc/#{pid}") do
-      :timer.sleep(10)
-      wait_for_process_exit(pid, attempts - 1)
-    else
-      false
-    end
-  end
-
-  defp wait_for_file(_path, 0), do: false
-
-  defp wait_for_file(path, attempts) do
-    if File.exists?(path) do
-      true
-    else
-      :timer.sleep(10)
-      wait_for_file(path, attempts - 1)
-    end
-  end
-
-  defp tmp_dir do
-    path =
+  test "stops the command when its owning task stops" do
+    root =
       Path.join(
         System.tmp_dir!(),
-        "rekindle-process-#{System.unique_integer([:positive, :monotonic])}"
+        "rekindle-process-owner-#{System.unique_integer([:positive, :monotonic])}"
       )
 
-    File.mkdir_p!(path)
-    on_exit(fn -> File.rm_rf!(path) end)
-    path
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    started = Path.join(root, "started")
+    marker = Path.join(root, "completed")
+    command = Path.join(root, "delayed-command")
+
+    File.write!(command, "#!/bin/sh\ntouch '#{started}'\nsleep 0.2\ntouch '#{marker}'\n")
+    File.chmod!(command, 0o755)
+
+    task = Task.async(fn -> Process.run(command, [], cd: root) end)
+    assert eventually?(fn -> File.exists?(started) end)
+    Task.shutdown(task, :brutal_kill)
+    Elixir.Process.sleep(250)
+
+    refute File.exists?(marker)
+  end
+
+  defp eventually?(function, attempts \\ 50)
+
+  defp eventually?(_function, 0), do: false
+
+  defp eventually?(function, attempts) do
+    if function.() do
+      true
+    else
+      Elixir.Process.sleep(10)
+      eventually?(function, attempts - 1)
+    end
   end
 end

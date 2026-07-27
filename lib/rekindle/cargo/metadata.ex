@@ -155,18 +155,14 @@ defmodule Rekindle.Cargo.Metadata do
   defp process_options(project, options) do
     [
       cd: project.client_root,
-      timeout: Keyword.get(options, :timeout, 120_000),
+      timeout: Keyword.get(options, :timeout, :infinity),
       output_limit: Keyword.get(options, :output_limit, 8_000_000),
-      cancel_ref: Keyword.get(options, :cancel_ref),
       env: Keyword.get(options, :env, [])
     ]
   end
 
   defp process_error(kind, operation, :timeout),
     do: {:error, Error.new(kind, "#{operation} timed out")}
-
-  defp process_error(kind, operation, :cancelled),
-    do: {:error, Error.new(kind, "#{operation} was cancelled")}
 
   defp process_error(kind, operation, {:start, error}),
     do: {:error, Error.new(kind, "#{operation} could not start: #{Exception.message(error)}")}

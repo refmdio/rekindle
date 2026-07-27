@@ -684,7 +684,7 @@ defmodule Rekindle.DesktopBuildTest do
   defp wait_until(_condition, 0), do: flunk("independent publisher did not reach its gate")
 
   defp fake_tools(root, options) do
-    target = Rekindle.Toolchain.desktop_target()
+    {:ok, target} = Rekindle.Toolchain.host_target()
     launched = Path.join(root, "launched")
     artifact = Path.join(root, "client/target/#{target}/debug/desktop")
     rustc = Path.join(root, "fake-rustc")

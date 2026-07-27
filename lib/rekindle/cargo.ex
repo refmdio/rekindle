@@ -127,9 +127,8 @@ defmodule Rekindle.Cargo do
 
     process_options = [
       cd: project.client_root,
-      timeout: Keyword.get(options, :timeout, 120_000),
+      timeout: Keyword.get(options, :timeout, :infinity),
       output_limit: Keyword.get(options, :output_limit, 8_000_000),
-      cancel_ref: Keyword.get(options, :cancel_ref),
       env: Keyword.get(options, :env, [])
     ]
 
@@ -143,9 +142,6 @@ defmodule Rekindle.Cargo do
 
         {:error, :timeout} ->
           error(:timeout, "cargo build timed out")
-
-        {:error, :cancelled} ->
-          error(:cancelled, "cargo build was cancelled")
 
         {:error, {:start, reason}} ->
           error(:start_failed, "cargo build could not start: #{Exception.message(reason)}")

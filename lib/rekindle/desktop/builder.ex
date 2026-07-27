@@ -167,7 +167,6 @@ defmodule Rekindle.Desktop.Builder do
       :rustc,
       :timeout,
       :output_limit,
-      :cancel_ref,
       :env
     ])
   end

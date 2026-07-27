@@ -3,11 +3,7 @@ defmodule Rekindle.Toolchain do
 
   alias Rekindle.Toolchain.{Error, Process}
 
-  @desktop_target "x86_64-unknown-linux-gnu"
   @wasm_bindgen_version "0.2.126"
-
-  @spec desktop_target() :: String.t()
-  def desktop_target, do: @desktop_target
 
   @spec wasm_bindgen_version() :: String.t()
   def wasm_bindgen_version, do: @wasm_bindgen_version
@@ -60,21 +56,7 @@ defmodule Rekindle.Toolchain do
   def target(name, options \\ [])
   def target(:web, _options), do: {:ok, "wasm32-unknown-unknown"}
 
-  def target(:desktop, options) do
-    case host_target(options) do
-      {:ok, @desktop_target} ->
-        {:ok, @desktop_target}
-
-      {:ok, host} ->
-        error(
-          :unsupported_desktop_target,
-          "desktop builds require #{@desktop_target}; rustc reports #{host}"
-        )
-
-      {:error, %Error{} = error} ->
-        {:error, error}
-    end
-  end
+  def target(:desktop, options), do: host_target(options)
 
   @spec installed_rust_targets(keyword()) :: {:ok, [String.t()]} | {:error, Error.t()}
   def installed_rust_targets(options \\ []) do
@@ -101,7 +83,6 @@ defmodule Rekindle.Toolchain do
            cd: Keyword.get(options, :cd, File.cwd!()),
            timeout: Keyword.get(options, :timeout, 600_000),
            output_limit: 8_000_000,
-           cancel_ref: Keyword.get(options, :cancel_ref),
            env: Keyword.get(options, :process_env, [])
          ) do
       {:ok, %{status: 0}} ->
@@ -166,7 +147,6 @@ defmodule Rekindle.Toolchain do
              cd: Keyword.get(options, :cd, File.cwd!()),
              timeout: Keyword.get(options, :timeout, 600_000),
              output_limit: 8_000_000,
-             cancel_ref: Keyword.get(options, :cancel_ref),
              env: Keyword.get(options, :process_env, [])
            ) do
       verify_wasm_bindgen(path, version, options)
@@ -178,8 +158,8 @@ defmodule Rekindle.Toolchain do
           output: result.output
         )
 
-      {:error, reason} when reason in [:timeout, :cancelled] ->
-        process_error(:install_failed, "cargo install wasm-bindgen-cli #{version}", reason)
+      {:error, :timeout} ->
+        process_error(:install_failed, "cargo install wasm-bindgen-cli #{version}", :timeout)
 
       {:error, {:start, _reason} = reason} ->
         process_error(:install_failed, "cargo install wasm-bindgen-cli #{version}", reason)
@@ -283,9 +263,6 @@ defmodule Rekindle.Toolchain do
 
   defp process_error(kind, operation, :timeout),
     do: error(kind, "#{operation} timed out")
-
-  defp process_error(kind, operation, :cancelled),
-    do: error(kind, "#{operation} was cancelled")
 
   defp process_error(kind, operation, {:start, reason}),
     do: error(kind, "#{operation} could not start: #{Exception.message(reason)}")

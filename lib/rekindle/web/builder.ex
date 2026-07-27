@@ -87,9 +87,8 @@ defmodule Rekindle.Web.Builder do
 
     case Process.run(executable, arguments,
            cd: Path.dirname(artifact),
-           timeout: Keyword.get(options, :timeout, 120_000),
+           timeout: Keyword.get(options, :timeout, :infinity),
            output_limit: Keyword.get(options, :output_limit, 8_000_000),
-           cancel_ref: Keyword.get(options, :cancel_ref),
            env: Keyword.get(options, :process_env, [])
          ) do
       {:ok, %{status: 0, truncated?: false}} ->
@@ -105,9 +104,6 @@ defmodule Rekindle.Web.Builder do
 
       {:error, :timeout} ->
         error(:timeout, "wasm-bindgen timed out")
-
-      {:error, :cancelled} ->
-        error(:cancelled, "wasm-bindgen was cancelled")
 
       {:error, {:start, reason}} ->
         error(:start_failed, "wasm-bindgen could not start: #{Exception.message(reason)}")
@@ -316,7 +312,7 @@ defmodule Rekindle.Web.Builder do
   defp state_root(project, :release), do: Path.join([project.root, ".rekindle", "release"])
 
   defp cargo_options(options),
-    do: Keyword.take(options, [:cargo, :rustc, :timeout, :output_limit, :cancel_ref, :env])
+    do: Keyword.take(options, [:cargo, :rustc, :timeout, :output_limit, :env])
 
   defp toolchain_options(options),
     do: Keyword.take(options, [:timeout, :env])
