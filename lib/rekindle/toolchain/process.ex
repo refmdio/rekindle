@@ -3,16 +3,15 @@ defmodule Rekindle.Toolchain.Process do
 
   @default_output_limit 8_000_000
 
-  @enforce_keys [:status, :output, :truncated?]
-  defstruct [:status, :output, :truncated?]
+  @enforce_keys [:status, :output]
+  defstruct [:status, :output]
 
   @type t :: %__MODULE__{
           status: non_neg_integer(),
-          output: binary(),
-          truncated?: boolean()
+          output: binary()
         }
 
-  @type failure :: :timeout | {:start, Exception.t()}
+  @type failure :: :timeout | :output_limit | {:start, Exception.t()}
 
   @spec run(Path.t(), [String.t()], keyword()) :: {:ok, t()} | {:error, failure()}
   def run(executable, arguments, options \\ []) do
@@ -47,28 +46,27 @@ defmodule Rekindle.Toolchain.Process do
         deadline(Keyword.get(options, :timeout, :infinity)),
         output_limit,
         [],
-        0,
-        false
+        0
       )
     rescue
       error -> {:error, {:start, error}}
     end
   end
 
-  defp collect(port, deadline, limit, chunks, size, truncated?) do
+  defp collect(port, deadline, limit, chunks, size) do
     receive do
       {^port, {:data, data}} ->
-        {chunks, size, truncated?} = append(chunks, size, truncated?, data, limit)
+        case append(chunks, size, data, limit) do
+          {:ok, chunks, size} ->
+            collect(port, deadline, limit, chunks, size)
 
-        if truncated? do
-          close(port)
-          result(0, chunks, true)
-        else
-          collect(port, deadline, limit, chunks, size, false)
+          :output_limit ->
+            close(port)
+            {:error, :output_limit}
         end
 
       {^port, {:exit_status, status}} ->
-        result(status, chunks, truncated?)
+        result(status, chunks)
     after
       remaining(deadline) ->
         close(port)
@@ -76,12 +74,11 @@ defmodule Rekindle.Toolchain.Process do
     end
   end
 
-  defp result(status, chunks, truncated?) do
+  defp result(status, chunks) do
     {:ok,
      %__MODULE__{
        status: status,
-       output: chunks |> Enum.reverse() |> IO.iodata_to_binary(),
-       truncated?: truncated?
+       output: chunks |> Enum.reverse() |> IO.iodata_to_binary()
      }}
   end
 
@@ -97,12 +94,11 @@ defmodule Rekindle.Toolchain.Process do
     ArgumentError -> :ok
   end
 
-  defp append(chunks, size, truncated?, data, limit) when size < limit do
-    kept = binary_part(data, 0, min(byte_size(data), limit - size))
-    {[kept | chunks], size + byte_size(kept), truncated? or byte_size(kept) < byte_size(data)}
+  defp append(chunks, size, data, limit) when size + byte_size(data) <= limit do
+    {:ok, [data | chunks], size + byte_size(data)}
   end
 
-  defp append(chunks, size, _truncated?, _data, _limit), do: {chunks, size, true}
+  defp append(_chunks, _size, _data, _limit), do: :output_limit
 
   defp environment(options) do
     case Keyword.get(options, :env, []) do

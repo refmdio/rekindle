@@ -1,6 +1,9 @@
-name: Publish to Hex
+name: CI and Publish
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   release:
     types: [published]
   workflow_dispatch:
@@ -9,12 +12,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: hex-${{ github.event.release.tag_name }}
+  group: rekindle-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   publish:
-    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
+    if: github.event_name != 'release' || github.event.release.prerelease == false
     runs-on: ubuntu-24.04
 
     steps:
@@ -117,6 +120,7 @@ jobs:
           mix docs --warnings-as-errors
 
       - name: Inspect the Hex publication
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
         run: mix hex.publish --dry-run

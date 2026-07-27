@@ -143,6 +143,9 @@ defmodule Rekindle.Cargo do
         {:error, :timeout} ->
           error(:timeout, "cargo build timed out")
 
+        {:error, :output_limit} ->
+          error(:output_limit, "cargo build exceeded the output limit")
+
         {:error, {:start, reason}} ->
           error(:start_failed, "cargo build could not start: #{Exception.message(reason)}")
       end

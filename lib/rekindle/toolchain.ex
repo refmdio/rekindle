@@ -161,6 +161,13 @@ defmodule Rekindle.Toolchain do
       {:error, :timeout} ->
         process_error(:install_failed, "cargo install wasm-bindgen-cli #{version}", :timeout)
 
+      {:error, :output_limit} ->
+        process_error(
+          :install_failed,
+          "cargo install wasm-bindgen-cli #{version}",
+          :output_limit
+        )
+
       {:error, {:start, _reason} = reason} ->
         process_error(:install_failed, "cargo install wasm-bindgen-cli #{version}", reason)
 
@@ -199,11 +206,8 @@ defmodule Rekindle.Toolchain do
            output_limit: 4_096,
            env: Keyword.get(options, :process_env, [])
          ) do
-      {:ok, %{status: 0, output: output, truncated?: false}} ->
+      {:ok, %{status: 0, output: output}} ->
         parse_cargo_version(path, output)
-
-      {:ok, %{truncated?: true}} ->
-        error(:cargo_not_ready, "cargo at #{path} returned an oversized version response")
 
       {:ok, result} ->
         error(
@@ -263,6 +267,9 @@ defmodule Rekindle.Toolchain do
 
   defp process_error(kind, operation, :timeout),
     do: error(kind, "#{operation} timed out")
+
+  defp process_error(kind, operation, :output_limit),
+    do: error(kind, "#{operation} exceeded the output limit")
 
   defp process_error(kind, operation, {:start, reason}),
     do: error(kind, "#{operation} could not start: #{Exception.message(reason)}")

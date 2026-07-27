@@ -3,8 +3,7 @@
 This guide covers installation into an existing Phoenix application. For a new
 application, use the `mix igniter.new` command shown in the README.
 
-Rekindle 0.1 supports native development and desktop release builds on
-`x86_64-unknown-linux-gnu`.
+Desktop builds use the host target reported by `rustc -vV`.
 
 ## Add Rekindle to an existing Phoenix application
 
@@ -28,8 +27,7 @@ mix igniter.install rekindle --integration gpui --targets web,desktop
 Valid integrations are `gpui`, `egui`, and `slint`. Valid target selections are
 `web`, `desktop`, and `web,desktop`. When the flags are omitted for a new
 client, Rekindle selects GPUI and enables both targets. The Web target is
-`wasm32-unknown-unknown`; Rekindle 0.1 qualifies desktop builds on
-`x86_64-unknown-linux-gnu`.
+`wasm32-unknown-unknown`; desktop builds use the Rust host target.
 
 The installer adds Rekindle as an application dependency, creates the Rust
 client, configures the Phoenix development runtime, and adds Web release

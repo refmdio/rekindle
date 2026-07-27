@@ -25,9 +25,9 @@ Run `mix rekindle.setup` and follow any target-specific diagnostic. The selected
 integration may also require native system libraries that are outside
 Rekindle's control.
 
-Rekindle 0.1 accepts desktop builds only when `rustc -vV` reports
-`x86_64-unknown-linux-gnu`. A different host is reported as unsupported rather
-than treated as a qualified release target.
+Desktop builds use the host target reported by `rustc -vV`. Confirm that the
+selected UI integration supports that platform and that its native libraries
+are installed.
 
 ## Development builds do not start
 

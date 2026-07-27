@@ -82,10 +82,10 @@ defmodule Rekindle.Web.Builder do
            output_limit: Keyword.get(options, :output_limit, 8_000_000),
            env: Keyword.get(options, :process_env, [])
          ) do
-      {:ok, %{status: 0, truncated?: false}} ->
+      {:ok, %{status: 0}} ->
         :ok
 
-      {:ok, %{truncated?: true}} ->
+      {:error, :output_limit} ->
         error(:output_limit, "wasm-bindgen output exceeded the limit")
 
       {:ok, result} ->

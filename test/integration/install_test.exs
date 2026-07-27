@@ -115,6 +115,43 @@ defmodule Rekindle.InstallTest do
     assert length(Regex.scan(~r/Rekindle\.Phoenix\.Development/, endpoint)) == 1
   end
 
+  test "adds missing integration host markup independently from the script" do
+    script =
+      ~s|<script type="module" src={Rekindle.Phoenix.web_entry_path(DemoWeb.Endpoint)}></script>|
+
+    installed =
+      install(
+        project(%{
+          "lib/demo_web/components/layouts/root.html.heex" => """
+          <html>
+            <body>
+              #{script}
+            </body>
+          </html>
+          """
+        }),
+        integration: "egui",
+        targets: ["web"]
+      )
+
+    assert installed.issues == []
+    layout = content(installed, "lib/demo_web/components/layouts/root.html.heex")
+    assert length(Regex.scan(~r/<canvas id="the_canvas_id"><\/canvas>/, layout)) == 1
+    assert length(Regex.scan(~r/Rekindle\.Phoenix\.web_entry_path/, layout)) == 1
+  end
+
+  test "requires a body insertion point before changing the project" do
+    original =
+      project(%{
+        "lib/demo_web/components/layouts/root.html.heex" => "<html></html>\n"
+      })
+
+    rejected = install(original, integration: "egui", targets: ["web"])
+
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "must contain </body>"))
+    assert changed_contents(rejected) == changed_contents(original)
+  end
+
   test "rejects an unmanaged Rust client without modifying it" do
     original =
       project(%{
@@ -134,6 +171,22 @@ defmodule Rekindle.InstallTest do
     assert Enum.any?(rejected.issues, &String.contains?(&1, "will not overwrite"))
     refute Map.has_key?(rejected.rewrite.sources, "client/Cargo.toml")
     assert content(rejected, "client/src/lib.rs") == "pub struct Existing;\n"
+  end
+
+  test "preserves an entry for a target that is not being generated" do
+    original =
+      project(%{
+        "client/src/bin/desktop.rs" => "fn main() { println!(\"existing\"); }\n"
+      })
+
+    installed = install(original, integration: "gpui", targets: ["web"])
+
+    assert installed.issues == []
+
+    assert content(installed, "client/src/bin/desktop.rs") ==
+             content(original, "client/src/bin/desktop.rs")
+
+    assert content(installed, "client/src/bin/web.rs") != ""
   end
 
   test "rejects invalid selections before changing the project" do

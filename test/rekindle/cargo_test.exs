@@ -360,8 +360,7 @@ defmodule Rekindle.Cargo.MessagesTest do
 
     process = %Process{
       status: 0,
-      output: diagnostic <> "\n" <> artifact <> "\n",
-      truncated?: false
+      output: diagnostic <> "\n" <> artifact <> "\n"
     }
 
     assert {:ok, "/tmp/web.wasm", [warning], ""} =
@@ -412,8 +411,7 @@ defmodule Rekindle.Cargo.MessagesTest do
     Enum.each(malformed, fn message ->
       process = %Process{
         status: 0,
-        output: Jason.encode!(message),
-        truncated?: false
+        output: Jason.encode!(message)
       }
 
       assert {:error, %Rekindle.Cargo.Error{kind: :invalid_message}} =
@@ -433,8 +431,7 @@ defmodule Rekindle.Cargo.MessagesTest do
 
     process = %Process{
       status: 0,
-      output: Jason.encode!(%{"reason" => "build-script-executed"}) <> "\nnote\n" <> artifact,
-      truncated?: false
+      output: Jason.encode!(%{"reason" => "build-script-executed"}) <> "\nnote\n" <> artifact
     }
 
     assert {:ok, "/tmp/web.wasm", [], "note"} =
@@ -447,13 +444,9 @@ defmodule Rekindle.Cargo.ProcessTest do
 
   alias Rekindle.Toolchain.Process
 
-  test "bounds captured output" do
-    assert {:ok, result} =
+  test "fails when captured output exceeds the limit" do
+    assert {:error, :output_limit} =
              Process.run("/usr/bin/printf", ["1234567890"], cd: File.cwd!(), output_limit: 4)
-
-    assert result.status == 0
-    assert result.output == "1234"
-    assert result.truncated?
   end
 
   test "times out a directly owned command" do

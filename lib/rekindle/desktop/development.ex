@@ -181,6 +181,11 @@ defmodule Rekindle.Desktop.Development do
     send_notification(notify, message)
   end
 
+  defp notify(notify, {:exited, _result, :normal} = message) do
+    Logger.info("desktop development process exited normally")
+    send_notification(notify, message)
+  end
+
   defp notify(notify, {:exited, _result, reason} = message) do
     Logger.error("desktop development process exited: #{inspect(reason)}")
     send_notification(notify, message)

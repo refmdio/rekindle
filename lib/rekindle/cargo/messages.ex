@@ -50,13 +50,6 @@ defmodule Rekindle.Cargo.Messages do
     diagnostics = failure_diagnostic(process.status, diagnostics, output)
 
     cond do
-      process.truncated? ->
-        {:error,
-         Error.new(:output_limit, "cargo build exceeded the output limit",
-           diagnostics: diagnostics,
-           output: output
-         )}
-
       process.status != 0 ->
         {:error,
          Error.new(:build_failed, "cargo build failed with status #{process.status}",

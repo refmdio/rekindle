@@ -36,7 +36,7 @@ defmodule Rekindle.Cargo.Metadata do
       ] ++ if(Keyword.get(options, :locked, false), do: ["--locked"], else: [])
 
     case Process.run(executable, arguments, process_options(project, options)) do
-      {:ok, %{truncated?: true}} ->
+      {:error, :output_limit} ->
         {:error, Error.new(:output_limit, "cargo metadata exceeded the output limit")}
 
       {:ok, %{status: 0, output: output}} ->

@@ -7,7 +7,7 @@ if Code.ensure_loaded?(Igniter) do
 
     @type prepared :: %{
             layout_path: String.t(),
-            layout_block: String.t(),
+            layout_host: String.t(),
             layout_script: String.t()
           }
 
@@ -39,10 +39,16 @@ if Code.ensure_loaded?(Igniter) do
           igniter = Igniter.include_existing_file(igniter, path, required?: true)
 
           case Rewrite.source(igniter.rewrite, path) do
-            {:ok, _source} ->
+            {:ok, layout_source} ->
               {host, script} = layout_parts(endpoint, integration)
-              block = Enum.reject([host, script], &(&1 == "")) |> Enum.join("\n")
-              {:ok, igniter, %{layout_path: path, layout_block: block, layout_script: script}}
+              content = Rewrite.Source.get(layout_source, :content)
+
+              if missing_layout_parts(content, host, script) != [] and
+                   not Regex.match?(~r{</body\s*>}i, content) do
+                {:error, "#{path} must contain </body> so Rekindle can install its Web entry"}
+              else
+                {:ok, igniter, %{layout_path: path, layout_host: host, layout_script: script}}
+              end
 
             {:error, %Rewrite.Error{} = error} ->
               {:error, Exception.message(error)}
@@ -97,19 +103,28 @@ if Code.ensure_loaded?(Igniter) do
 
     defp install_layout(igniter, %{
            layout_path: path,
-           layout_block: block,
+           layout_host: host,
            layout_script: script
          }) do
       Igniter.create_or_update_file(igniter, path, "", fn source ->
         content = Rewrite.Source.get(source, :content)
 
         updated =
-          if String.contains?(content, script) do
-            content
-          else
-            Regex.replace(~r{([ \t]*)</body\s*>}i, content, fn closing, indentation ->
-              indent_block(block, indentation <> "  ") <> "\n" <> closing
-            end)
+          case missing_layout_parts(content, host, script) do
+            [] ->
+              content
+
+            missing ->
+              block = Enum.join(missing, "\n")
+
+              Regex.replace(
+                ~r{([ \t]*)</body\s*>}i,
+                content,
+                fn closing, indentation ->
+                  indent_block(block, indentation <> "  ") <> "\n" <> closing
+                end,
+                global: false
+              )
           end
 
         Rewrite.Source.update(source, :content, updated)
@@ -176,6 +191,11 @@ if Code.ensure_loaded?(Igniter) do
         ~s|<script type="module" src={Rekindle.Phoenix.web_entry_path(#{inspect(endpoint)})}></script>|
 
       {host, script}
+    end
+
+    defp missing_layout_parts(content, host, script) do
+      [host, script]
+      |> Enum.reject(&(&1 == "" or String.contains?(content, &1)))
     end
 
     defp indent_block(block, indentation) do

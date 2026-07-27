@@ -1,6 +1,8 @@
 defmodule Rekindle.DevelopmentTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Rekindle.Build.Result
   alias Rekindle.Development.Builder
   alias Rekindle.Desktop.Development, as: DesktopDevelopment
@@ -132,11 +134,16 @@ defmodule Rekindle.DevelopmentTest do
     %{current: %{pid: first_process}} = DesktopDevelopment.status(launcher)
 
     replacement = desktop_result(root, "replacement", :exit)
-    DesktopDevelopment.replace(launcher, replacement)
-    assert_receive {DesktopDevelopment, {:ready, ^replacement}}
-    assert_receive {DesktopDevelopment, {:exited, ^replacement, _reason}}
+
+    error_log =
+      capture_log([level: :error], fn ->
+        DesktopDevelopment.replace(launcher, replacement)
+        assert_receive {DesktopDevelopment, {:ready, ^replacement}}
+        assert_receive {DesktopDevelopment, {:exited, ^replacement, :normal}}
+      end)
 
     refute Process.alive?(first_process)
+    refute error_log =~ "desktop development process exited"
     assert DesktopDevelopment.status(launcher) == %{current: nil}
     refute File.exists?(Path.dirname(first.artifact))
     refute File.exists?(Path.dirname(replacement.artifact))

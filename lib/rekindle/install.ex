@@ -152,8 +152,7 @@ if Code.ensure_loaded?(Igniter) do
         |> Integration.render(selection.targets)
         |> Map.keys()
 
-      (generated_paths ++ ["src/bin/web.rs", "src/bin/desktop.rs"])
-      |> Enum.uniq()
+      generated_paths
       |> Enum.find(&Igniter.exists?(igniter, Path.join("client", &1)))
       |> case do
         nil -> :ok
