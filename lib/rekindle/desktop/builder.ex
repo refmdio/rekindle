@@ -4,72 +4,64 @@ defmodule Rekindle.Desktop.Builder do
   alias Rekindle.Build.Result
   alias Rekindle.Desktop.{Error, Manifest}
   alias Rekindle.Publication
-  alias Rekindle.OwnedPath
+
+  @executable "application"
 
   @spec build(Rekindle.Config.t(), Rekindle.Config.Target.t(), :dev | :release, keyword()) ::
           {:ok, Result.t()} | {:error, Rekindle.Cargo.Error.t() | Error.t()}
   def build(project, target, profile, options) do
-    with_staging_lock(project, fn ->
-      build_staged(project, target, profile, options)
-    end)
-  end
-
-  defp build_staged(project, target, profile, options) do
     with {:ok, temporary} <- temporary_directory(project) do
       try do
-        with {:ok, cargo} <-
-               Rekindle.Cargo.build(project, target, profile, cargo_options(options)),
-             executable <- Path.basename(cargo.artifact),
-             :ok <- copy_executable(cargo.artifact, Path.join(temporary, executable)),
-             {:ok, manifest} <-
-               Manifest.create(
-                 temporary,
-                 executable,
-                 cargo.target,
-                 cargo.package,
-                 cargo.binary,
-                 project.integration
-               ),
-             :ok <- write_manifest(temporary, manifest),
-             {:ok, generation} <- publish(project, profile, temporary, manifest),
-             {:ok, result} <-
-               finish(
-                 project,
-                 %Result{
-                   target: :desktop,
-                   profile: profile,
-                   artifact: Path.join(generation, executable),
-                   metadata: %{
-                     generation: manifest["generation"],
-                     manifest: Path.join(generation, "manifest.json"),
-                     package: cargo.package,
-                     binary: cargo.binary,
-                     rust_target: cargo.target,
-                     target_directory: cargo.target_directory,
-                     diagnostics: cargo.diagnostics
-                   }
-                 }
-               ) do
-          {:ok, result}
-        end
+        build(project, target, profile, options, temporary)
       after
-        OwnedPath.remove_directory(project.root, temporary)
+        File.rm_rf(temporary)
       end
     end
   end
 
-  defp with_staging_lock(project, function) do
-    case Publication.with_lock(project.root, {:staging, :desktop}, function) do
-      {:error, {:publication_lock, reason}} ->
-        error(:publication_lock, "cannot serialize desktop staging: #{inspect(reason)}")
+  defp build(project, target, profile, options, temporary) do
+    with {:ok, cargo} <-
+           Rekindle.Cargo.build(project, target, profile, cargo_options(options)),
+         :ok <- copy_executable(cargo.artifact, Path.join(temporary, @executable)),
+         {:ok, manifest} <-
+           Manifest.create(
+             temporary,
+             @executable,
+             cargo.target,
+             cargo.package,
+             cargo.binary,
+             project.integration
+           ),
+         :ok <- File.write(Path.join(temporary, "manifest.json"), Jason.encode!(manifest)),
+         {:ok, output} <- output(project, profile, temporary, manifest) do
+      result = %Result{
+        target: :desktop,
+        profile: profile,
+        artifact: Path.join(output, @executable),
+        metadata: %{
+          manifest: Path.join(output, "manifest.json"),
+          package: cargo.package,
+          binary: cargo.binary,
+          rust_target: cargo.target,
+          target_directory: cargo.target_directory,
+          diagnostics: cargo.diagnostics
+        }
+      }
 
-      result ->
-        result
+      if profile == :release,
+        do: Rekindle.Desktop.Release.publish(project, result),
+        else: {:ok, result}
+    else
+      {:error, reason} when is_atom(reason) ->
+        file_error(:manifest_write, Path.join(temporary, "manifest.json"), reason)
+
+      {:error, error} ->
+        {:error, error}
     end
   end
 
   defp copy_executable(source, destination) do
-    with {:ok, %{type: :regular, mode: mode}} <- File.lstat(source),
+    with {:ok, %{type: :regular, mode: mode}} <- File.stat(source),
          true <- Bitwise.band(mode, 0o111) != 0,
          :ok <- File.cp(source, destination),
          :ok <- File.chmod(destination, mode) do
@@ -86,100 +78,46 @@ defmodule Rekindle.Desktop.Builder do
     end
   end
 
-  defp write_manifest(root, manifest) do
-    path = Path.join(root, "manifest.json")
+  defp output(_project, :release, temporary, _manifest), do: {:ok, temporary}
 
-    case File.write(path, Jason.encode!(manifest)) do
-      :ok -> Manifest.validate(root, manifest)
-      {:error, reason} -> file_error(:manifest_write, path, reason)
-    end
-  end
+  defp output(project, :dev, temporary, manifest) do
+    parent = Path.join([project.root, ".rekindle", "dev", "desktop", manifest["target"]])
+    destination = Path.join(parent, build_id())
 
-  defp publish(project, profile, temporary, manifest) do
-    parent =
-      Path.join([
-        state_root(project, profile),
-        "desktop",
-        manifest["target"]
-      ])
-
-    destination = Path.join(parent, manifest["generation"])
-
-    with :ok <- state_directory(project, parent),
-         {:ok, destination} <-
-           rename_generation(temporary, destination, manifest["generation"]) do
+    with :ok <- File.mkdir_p(parent),
+         :ok <- File.rename(temporary, destination),
+         :ok <- Manifest.validate(destination, manifest) do
       {:ok, destination}
-    end
-  end
-
-  defp rename_generation(temporary, destination, generation) do
-    case File.rename(temporary, destination) do
-      :ok ->
-        {:ok, destination}
-
-      {:error, reason} when reason in [:eexist, :enotempty] ->
-        case validate_published(destination, generation) do
-          :ok -> {:ok, destination}
-          {:error, %Error{} = error} -> {:error, error}
-        end
-
-      {:error, reason} ->
-        file_error(:publish, destination, reason)
-    end
-  end
-
-  defp validate_published(root, expected_generation) do
-    with {:ok, manifest} <- Manifest.read(root),
-         true <- manifest["generation"] == expected_generation,
-         :ok <- Manifest.validate(root, manifest) do
-      :ok
     else
-      false ->
-        error(:invalid_manifest, "desktop generation does not match its directory")
-
-      {:error, %Error{} = error} ->
-        {:error, error}
+      {:error, %Error{} = error} -> {:error, error}
+      {:error, reason} -> file_error(:publish, destination, reason)
     end
   end
-
-  defp finish(project, %Result{profile: :release} = result),
-    do: Rekindle.Desktop.Release.publish(project, result)
-
-  defp finish(_project, result), do: {:ok, result}
 
   defp temporary_directory(project) do
     parent = Path.join([project.root, ".rekindle", "tmp", "desktop"])
 
-    with :ok <- state_directory(project, parent) do
+    with :ok <- File.mkdir_p(parent) do
       case Publication.temporary_directory(parent, "build-") do
         {:ok, path} -> {:ok, path}
         {:error, reason} -> file_error(:mkdir, parent, reason)
       end
+    else
+      {:error, reason} -> file_error(:mkdir, parent, reason)
     end
   end
 
-  defp state_root(project, :dev), do: Path.join([project.root, ".rekindle", "dev"])
-  defp state_root(project, :release), do: Path.join([project.root, ".rekindle", "release"])
+  defp cargo_options(options),
+    do: Keyword.take(options, [:cargo, :rustc, :timeout, :output_limit, :env])
 
-  defp cargo_options(options) do
-    Keyword.take(options, [
-      :cargo,
-      :rustc,
-      :timeout,
-      :output_limit,
-      :env
-    ])
-  end
-
-  defp state_directory(project, path) do
-    case OwnedPath.ensure_directory(project.root, path) do
-      :ok -> :ok
-      {:error, reason} -> file_error(:mkdir, path, reason)
-    end
+  defp build_id do
+    12
+    |> :crypto.strong_rand_bytes()
+    |> Base.url_encode64(padding: false)
   end
 
   defp file_error(kind, path, reason),
-    do: error(kind, "cannot update #{path}: #{OwnedPath.format_error(reason)}")
+    do: error(kind, "cannot update #{path}: #{:file.format_error(reason)}")
 
   defp error(kind, message), do: {:error, Error.new(kind, message)}
 end

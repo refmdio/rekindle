@@ -10,9 +10,9 @@ defmodule Mix.Tasks.Rekindle.Build do
       mix rekindle.build web --release
       mix rekindle.build desktop --release
 
-  Development builds publish internal generations below `.rekindle/dev`.
+  Development builds publish disposable output below `.rekindle/dev`.
   Release Web builds publish Phoenix static assets; release desktop builds
-  publish a content-named executable and manifest below `dist/rekindle`.
+  publish an executable and manifest below `dist/rekindle`.
   """
 
   @diagnostic_limit 64_000

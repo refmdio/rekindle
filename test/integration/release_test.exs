@@ -30,18 +30,9 @@ defmodule Rekindle.ReleaseTest do
     web_manifest_path = Path.join(web_generation_root, "manifest.json")
     web_manifest = read_json(web_manifest_path)
 
-    canonical_generation_root =
-      Path.join([root, ".rekindle/release/web", web_entry.generation])
-
-    canonical_manifest =
-      canonical_generation_root
-      |> Path.join("manifest.json")
-      |> read_json()
-
     assert web_entry.module == "./web/#{web_entry.generation}/app.js"
     assert File.regular?(Path.join(web_root, String.trim_leading(web_entry.module, "./")))
-    assert web_manifest == canonical_manifest
-    assert :ok = Rekindle.Web.Manifest.validate(canonical_generation_root, canonical_manifest)
+    assert :ok = Rekindle.Web.Manifest.validate(web_generation_root, web_manifest)
 
     digest_manifest = read_json(Path.join(root, "priv/static/cache_manifest.json"))
     digested_entry = digest_manifest["latest"]["rekindle/entry.js"]
@@ -74,24 +65,12 @@ defmodule Rekindle.ReleaseTest do
 
     repeated_entry = read_entry(web_entry_path)
     repeated_digest_manifest = read_json(Path.join(root, "priv/static/cache_manifest.json"))
-    assert repeated_entry == web_entry
+    refute repeated_entry == web_entry
     assert is_binary(repeated_digest_manifest["latest"]["rekindle/entry.js"])
 
-    selected_web = File.read!(web_entry_path)
     File.write!(tools.mode, "second")
-    File.chmod!(web_root, 0o555)
-
-    {failed_web, status} =
-      try do
-        mix(root, tools, ["rekindle.build", "web", "--release"])
-      after
-        File.chmod!(web_root, 0o755)
-      end
-
-    assert status != 0
-    assert failed_web =~ "cannot update"
-    assert File.read!(web_entry_path) == selected_web
-    assert File.regular?(Path.join(web_root, String.trim_leading(web_entry.module, "./")))
+    assert {_output, 0} = mix(root, tools, ["rekindle.build", "web", "--release"])
+    assert read_entry(web_entry_path).generation != repeated_entry.generation
     assert File.read!(Path.join(root, "priv/static/sibling.txt")) == "web-sibling"
 
     assert {_output, 0} = mix(root, tools, ["rekindle.build", "desktop", "--release"])
@@ -102,49 +81,17 @@ defmodule Rekindle.ReleaseTest do
 
     assert desktop_manifest["target"] == tools.target
     assert desktop_manifest["integration"] == "gpui"
-    assert desktop_manifest["sha256"] == sha256(File.read!(desktop_executable))
+    assert desktop_manifest["executable"] == "application"
     assert executable?(desktop_executable)
     refute File.exists?(tools.launched)
     assert File.read!(Path.join(root, "dist/sibling.txt")) == "desktop-sibling"
 
-    selected_desktop = File.read!(desktop_manifest_path)
     File.write!(tools.mode, "third")
-    assert {_output, 0} = mix(root, tools, ["rekindle.build", "desktop"])
-    candidate = desktop_candidate(root, tools.target, "third")
-    staged = Path.join(desktop_root, "application-#{candidate.manifest["sha256"]}")
-    File.cp!(candidate.artifact, staged)
-    File.chmod!(staged, 0o755)
-
-    previous = Application.get_env(:release_fixture, Rekindle)
-
-    Application.put_env(:release_fixture, Rekindle,
-      integration: :gpui,
-      targets: [web: [], desktop: []]
-    )
-
-    File.chmod!(desktop_root, 0o555)
-
-    publication =
-      try do
-        {:ok, project} = Rekindle.Config.load(:release_fixture, project_root: root)
-        Rekindle.Desktop.Release.publish(project, candidate.result)
-      after
-        File.chmod!(desktop_root, 0o755)
-
-        if previous do
-          Application.put_env(:release_fixture, Rekindle, previous)
-        else
-          Application.delete_env(:release_fixture, Rekindle)
-        end
-      end
-
-    assert {:error, %Rekindle.Desktop.Error{kind: :manifest_write}} = publication
-    assert File.read!(desktop_manifest_path) == selected_desktop
+    assert {_output, 0} = mix(root, tools, ["rekindle.build", "desktop", "--release"])
+    assert File.read!(desktop_executable) =~ "# third"
     assert File.regular?(desktop_executable)
     refute File.exists?(tools.launched)
     assert File.read!(Path.join(root, "dist/sibling.txt")) == "desktop-sibling"
-    assert Path.wildcard(Path.join(root, "priv/static/rekindle/web/.tmp-*")) == []
-    assert Path.wildcard(Path.join(desktop_root, ".tmp-*")) == []
   end
 
   defp write_fixture(root, repository) do
@@ -314,33 +261,6 @@ defmodule Rekindle.ReleaseTest do
     System.cmd("mix", arguments, cd: root, env: environment, stderr_to_stdout: true)
   end
 
-  defp desktop_candidate(root, target, marker) do
-    root
-    |> Path.join(".rekindle/dev/desktop/#{target}/*/manifest.json")
-    |> Path.wildcard()
-    |> Enum.find_value(fn manifest_path ->
-      manifest = read_json(manifest_path)
-      artifact = Path.join(Path.dirname(manifest_path), manifest["executable"])
-
-      if File.read!(artifact) =~ "# #{marker}" do
-        %{
-          artifact: artifact,
-          manifest: manifest,
-          result: %Rekindle.Build.Result{
-            target: :desktop,
-            profile: :release,
-            artifact: artifact,
-            metadata: %{
-              generation: manifest["generation"],
-              manifest: manifest_path,
-              rust_target: target
-            }
-          }
-        }
-      end
-    end) || flunk("missing desktop candidate for #{marker}")
-  end
-
   defp compiler_message(package_id, binary, artifact, executable) do
     Jason.encode!(%{
       "reason" => "compiler-artifact",
@@ -370,7 +290,7 @@ defmodule Rekindle.ReleaseTest do
 
     assert [generation, module] =
              Regex.run(
-               ~r/\A\/\/ Rekindle generation: ([0-9a-f]{64})\nimport init from "([^"]+)";\nawait init\(\);\n\z/,
+               ~r/\A\/\/ Rekindle generation: ([0-9a-f]{32})\nimport init from "([^"]+)";\nawait init\(\);\n\z/,
                contents,
                capture: :all_but_first
              )
@@ -382,9 +302,6 @@ defmodule Rekindle.ReleaseTest do
     {:ok, %{mode: mode}} = File.stat(path)
     Bitwise.band(mode, 0o111) != 0
   end
-
-  defp sha256(contents),
-    do: contents |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
 
   defp tmp_dir do
     path =

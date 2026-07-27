@@ -78,7 +78,8 @@ defmodule Rekindle.BuildTest do
     assert result.target == :desktop
     assert result.profile == :release
     assert File.regular?(result.artifact)
-    assert result.artifact =~ "/dist/rekindle/desktop/x86_64-unknown-linux-gnu/application-"
+    assert result.artifact =~ "/dist/rekindle/desktop/"
+    assert Path.basename(result.artifact) == "application"
     assert File.regular?(result.metadata.manifest)
   end
 

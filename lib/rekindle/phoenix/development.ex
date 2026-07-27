@@ -11,7 +11,7 @@ defmodule Rekindle.Phoenix.Development do
   alias Rekindle.Web.Manifest
 
   @prefix ["__rekindle"]
-  @generation ~r/\A[0-9a-f]{64}\z/
+  @generation ~r/\A[0-9a-f]{32}\z/
 
   @impl Plug
   def init(options), do: options
@@ -137,15 +137,10 @@ defmodule Rekindle.Phoenix.Development do
     root = Path.join([project.root, ".rekindle", "dev", "web", generation])
 
     with :ok <- OwnedPath.validate_directory(project.root, root),
-         {:ok,
-          %{
-            "generation" => ^generation,
-            "entry" => entry,
-            "members" => members
-          } = manifest} <- Manifest.read(root),
+         {:ok, %{"generation" => ^generation, "entry" => entry} = manifest} <-
+           Manifest.read(root),
          true <- safe_member?(entry),
-         true <- is_list(members),
-         true <- Enum.any?(members, &(&1["path"] == entry)) do
+         :ok <- Manifest.validate(root, manifest) do
       {:ok, manifest}
     end
   end
