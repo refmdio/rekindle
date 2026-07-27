@@ -3,6 +3,83 @@ defmodule Rekindle.ToolchainTest do
 
   alias Rekindle.Toolchain
 
+  test "resolves Cargo through rustup in the client directory" do
+    root = tmp_dir()
+    client = Path.join(root, "client")
+    cargo = Path.join(root, "toolchains/nightly/bin/cargo")
+    rustc = Path.join(root, "toolchains/nightly/bin/rustc")
+    rustup = Path.join(root, "bin/rustup")
+    trace = Path.join(root, "rustup-cwd")
+
+    File.mkdir_p!(client)
+    File.write!(Path.join(client, "rust-toolchain.toml"), "[toolchain]\nchannel = \"nightly\"\n")
+    write_executable(cargo, "#!/bin/sh\necho 'cargo 1.99.0-nightly'\n")
+    write_executable(rustc, "#!/bin/sh\necho 'rustc 1.99.0-nightly'\n")
+
+    write_executable(
+      rustup,
+      """
+      printf '%s' "$PWD" > "#{trace}"
+      if [ "$1" = "which" ] && [ "$2" = "cargo" ]; then
+        printf '%s\\n' "#{cargo}"
+        exit 0
+      fi
+      if [ "$1" = "which" ] && [ "$2" = "rustc" ]; then
+        printf '%s\\n' "#{rustc}"
+        exit 0
+      fi
+      exit 1
+      """
+    )
+
+    assert Toolchain.cargo_path(rustup: rustup, cd: client) == cargo
+    assert File.read!(trace) == client
+    assert {:ok, "1.99.0-nightly"} = Toolchain.cargo_version(rustup: rustup, cd: client)
+
+    assert Toolchain.cargo_environment(rustup: rustup, cd: client) |> Map.new() == %{
+             "RUSTC" => rustc
+           }
+  end
+
+  test "an explicit Cargo executable takes precedence over rustup" do
+    root = tmp_dir()
+    cargo = Path.join(root, "cargo")
+    write_executable(cargo, "#!/bin/sh\necho 'cargo 1.90.0'\n")
+
+    assert Toolchain.cargo_path(cargo: cargo, rustup: Path.join(root, "missing")) == cargo
+  end
+
+  test "does not fall back to a system Cargo when the project toolchain is unavailable" do
+    root = tmp_dir()
+    client = Path.join(root, "client")
+    rustup = Path.join(root, "bin/rustup")
+
+    File.mkdir_p!(client)
+    File.write!(Path.join(client, "rust-toolchain.toml"), "[toolchain]\nchannel = \"nightly\"\n")
+    write_executable(rustup, "#!/bin/sh\nexit 1\n")
+
+    expected = Path.join(Path.dirname(rustup), "cargo")
+    assert Toolchain.cargo_path(rustup: rustup, cd: client) == expected
+
+    assert {:error, %Toolchain.Error{kind: :missing_cargo}} =
+             Toolchain.cargo_version(rustup: rustup, cd: client)
+  end
+
+  test "preserves an explicitly configured Rust compiler" do
+    root = tmp_dir()
+    rustc = Path.join(root, "rustc")
+    write_executable(rustc, "#!/bin/sh\nexit 0\n")
+
+    assert Toolchain.cargo_environment(rustc: rustc, env: [{"RUSTFLAGS", "-Dwarnings"}])
+           |> Map.new() == %{"RUSTC" => rustc, "RUSTFLAGS" => "-Dwarnings"}
+
+    assert Toolchain.cargo_environment(
+             rustc: Path.join(root, "selected"),
+             env: [{"RUSTC", rustc}]
+           )
+           |> Map.new() == %{"RUSTC" => Path.join(root, "selected")}
+  end
+
   test "uses the rustc host target for desktop builds" do
     root = tmp_dir()
     x86 = fake_rustc(root, "x86_64-unknown-linux-gnu")

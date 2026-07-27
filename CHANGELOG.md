@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Resolve Cargo through rustup using the generated client toolchain.
+
 ## 0.1.1 - 2026-07-27
 
 - Simplified external process ownership, artifact publication, and installation.

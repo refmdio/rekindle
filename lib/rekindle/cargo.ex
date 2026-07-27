@@ -110,6 +110,7 @@ defmodule Rekindle.Cargo do
   end
 
   defp execute(project, target, profile, package, binary, options) do
+    options = Keyword.put(options, :cd, project.client_root)
     executable = Rekindle.Toolchain.cargo_path(options)
 
     base_arguments = [
@@ -129,7 +130,7 @@ defmodule Rekindle.Cargo do
       cd: project.client_root,
       timeout: Keyword.get(options, :timeout, :infinity),
       output_limit: Keyword.get(options, :output_limit, 8_000_000),
-      env: Keyword.get(options, :env, [])
+      env: Rekindle.Toolchain.cargo_environment(options)
     ]
 
     with {:ok, arguments, rust_target} <-

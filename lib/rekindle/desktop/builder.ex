@@ -108,7 +108,16 @@ defmodule Rekindle.Desktop.Builder do
   end
 
   defp cargo_options(options),
-    do: Keyword.take(options, [:cargo, :rustc, :timeout, :output_limit, :env])
+    do:
+      Keyword.take(options, [
+        :cargo,
+        :rustc,
+        :rustup,
+        :timeout,
+        :output_limit,
+        :env,
+        :process_env
+      ])
 
   defp build_id do
     12

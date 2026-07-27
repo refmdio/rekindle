@@ -10,7 +10,38 @@ defmodule Rekindle.Toolchain do
 
   @spec cargo_path(keyword()) :: Path.t()
   def cargo_path(options \\ []) do
-    Keyword.get(options, :cargo) || System.find_executable("cargo") || "cargo"
+    Keyword.get(options, :cargo) ||
+      rustup_tool_path("cargo", options) ||
+      System.find_executable("cargo") ||
+      "cargo"
+  end
+
+  @spec rustc_path(keyword()) :: Path.t()
+  def rustc_path(options \\ []) do
+    Keyword.get(options, :rustc) ||
+      rustup_tool_path("rustc", options) ||
+      System.find_executable("rustc") ||
+      "rustc"
+  end
+
+  @spec cargo_environment(keyword(), atom()) :: [{String.t(), String.t()}]
+  def cargo_environment(options, key \\ :env) do
+    environment = options |> Keyword.get(key, []) |> Map.new()
+
+    cond do
+      rustc = Keyword.get(options, :rustc) ->
+        Map.put(environment, "RUSTC", rustc)
+
+      environment["RUSTC"] ->
+        environment
+
+      project_toolchain?(Keyword.get(options, :cd, File.cwd!())) ->
+        Map.put(environment, "RUSTC", rustc_path(options))
+
+      true ->
+        environment
+    end
+    |> Map.to_list()
   end
 
   @spec cargo_version(keyword()) :: {:ok, String.t()} | {:error, Error.t()}
@@ -31,7 +62,7 @@ defmodule Rekindle.Toolchain do
 
   @spec host_target(keyword()) :: {:ok, String.t()} | {:error, Error.t()}
   def host_target(options \\ []) do
-    rustc = Keyword.get(options, :rustc) || System.find_executable("rustc") || "rustc"
+    rustc = rustc_path(options)
 
     case Process.run(rustc, ["-vV"],
            cd: Keyword.get(options, :cd, File.cwd!()),
@@ -147,7 +178,7 @@ defmodule Rekindle.Toolchain do
              cd: Keyword.get(options, :cd, File.cwd!()),
              timeout: Keyword.get(options, :timeout, 600_000),
              output_limit: 8_000_000,
-             env: Keyword.get(options, :process_env, [])
+             env: cargo_environment(options, :process_env)
            ) do
       verify_wasm_bindgen(path, version, options)
     else
@@ -200,6 +231,39 @@ defmodule Rekindle.Toolchain do
       {:error, reason} ->
         process_error(:version_check_failed, "wasm-bindgen version check", reason)
     end
+  end
+
+  defp rustup_tool_path(tool, options) do
+    rustup = rustup_path(options)
+    directory = Keyword.get(options, :cd, File.cwd!())
+
+    if project_toolchain?(directory) do
+      fallback = rustup |> Path.expand(directory) |> Path.dirname() |> Path.join(tool)
+
+      if Path.type(rustup) == :absolute and File.regular?(rustup) do
+        case Process.run(rustup, ["which", tool],
+               cd: directory,
+               timeout: Keyword.get(options, :timeout, 30_000),
+               output_limit: 4_096,
+               env: Keyword.get(options, :process_env, [])
+             ) do
+          {:ok, %{status: 0, output: output}} ->
+            path = String.trim(output)
+
+            if Path.type(path) == :absolute and File.regular?(path), do: path, else: fallback
+
+          _ ->
+            fallback
+        end
+      else
+        fallback
+      end
+    end
+  end
+
+  defp project_toolchain?(directory) do
+    File.regular?(Path.join(directory, "rust-toolchain.toml")) or
+      File.regular?(Path.join(directory, "rust-toolchain"))
   end
 
   defp check_cargo_version(path, options) do

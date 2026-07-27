@@ -23,7 +23,10 @@ defmodule Rekindle.Cargo.Metadata do
 
   @spec load(Rekindle.Config.t(), keyword()) :: {:ok, t()} | {:error, Error.t()}
   def load(project, options \\ []) do
-    executable = Rekindle.Toolchain.cargo_path(options)
+    executable =
+      options
+      |> Keyword.put(:cd, project.client_root)
+      |> Rekindle.Toolchain.cargo_path()
 
     arguments =
       [
