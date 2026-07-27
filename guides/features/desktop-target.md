@@ -8,12 +8,9 @@ rejected with a diagnostic instead of producing an untested release artifact.
 ## Development
 
 `mix rekindle.dev` builds the desktop target after client changes. Rekindle
-validates a successful build before replacing the running process. It then
-stops the current process, starts the candidate, and selects the candidate only
-after it remains running through the readiness interval. If the candidate
-fails and a retained executable exists, Rekindle makes one best-effort restart
-of that executable; the restart can also fail. A failed first launch has no
-previous executable to restore.
+validates a successful build, stops the current process, removes its disposable
+build directory, and starts the replacement. If the replacement exits, no
+previous executable is restarted.
 
 Run one build without starting the executable:
 
@@ -30,14 +27,14 @@ mix rekindle.build desktop --release
 The published layout is:
 
 ```text
-dist/rekindle/desktop/<rust-target>/application-<sha256>
+dist/rekindle/desktop/<rust-target>/application
 dist/rekindle/desktop/<rust-target>/manifest.json
 ```
 
 The manifest identifies the executable, Rust target, selected integration,
-Cargo package, binary, and content hash. A release build packages the executable but never launches it.
-Use the manifest from an application packager, installer, or deployment
-pipeline.
+Cargo package, and binary. A release build packages the executable but never
+launches it. Use the manifest from an application packager, installer, or
+deployment pipeline.
 
 Rekindle does not bundle an Elixir runtime or application release into this
 artifact. An application that needs an embedded backend can compose the desktop

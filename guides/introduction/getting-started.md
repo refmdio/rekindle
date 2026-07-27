@@ -3,8 +3,8 @@
 This guide covers installation into an existing Phoenix application. For a new
 application, use the `mix igniter.new` command shown in the README.
 
-Rekindle 0.1 runs on Linux with procfs mounted at `/proc`. Its managed Cargo
-processes require `setsid`, `pkill`, and `kill`.
+Rekindle 0.1 supports native development and desktop release builds on
+`x86_64-unknown-linux-gnu`.
 
 ## Add Rekindle to an existing Phoenix application
 
@@ -31,23 +31,14 @@ client, Rekindle selects GPUI and enables both targets. The Web target is
 `wasm32-unknown-unknown`; Rekindle 0.1 qualifies desktop builds on
 `x86_64-unknown-linux-gnu`.
 
-The installer adds Rekindle as an application dependency, creates or adopts the
-Rust client, configures the Phoenix development runtime, and adds Web release
+The installer adds Rekindle as an application dependency, creates the Rust
+client, configures the Phoenix development runtime, and adds Web release
 building to `assets.deploy`.
 
-## Adopt an existing Rust client
+## Existing client directory
 
-Rekindle does not overwrite an existing `client/Cargo.toml`. To adopt one,
-supply the integration and targets explicitly:
-
-```console
-mix igniter.install rekindle --integration egui --targets web,desktop
-```
-
-The selected entries must already exist at `client/src/bin/web.rs` and
-`client/src/bin/desktop.rs`. Rekindle validates the Cargo package and selected
-integration from an isolated copy before changing the project. A lockfile is
-not required, and validation does not create or update files under `client/`.
+Rekindle does not overwrite an existing `client/Cargo.toml`. Move or rename an
+unmanaged `client/` directory before installation.
 
 ## Next steps
 

@@ -6,7 +6,6 @@ if Code.ensure_loaded?(Igniter) do
     alias Igniter.Project.{Application, TaskAliases}
     alias Igniter.Project.Config, as: ProjectConfig
     alias Rekindle.{Config, Integration}
-    alias Rekindle.Install.Cargo, as: InstallCargo
     alias Rekindle.Phoenix.Install, as: PhoenixInstall
 
     @targets [:web, :desktop]
@@ -16,25 +15,17 @@ if Code.ensure_loaded?(Igniter) do
       app = Application.app_name(igniter)
       {igniter, endpoint} = Igniter.Libs.Phoenix.select_endpoint(igniter)
 
-      with :ok <- client_root_contained(),
-           :ok <- endpoint_required(endpoint),
+      with :ok <- endpoint_required(endpoint),
            {:ok, requested} <- requested_selection(options),
            {:ok, existing} <- existing_selection(igniter, app),
            {:ok, selection, mode} <-
              select(requested, existing, Igniter.exists?(igniter, "client/Cargo.toml")),
-           {:ok, selection} <- validate_client(igniter, selection, mode),
+           :ok <- validate_generated_paths(igniter, selection, mode),
            {:ok, igniter, phoenix} <-
              PhoenixInstall.prepare(igniter, app, endpoint, selection) do
         install(igniter, app, endpoint, selection, mode, phoenix)
       else
         {:error, message} -> Igniter.add_issue(igniter, message)
-      end
-    end
-
-    defp client_root_contained do
-      case Config.validate_client_root(File.cwd!()) do
-        :ok -> :ok
-        {:error, error} -> {:error, Exception.message(error)}
       end
     end
 
@@ -110,8 +101,7 @@ if Code.ensure_loaded?(Igniter) do
             {:ok,
              %{
                integration: integration,
-               targets: Enum.filter(@targets, &Keyword.has_key?(targets, &1)),
-               public_dir: Keyword.get(config, :public_dir, "priv/static")
+               targets: Enum.filter(@targets, &Keyword.has_key?(targets, &1))
              }}
           else
             _ -> {:error, "existing Rekindle configuration is not a valid static selection"}
@@ -130,22 +120,12 @@ if Code.ensure_loaded?(Igniter) do
       {:ok,
        %{
          integration: requested.integration || :gpui,
-         targets: requested.targets || @targets,
-         public_dir: "priv/static"
+         targets: requested.targets || @targets
        }, :generate}
     end
 
-    defp select(%{integration: nil}, nil, true) do
-      {:error, "client/Cargo.toml already exists; --integration is required to adopt it"}
-    end
-
-    defp select(%{targets: nil}, nil, true) do
-      {:error, "client/Cargo.toml already exists; --targets is required to adopt it"}
-    end
-
-    defp select(requested, nil, true) do
-      {:ok, Map.put(requested, :public_dir, "priv/static"), :adopt}
-    end
+    defp select(_requested, nil, true),
+      do: {:error, "client/Cargo.toml already exists; Rekindle will not overwrite it"}
 
     defp select(requested, existing, true) do
       with :ok <- same_or_omitted(:integration, requested.integration, existing.integration),
@@ -166,7 +146,7 @@ if Code.ensure_loaded?(Igniter) do
        "requested #{name} #{inspect(requested)} conflicts with existing Rekindle configuration #{inspect(existing)}"}
     end
 
-    defp validate_client(igniter, selection, :generate) do
+    defp validate_generated_paths(igniter, selection, :generate) do
       generated_paths =
         selection.integration
         |> Integration.render(selection.targets)
@@ -176,32 +156,12 @@ if Code.ensure_loaded?(Igniter) do
       |> Enum.uniq()
       |> Enum.find(&Igniter.exists?(igniter, Path.join("client", &1)))
       |> case do
-        nil -> {:ok, selection}
+        nil -> :ok
         path -> {:error, "client/#{path} already exists; Rekindle will not overwrite it"}
       end
     end
 
-    defp validate_client(_igniter, selection, :existing), do: {:ok, selection}
-
-    defp validate_client(igniter, selection, :adopt) do
-      with :ok <- target_entries(igniter, selection.targets),
-           {:ok, target_options} <-
-             InstallCargo.validate(igniter, selection.integration, selection.targets) do
-        {:ok, Map.put(selection, :target_options, target_options)}
-      end
-    end
-
-    defp target_entries(igniter, targets) do
-      case Enum.find(targets, fn target ->
-             not Igniter.exists?(igniter, "client/src/bin/#{target}.rs")
-           end) do
-        nil ->
-          :ok
-
-        target ->
-          {:error, "client/src/bin/#{target}.rs is required to adopt the #{target} target"}
-      end
-    end
+    defp validate_generated_paths(_igniter, _selection, :existing), do: :ok
 
     defp install(igniter, app, endpoint, selection, mode, phoenix) do
       igniter
@@ -215,7 +175,7 @@ if Code.ensure_loaded?(Igniter) do
       |> PhoenixInstall.install(app, endpoint, selection, phoenix)
       |> TaskAliases.add_alias(:setup, "rekindle.setup", if_exists: :append)
       |> maybe_add_web_alias(selection.targets)
-      |> update_ignores(selection, mode)
+      |> update_ignores(selection)
     end
 
     defp maybe_generate_client(igniter, _selection, mode) when mode != :generate, do: igniter
@@ -232,12 +192,7 @@ if Code.ensure_loaded?(Igniter) do
     defp configure(igniter, app, selection) do
       targets =
         Enum.map(selection.targets, fn target ->
-          options =
-            selection
-            |> Map.get(:target_options, %{})
-            |> Map.get(target, features: [Atom.to_string(target)])
-
-          {target, options}
+          {target, features: [Atom.to_string(target)]}
         end)
 
       ProjectConfig.configure_new(
@@ -263,12 +218,11 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp update_ignores(igniter, selection, mode) do
+    defp update_ignores(igniter, selection) do
       entries =
-        ["/.rekindle/"] ++
-          if(mode == :generate, do: ["/client/target/"], else: []) ++
+        ["/.rekindle/", "/client/target/"] ++
           if(:web in selection.targets,
-            do: ["/#{Path.join(selection.public_dir, "rekindle")}/"],
+            do: ["/priv/static/rekindle/"],
             else: []
           ) ++
           if(:desktop in selection.targets, do: ["/dist/rekindle/"], else: [])

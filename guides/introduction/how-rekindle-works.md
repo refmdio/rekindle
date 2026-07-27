@@ -41,6 +41,6 @@ only successful Web generations or desktop processes. Phoenix and the Rust UI
 therefore share one supervised development command.
 
 For production, Rekindle runs the configured Cargo release profile and
-publishes an immutable Web generation or a content-addressed desktop executable.
+publishes an immutable Web generation or a desktop executable and manifest.
 The resulting artifacts belong to the host application's ordinary deployment
 or packaging process.

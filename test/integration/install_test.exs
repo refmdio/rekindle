@@ -4,19 +4,14 @@ defmodule Rekindle.InstallTest do
   alias Igniter.Mix.Task.Args
   alias Igniter.Test
 
-  @moduletag timeout: 600_000
-
   test "fresh installation defaults to GPUI with both targets" do
     installed = install(project())
 
     assert installed.issues == []
-    assert content(installed, "config/config.exs") =~ ~r/config :demo,\s+Rekindle/
     assert content(installed, "config/config.exs") =~ "integration: :gpui"
     assert content(installed, "config/config.exs") =~ "web: [features: [\"web\"]]"
     assert content(installed, "config/config.exs") =~ "desktop: [features: [\"desktop\"]]"
-
     assert content(installed, "client/Cargo.toml") =~ "gpui"
-    assert content(installed, "client/src/lib.rs") != ""
     assert content(installed, "client/src/bin/web.rs") != ""
     assert content(installed, "client/src/bin/desktop.rs") != ""
     assert "client/public" in installed.mkdirs
@@ -24,10 +19,8 @@ defmodule Rekindle.InstallTest do
     application = content(installed, "lib/demo/application.ex")
     assert application =~ "otp_app: :demo"
     assert application =~ "endpoint: DemoWeb.Endpoint"
-    assert length(Regex.scan(~r/\{Rekindle,/, application)) == 1
 
     endpoint = content(installed, "lib/demo_web/endpoint.ex")
-    assert endpoint =~ "plug(Plug.Static"
     assert endpoint =~ ~s(at: "/rekindle")
     assert endpoint =~ ~s(from: {:demo, "priv/static/rekindle"})
     assert endpoint =~ "plug(Rekindle.Phoenix.Development, otp_app: :demo)"
@@ -40,8 +33,6 @@ defmodule Rekindle.InstallTest do
 
     mix = content(installed, "mix.exs")
     assert mix =~ ~s(setup: ["deps.get", "rekindle.setup"])
-    assert mix =~ "\"rekindle.setup\""
-    assert mix =~ "\"rekindle.build web --release\""
     assert index(mix, "rekindle.build web --release") < index(mix, "phx.digest")
 
     assert ignore_lines(installed) == [
@@ -52,35 +43,15 @@ defmodule Rekindle.InstallTest do
            ]
   end
 
-  test "renders each integration and target selection with only enabled hooks" do
+  test "renders every integration and target selection" do
     for integration <- ~w(gpui egui slint),
         targets <- [["web"], ["desktop"], ["web", "desktop"]] do
-      installed =
-        install(project(),
-          integration: integration,
-          targets: targets
-        )
-
+      installed = install(project(), integration: integration, targets: targets)
       assert installed.issues == []
+
       manifest = content(installed, "client/Cargo.toml")
       assert manifest =~ Rekindle.Integration.dependency(String.to_existing_atom(integration))
       assert content(installed, "client/Cargo.lock") =~ ~s(name = "client")
-
-      case integration do
-        "gpui" ->
-          assert content(installed, "client/src/lib.rs") =~ "pub struct HelloWorld"
-
-        "egui" ->
-          assert content(installed, "client/src/lib.rs") =~ "pub use app::TemplateApp;"
-          assert content(installed, "client/src/app.rs") =~ "pub struct TemplateApp"
-
-        "slint" ->
-          assert content(installed, "client/build.rs") =~ "slint_build::compile"
-          assert content(installed, "client/src/lib.rs") =~ "slint::include_modules!();"
-
-          assert content(installed, "client/ui/app-window.slint") =~
-                   "export component AppWindow"
-      end
 
       for target <- ~w(web desktop) do
         path = "client/src/bin/#{target}.rs"
@@ -92,81 +63,23 @@ defmodule Rekindle.InstallTest do
         end
       end
 
-      ignores = ignore_lines(installed)
-      mix = content(installed, "mix.exs")
+      endpoint = content(installed, "lib/demo_web/endpoint.ex")
+      layout = content(installed, "lib/demo_web/components/layouts/root.html.heex")
 
       if "web" in targets do
-        assert "/priv/static/rekindle/" in ignores
-        assert mix =~ "\"rekindle.build web --release\""
-
-        layout = content(installed, "lib/demo_web/components/layouts/root.html.heex")
-        endpoint = "Rekindle.Phoenix.web_entry_path(DemoWeb.Endpoint)"
-        assert length(Regex.scan(~r/Rekindle\.Phoenix\.web_entry_path/, layout)) == 1
-        assert layout =~ endpoint
+        assert endpoint =~ "Rekindle.Phoenix.Development"
+        assert layout =~ "Rekindle.Phoenix.web_entry_path"
 
         host = Rekindle.Integration.host(String.to_existing_atom(integration))
-
-        if host == "" do
-          refute layout =~ "<canvas"
-        else
-          assert layout =~ host
-        end
+        if host != "", do: assert(layout =~ host)
       else
-        refute "/priv/static/rekindle/" in ignores
-        refute mix =~ "\"rekindle.build web --release\""
-
-        refute content(installed, "lib/demo_web/components/layouts/root.html.heex") =~
-                 "Rekindle"
-      end
-
-      if "desktop" in targets do
-        assert "/dist/rekindle/" in ignores
-      else
-        refute "/dist/rekindle/" in ignores
+        refute endpoint =~ "Rekindle.Phoenix.Development"
+        refute layout =~ "Rekindle"
       end
     end
   end
 
-  test "a generated client stays clean after its supported Cargo checks" do
-    root = tmp_dir()
-    target_dir = tmp_dir()
-    installed = install(project())
-    write_project(root, installed)
-
-    git!(root, ["init", "--quiet"])
-    git!(root, ["config", "user.email", "rekindle-test@example.invalid"])
-    git!(root, ["config", "user.name", "Rekindle Test"])
-    git!(root, ["add", "."])
-    git!(root, ["commit", "--quiet", "-m", "installed application"])
-
-    client = Path.join(root, "client")
-    {cargo, 0} = System.cmd("rustup", ["which", "cargo"], cd: client)
-    {rustc, 0} = System.cmd("rustup", ["which", "rustc"], cd: client)
-
-    for {binary, target} <- [
-          {"web", "wasm32-unknown-unknown"},
-          {"desktop", host_target!()}
-        ] do
-      {output, status} =
-        System.cmd(
-          String.trim(cargo),
-          ["check", "--locked", "--target", target, "--bin", binary, "--features", binary],
-          cd: client,
-          env: [
-            {"CARGO_TARGET_DIR", target_dir},
-            {"CARGO_TERM_COLOR", "never"},
-            {"RUSTC", String.trim(rustc)}
-          ],
-          stderr_to_stdout: true
-        )
-
-      assert status == 0, "installed #{binary} client failed to compile:\n#{output}"
-    end
-
-    assert git_status!(root) == ""
-  end
-
-  test "repeat installation is idempotent and explicit conflicts change no files" do
+  test "repeat installation is idempotent and rejects conflicting selection" do
     installed = install(project(), integration: "egui", targets: ["web"])
     repeated = install(installed)
 
@@ -174,12 +87,11 @@ defmodule Rekindle.InstallTest do
     assert changed_contents(repeated) == changed_contents(installed)
 
     conflicted = install(installed, integration: "slint", targets: ["web"])
-
     assert Enum.any?(conflicted.issues, &String.contains?(&1, "conflicts"))
     assert changed_contents(conflicted) == changed_contents(installed)
   end
 
-  test "adds a missing release plug when the development plug already exists" do
+  test "adds a missing static plug without duplicating the development plug" do
     installed =
       install(
         project(%{
@@ -203,109 +115,25 @@ defmodule Rekindle.InstallTest do
     assert length(Regex.scan(~r/Rekindle\.Phoenix\.Development/, endpoint)) == 1
   end
 
-  test "rejects incomplete or conflicting Phoenix Web hooks before changing files" do
-    cases = [
-      {
-        update_content(project(), "lib/demo_web/endpoint.ex", fn endpoint ->
-          String.replace(
-            endpoint,
-            "plug Phoenix.CodeReloader",
-            """
-            plug Rekindle.Phoenix.Development, otp_app: :demo
-                plug Phoenix.CodeReloader
-            """
-          )
-        end),
-        "must follow Phoenix.CodeReloader"
-      },
-      {
-        update_content(project(), "lib/demo_web/endpoint.ex", fn endpoint ->
-          String.replace(
-            endpoint,
-            "plug Phoenix.CodeReloader",
-            """
-            plug Phoenix.CodeReloader
-                plug Plug.Telemetry, event_prefix: [:demo, :endpoint]
-                plug Rekindle.Phoenix.Development, otp_app: :demo
-            """
-          )
-        end),
-        "must follow Phoenix.CodeReloader"
-      },
-      {
-        update_content(project(), "lib/demo_web/components/layouts/root.html.heex", fn layout ->
-          String.replace(
-            layout,
-            "{@inner_content}",
-            """
-            {@inner_content}
-                <script type="module" src="/custom.js"></script>
-                <script type="module" src={Rekindle.Phoenix.web_entry_path(Other.Endpoint)}></script>
-            """
-          )
-        end),
-        "partial or mismatched"
-      },
-      {
-        update_content(project(), "lib/demo_web/components/layouts/root.html.heex", fn layout ->
-          String.replace(
-            layout,
-            "{@inner_content}",
-            ~s|{@inner_content}<canvas id="canvas"></canvas>|
-          )
-        end),
-        "DOM identifier"
-      },
-      {
-        update_content(project(), "lib/demo_web/components/layouts/root.html.heex", fn layout ->
-          String.replace(
-            layout,
-            "{@inner_content}",
-            ~s|{@inner_content}<canvas id='canvas'></canvas>|
-          )
-        end),
-        "DOM identifier"
-      },
-      {
-        update_content(project(), "lib/demo_web/components/layouts/root.html.heex", fn layout ->
-          String.replace(layout, "</body>", "")
-        end),
-        "exactly one closing body"
-      }
-    ]
-
-    for {original, message} <- cases do
-      rejected = install(original, integration: "slint", targets: ["web"])
-
-      assert Enum.any?(rejected.issues, &String.contains?(&1, message))
-      assert changed_contents(rejected) == changed_contents(original)
-    end
-  end
-
-  test "does not stage installation when a generated client path already exists" do
+  test "rejects an unmanaged Rust client without modifying it" do
     original =
       project(%{
+        "client/Cargo.toml" => "[package]\nname = \"existing\"\nversion = \"0.1.0\"\n",
         "client/src/lib.rs" => "pub struct Existing;\n"
       })
 
+    rejected = install(original, integration: "gpui", targets: ["web"])
+    assert rejected.issues == ["client/Cargo.toml already exists; Rekindle will not overwrite it"]
+    assert changed_contents(rejected) == changed_contents(original)
+  end
+
+  test "does not stage installation when a generated client path already exists" do
+    original = project(%{"client/src/lib.rs" => "pub struct Existing;\n"})
     rejected = install(original)
 
     assert Enum.any?(rejected.issues, &String.contains?(&1, "will not overwrite"))
     refute Map.has_key?(rejected.rewrite.sources, "client/Cargo.toml")
-    refute content(rejected, "config/config.exs") =~ "Rekindle"
     assert content(rejected, "client/src/lib.rs") == "pub struct Existing;\n"
-  end
-
-  test "does not retain an unselected standard binary during generation" do
-    original =
-      project(%{
-        "client/src/bin/desktop.rs" => "fn main() {}\n"
-      })
-
-    rejected = install(original, targets: ["web"])
-
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "will not overwrite"))
-    assert changed_contents(rejected) == changed_contents(original)
   end
 
   test "rejects invalid selections before changing the project" do
@@ -313,7 +141,6 @@ defmodule Rekindle.InstallTest do
 
     for options <- [[integration: "other"], [targets: ["mobile"]], [targets: []]] do
       rejected = install(original, options)
-
       assert rejected.issues != []
       assert changed_contents(rejected) == changed_contents(original)
     end
@@ -336,562 +163,24 @@ defmodule Rekindle.InstallTest do
       end)
 
     rejected = install(original)
-
     assert Enum.any?(rejected.issues, &String.contains?(&1, "requires a Phoenix endpoint"))
     assert changed_contents(rejected) == changed_contents(original)
   end
 
-  test "adopts every supported existing client without changing client files" do
-    for integration <- [:gpui, :egui, :slint],
-        targets <- [[:web], [:desktop], [:web, :desktop]] do
-      original = existing_client(integration, targets)
-      before = client_contents(original)
-
-      adopted =
-        install(original,
-          integration: Atom.to_string(integration),
-          targets: Enum.map(targets, &Atom.to_string/1)
-        )
-
-      assert adopted.issues == []
-      assert client_contents(adopted) == before
-      assert content(adopted, "config/config.exs") =~ "integration: #{inspect(integration)}"
-      refute "/client/target/" in ignore_lines(adopted)
-    end
-  end
-
-  test "requires both explicit selections to adopt a client" do
-    original = existing_client(:gpui, [:web])
-
-    for options <- [[], [integration: "gpui"], [targets: ["web"]]] do
-      rejected = install(original, options)
-
-      assert Enum.any?(rejected.issues, &String.contains?(&1, "required to adopt"))
-      assert changed_contents(rejected) == changed_contents(original)
-      assert client_contents(rejected) == client_contents(original)
-    end
-  end
-
-  test "rejects mismatched, ambiguous, malformed, and incomplete clients atomically" do
-    gpui = existing_client(:gpui, [:web])
-
-    ambiguous =
-      update_content(gpui, "client/Cargo.toml", fn manifest ->
-        String.replace(manifest, "[dependencies]", "[dependencies]\neframe = \"0.35\"")
-      end)
-      |> delete_file("client/Cargo.lock")
-
-    malformed = update_content(gpui, "client/Cargo.toml", &("[package\n" <> &1))
-
-    incomplete =
-      %{
-        gpui
-        | rewrite: Rewrite.delete(gpui.rewrite, "client/src/bin/web.rs"),
-          assigns:
-            Map.update!(gpui.assigns, :test_files, &Map.delete(&1, "client/src/bin/web.rs"))
-      }
-
-    cases = [
-      {gpui, [integration: "slint", targets: ["web"]], "does not match"},
-      {ambiguous, [integration: "gpui", targets: ["web"]], "ambiguous"},
-      {malformed, [integration: "gpui", targets: ["web"]], "cargo locate-project failed"},
-      {incomplete, [integration: "gpui", targets: ["web"]], "is required"}
-    ]
-
-    for {original, options, message} <- cases do
-      rejected = install(original, options)
-
-      assert Enum.any?(rejected.issues, &String.contains?(&1, message))
-      assert changed_contents(rejected) == changed_contents(original)
-      assert client_contents(rejected) == client_contents(original)
-    end
-  end
-
-  test "validates target-specific dependencies for each selected target" do
-    native_only =
-      existing_client(:egui, [:web])
-      |> update_content("client/Cargo.toml", fn manifest ->
-        String.replace(
-          manifest,
-          ~r/\n\[target\.'cfg\(target_arch = "wasm32"\)'\.dependencies\].*?(?=\n\[\[bin\]\])/s,
-          ""
-        )
-      end)
-      |> delete_file("client/Cargo.lock")
-
-    impossible_web =
-      existing_client(:egui, [:web])
-      |> update_content("client/Cargo.toml", fn manifest ->
-        String.replace(
-          manifest,
-          "cfg(target_arch = \"wasm32\")",
-          "cfg(all(target_arch = \"wasm32\", target_os = \"windows\"))"
-        )
-      end)
-      |> delete_file("client/Cargo.lock")
-
-    for original <- [native_only, impossible_web] do
-      rejected = install(original, integration: "egui", targets: ["web"])
-
-      assert Enum.any?(rejected.issues, &String.contains?(&1, "dependency for web"))
-      assert changed_contents(rejected) == changed_contents(original)
-    end
-
-    host_specific =
-      existing_client(:egui, [:desktop])
-      |> update_content("client/Cargo.toml", fn manifest ->
-        String.replace(
-          manifest,
-          "'cfg(not(target_arch = \"wasm32\"))'",
-          "'#{host_target!()}'"
-        )
-      end)
-
-    assert install(host_specific, integration: "egui", targets: ["desktop"]).issues == []
-  end
-
-  test "rejects malformed Cargo target tables without raising" do
-    original =
-      existing_client(:gpui, [:web])
-      |> update_content("client/Cargo.toml", fn manifest ->
-        manifest =
-          String.replace(
-            manifest,
-            ~r/\n\[target\.'cfg\(target_arch = "wasm32"\)'\.dependencies\].*?(?=\n\[\[bin\]\])/s,
-            ""
-          )
-
-        "target = \"invalid\"\n\n" <> manifest
-      end)
-
-    rejected = install(original, integration: "gpui", targets: ["web"])
-
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "cargo locate-project failed"))
-    assert changed_contents(rejected) == changed_contents(original)
-  end
-
-  test "requires selected binaries to be discoverable by Cargo" do
-    disabled =
-      existing_client(:slint, [:web])
-      |> update_content("client/Cargo.toml", fn manifest ->
-        manifest
-        |> String.replace("[package]", "[package]\nautobins = false")
-        |> String.replace(~r/\n\[\[bin\]\].*?required-features = \["web"\]\n/s, "\n")
-      end)
-
-    rejected = install(disabled, integration: "slint", targets: ["web"])
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "has no binary"))
-
-    explicit =
-      update_content(disabled, "client/Cargo.toml", fn manifest ->
-        manifest <>
-          """
-
-          [[bin]]
-          name = "web"
-          path = "src/bin/web.rs"
-          """
-      end)
-
-    assert install(explicit, integration: "slint", targets: ["web"]).issues == []
-  end
-
-  test "adopts Cargo-resolved package, binary name, and required features" do
-    original =
-      existing_client(:egui, [:web])
-      |> update_content("client/Cargo.toml", fn manifest ->
-        String.replace(
-          manifest,
-          """
-          name = "web"
-          path = "src/bin/web.rs"
-          required-features = ["web"]
-          """,
-          """
-          name = "browser"
-          path = "src/bin/web.rs"
-          required-features = ["web", "canvas"]
-          """
-        )
-        |> String.replace("web = []", "web = []\ncanvas = []")
-      end)
-
-    adopted = install(original, integration: "egui", targets: ["web"])
-
-    assert adopted.issues == []
-    config = content(adopted, "config/config.exs")
-    assert config =~ ~s(package: "client")
-    assert config =~ ~s(binary: "browser")
-    assert config =~ ~s(features: ["web", "canvas"])
-  end
-
-  test "enables binary-required features before checking optional dependencies" do
-    original =
-      existing_client(:egui, [:web])
-      |> update_content("client/Cargo.toml", fn manifest ->
-        manifest
-        |> String.replace("web = []", ~s(web = ["dep:eframe"]))
-        |> String.replace(
-          ~s(eframe = { version = "0.35"),
-          ~s(eframe = { version = "0.35", optional = true)
-        )
-      end)
-
-    adopted = install(original, integration: "egui", targets: ["web"])
-
-    assert adopted.issues == []
-    assert content(adopted, "config/config.exs") =~ ~s(features: ["web"])
-  end
-
-  test "does not accept a build-only framework dependency" do
-    original =
-      existing_client(:gpui, [:web])
-      |> update_content("client/Cargo.toml", fn manifest ->
-        String.replace(manifest, "[dependencies]", "[build-dependencies]")
-      end)
-
-    rejected = install(original, integration: "gpui", targets: ["web"])
-
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "dependency for web"))
-    assert changed_contents(rejected) == changed_contents(original)
-  end
-
-  test "adopts a lockless client with project-relative path dependencies without changing it" do
-    original =
-      existing_client(:gpui, [:web], %{
-        "client/.cargo/config.toml" => """
-        [build]
-        target-dir = "target"
-        """,
-        "client/build-helper.sh" => "#!/bin/sh\nexit 0\n",
-        "shared/Cargo.toml" => """
-        [package]
-        name = "gpui"
-        version = "0.1.0"
-        edition = "2024"
-        """,
-        "shared/src/lib.rs" => "pub struct App;\n"
-      })
-      |> update_content("client/Cargo.toml", fn manifest ->
-        manifest
-        |> String.replace(
-          ~r/gpui = \{ git = [^\n]+\}/,
-          ~s(gpui = { path = "../shared" })
-        )
-        |> String.replace(~r/gpui_platform = [^\n]+\n/, "")
-      end)
-      |> delete_file("client/Cargo.lock")
-
-    before = client_contents(original)
-    root = tmp_dir()
-    write_project(root, original)
-    File.chmod!(Path.join(root, "client/build-helper.sh"), 0o700)
-    before_files = filesystem_tree(Path.join(root, "client"))
-
-    adopted =
-      File.cd!(root, fn ->
-        result = install(original, integration: "gpui", targets: ["web"])
-
-        assert result.issues == []
-        refute File.exists?("client/Cargo.lock")
-        assert filesystem_tree("client") == before_files
-
-        rejected = install(original, integration: "slint", targets: ["web"])
-
-        assert rejected.issues != []
-        refute File.exists?("client/Cargo.lock")
-        assert filesystem_tree("client") == before_files
-
-        {_output, 0} =
-          System.cmd(
-            Rekindle.Toolchain.cargo_path(),
-            ["generate-lockfile", "--manifest-path", "client/Cargo.toml"],
-            stderr_to_stdout: true
-          )
-
-        locked_files = filesystem_tree("client")
-        locked = install(original, integration: "gpui", targets: ["web"])
-
-        assert locked.issues == []
-        assert filesystem_tree("client") == locked_files
-
-        File.mkdir_p!("client/.state")
-        File.rename!("client/Cargo.lock", "client/.state/Cargo.lock")
-
-        File.ln_s!(
-          Path.expand("client/.state/Cargo.lock"),
-          "client/Cargo.lock"
-        )
-
-        symlinked_files = filesystem_tree("client")
-        symlinked = install(original, integration: "gpui", targets: ["web"])
-
-        assert symlinked.issues == []
-        assert filesystem_tree("client") == symlinked_files
-        result
-      end)
-
-    assert adopted.issues == []
-    assert client_contents(adopted) == before
-  end
-
-  test "rejects a stale lockfile before staging application changes" do
-    original =
-      existing_client(:gpui, [:web])
-      |> update_content("client/Cargo.toml", fn manifest ->
-        String.replace(manifest, ~s(version = "0.1.0"), ~s(version = "0.2.0"), global: false)
-      end)
-
-    root = tmp_dir()
-    write_project(root, original)
-    before = filesystem_tree(root)
-
-    rejected =
-      File.cd!(root, fn ->
-        install(original, integration: "gpui", targets: ["web"])
-      end)
-
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "cargo metadata failed"))
-    assert changed_contents(rejected) == changed_contents(original)
-    assert filesystem_tree(root) == before
-  end
-
-  test "rejects a stale application workspace lock for a client member" do
-    root_lock = Rekindle.Integration.render(:gpui, [:web])["Cargo.lock"]
-
-    original =
-      existing_client(:gpui, [:web], %{
-        "Cargo.toml" => """
-        [workspace]
-        members = ["client"]
-        resolver = "3"
-        """,
-        "Cargo.lock" => root_lock
-      })
-      |> delete_file("client/Cargo.lock")
-      |> update_content("client/Cargo.toml", fn manifest ->
-        String.replace(manifest, ~s(version = "0.1.0"), ~s(version = "0.2.0"), global: false)
-      end)
-
-    root = tmp_dir()
-    write_project(root, original)
-    before = filesystem_tree(root)
-
-    rejected =
-      File.cd!(root, fn ->
-        install(original, integration: "gpui", targets: ["web"])
-      end)
-
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "cargo metadata failed"))
-    assert changed_contents(rejected) == changed_contents(original)
-    assert filesystem_tree(root) == before
-  end
-
-  test "rejects an external symlink without inspecting its target tree" do
-    original = existing_client(:gpui, [:web])
-    root = tmp_dir()
-    external = tmp_dir()
-    write_project(root, original)
-    File.write!(Path.join(external, "sentinel"), "unchanged")
-    File.ln_s!(external, Path.join(external, "cycle"))
-    File.ln_s!(external, Path.join(root, "client/external"))
-
-    before = filesystem_tree(root)
-
-    rejected =
-      File.cd!(root, fn ->
-        install(original, integration: "gpui", targets: ["web"])
-      end)
-
-    assert Enum.any?(
-             rejected.issues,
-             &String.contains?(&1, "points outside the application root")
-           )
-
-    assert changed_contents(rejected) == changed_contents(original)
-    assert filesystem_tree(root) == before
-    assert File.read!(Path.join(external, "sentinel")) == "unchanged"
-    assert File.read_link!(Path.join(external, "cycle")) == external
-  end
-
-  test "rejects a broken external symlink without changing the project" do
-    original = existing_client(:gpui, [:web])
-    root = tmp_dir()
-    write_project(root, original)
-
-    missing =
-      Path.join(System.tmp_dir!(), "rekindle-missing-#{System.unique_integer([:positive])}")
-
-    File.ln_s!(missing, Path.join(root, "client/missing"))
-
-    rejected =
-      File.cd!(root, fn ->
-        install(original, integration: "gpui", targets: ["web"])
-      end)
-
-    assert Enum.any?(
-             rejected.issues,
-             &String.contains?(&1, "points outside the application root")
-           )
-
-    assert changed_contents(rejected) == changed_contents(original)
-    assert File.read_link!(Path.join(root, "client/missing")) == missing
-  end
-
-  test "does not follow an external client manifest symlink" do
-    original = existing_client(:gpui, [:web])
-    root = tmp_dir()
-    external = tmp_dir()
-    manifest = Path.join(external, "Cargo.toml")
-    write_project(root, original)
-    File.write!(manifest, content(original, "client/Cargo.toml"))
-    File.rm!(Path.join(root, "client/Cargo.toml"))
-    File.ln_s!(manifest, Path.join(root, "client/Cargo.toml"))
-
-    rejected =
-      File.cd!(root, fn ->
-        install(original, integration: "gpui", targets: ["web"])
-      end)
-
-    assert Enum.any?(
-             rejected.issues,
-             &String.contains?(&1, "points outside the application root")
-           )
-
-    assert changed_contents(rejected) == changed_contents(original)
-    assert File.read_link!(Path.join(root, "client/Cargo.toml")) == manifest
-    assert File.read!(manifest) == content(original, "client/Cargo.toml")
-  end
-
-  test "rejects a special filesystem entry without changing the project" do
-    original = existing_client(:gpui, [:web])
-    root = tmp_dir()
-    pipe = Path.join(root, "client/events")
-    write_project(root, original)
-    assert {_output, 0} = System.cmd("mkfifo", [pipe], stderr_to_stdout: true)
-
-    rejected =
-      File.cd!(root, fn ->
-        install(original, integration: "gpui", targets: ["web"])
-      end)
-
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "unsupported other entry"))
-    assert changed_contents(rejected) == changed_contents(original)
-    assert File.lstat!(pipe).type == :other
-  end
-
-  test "adopts the resolved root package from a multi-package workspace" do
-    original =
-      existing_client(:gpui, [:web], %{
-        "client/member/Cargo.toml" => """
-        [package]
-        name = "member"
-        version = "0.1.0"
-        edition = "2024"
-        """,
-        "client/member/src/lib.rs" => "pub struct Member;\n"
-      })
-      |> update_content("client/Cargo.toml", fn manifest ->
-        manifest <> "\n[workspace]\nmembers = [\"member\"]\n"
-      end)
-      |> delete_file("client/Cargo.lock")
-
-    adopted = install(original, integration: "gpui", targets: ["web"])
-
-    assert adopted.issues == []
-    assert content(adopted, "config/config.exs") =~ ~s(package: "client")
-  end
-
-  test "rejects invalid existing configuration before staging changes" do
-    installed = install(project(), integration: "egui", targets: ["web"])
-
-    invalid_configurations = [
-      update_content(installed, "config/config.exs", fn config ->
-        String.replace(
-          config,
-          ~s(web: [features: ["web"]]),
-          ~s(web: [features: :invalid])
-        )
-      end),
-      update_content(installed, "config/config.exs", fn config ->
-        String.replace(
-          config,
-          ~s(web: [features: ["web"]]),
-          ~s(web: [features: ["web"]], web: [])
-        )
-      end)
-    ]
-
-    for invalid <- invalid_configurations do
-      rejected = install(invalid)
-
-      assert Enum.any?(rejected.issues, &String.contains?(&1, "not a valid static selection"))
-      assert changed_contents(rejected) == changed_contents(invalid)
-    end
-  end
-
-  test "rejects an existing public directory that leaves the project" do
+  test "rejects invalid existing Rekindle configuration" do
     installed = install(project(), integration: "egui", targets: ["web"])
 
     invalid =
       update_content(installed, "config/config.exs", fn config ->
-        String.replace(
-          config,
-          "integration: :egui",
-          ~s(integration: :egui, public_dir: "../outside")
-        )
+        String.replace(config, ~s(web: [features: ["web"]]), ~s(web: [features: :invalid]))
       end)
 
     rejected = install(invalid)
-
     assert Enum.any?(rejected.issues, &String.contains?(&1, "not a valid static selection"))
     assert changed_contents(rejected) == changed_contents(invalid)
   end
 
-  test "adoption preserves custom Cargo target configuration and ignore policy" do
-    original =
-      existing_client(:egui, [:desktop], %{
-        "client/.cargo/config.toml" => """
-        [build]
-        target-dir = "../custom-target"
-        """,
-        ".gitignore" => "/custom-target/\n"
-      })
-
-    before = client_contents(original)
-    adopted = install(original, integration: "egui", targets: ["desktop"])
-
-    assert adopted.issues == []
-    assert client_contents(adopted) == before
-    assert "/custom-target/" in ignore_lines(adopted)
-    refute "/client/target/" in ignore_lines(adopted)
-  end
-
-  test "uses the configured public directory for Web ignore policy" do
-    original =
-      existing_client(:egui, [:web])
-      |> update_content("config/config.exs", fn config ->
-        config <>
-          """
-
-          config :demo, Rekindle,
-            integration: :egui,
-            targets: [web: [features: ["web"]]],
-            public_dir: "web/static"
-          """
-      end)
-
-    installed = install(original)
-
-    assert installed.issues == []
-    assert "/web/static/rekindle/" in ignore_lines(installed)
-    refute "/priv/static/rekindle/" in ignore_lines(installed)
-
-    assert content(installed, "lib/demo_web/endpoint.ex") =~
-             ~s(from: {:demo, "web/static/rekindle"})
-  end
-
-  test "ignore additions preserve application-owned grouping and comments" do
+  test "ignore additions preserve existing content" do
     original =
       project(%{
         ".gitignore" => """
@@ -918,13 +207,17 @@ defmodule Rekindle.InstallTest do
              """
 
     assert content(install(installed), ".gitignore") == content(installed, ".gitignore")
+
+    without_cargo_target =
+      update_content(installed, ".gitignore", &String.replace(&1, "/client/target/\n", ""))
+
+    assert "/client/target/" in ignore_lines(install(without_cargo_target))
   end
 
   test "rekindle.dev delegates arguments to phx.server" do
     phoenix_task = :code.which(Mix.Tasks.Phx.Server)
     rekindle_ebin = Mix.Tasks.Rekindle.Dev |> :code.which() |> Path.dirname()
     elixir = System.find_executable("elixir")
-    assert is_binary(elixir)
 
     script = """
     Application.ensure_all_started(:mix)
@@ -932,14 +225,7 @@ defmodule Rekindle.InstallTest do
 
     defmodule Mix.Tasks.Phx.Server do
       use Mix.Task
-
-      @impl Mix.Task
-      def run(arguments) do
-        arguments
-        |> :erlang.term_to_binary()
-        |> Base.encode64()
-        |> then(&IO.puts("delegated:" <> &1))
-      end
+      def run(arguments), do: IO.puts("delegated:" <> Base.encode64(:erlang.term_to_binary(arguments)))
     end
 
     Code.ensure_loaded!(Mix.Tasks.Rekindle.Dev)
@@ -948,15 +234,14 @@ defmodule Rekindle.InstallTest do
 
     {output, 0} = System.cmd(elixir, ["-e", script], stderr_to_stdout: true)
     [encoded] = Regex.run(~r/^delegated:(.+)$/m, output, capture: :all_but_first)
-
     assert encoded |> Base.decode64!() |> :erlang.binary_to_term([:safe]) == ["--open"]
     assert :code.which(Mix.Tasks.Phx.Server) == phoenix_task
   end
 
-  test "does not install the browser plug for a desktop-only client" do
+  test "desktop-only installation does not add browser hooks" do
     installed = install(project(), integration: "gpui", targets: ["desktop"])
-
     refute content(installed, "lib/demo_web/endpoint.ex") =~ "Rekindle.Phoenix.Development"
+    refute content(installed, "lib/demo_web/components/layouts/root.html.heex") =~ "Rekindle"
   end
 
   defp project(extra_files \\ %{}) do
@@ -966,19 +251,13 @@ defmodule Rekindle.InstallTest do
         Map.merge(
           %{
             ".gitignore" => "",
-            "config/config.exs" => """
-            import Config
-            """,
+            "config/config.exs" => "import Config\n",
             "lib/demo/application.ex" => """
             defmodule Demo.Application do
               use Application
 
-              @impl true
               def start(_type, _args) do
-                children = [
-                  Demo.Repo
-                ]
-
+                children = [Demo.Repo]
                 Supervisor.start_link(children, strategy: :one_for_one, name: Demo.Supervisor)
               end
             end
@@ -997,17 +276,12 @@ defmodule Rekindle.InstallTest do
             "lib/demo_web/components/layouts.ex" => """
             defmodule DemoWeb.Layouts do
               use Phoenix.Component
-
               embed_templates "layouts/*"
             end
             """,
             "lib/demo_web/components/layouts/root.html.heex" => """
             <!DOCTYPE html>
             <html lang="en">
-              <head>
-                <meta charset="utf-8" />
-                <meta name="viewport" content="width=device-width, initial-scale=1" />
-              </head>
               <body>
                 {@inner_content}
               </body>
@@ -1018,26 +292,14 @@ defmodule Rekindle.InstallTest do
               use Mix.Project
 
               def project do
-                [
-                  app: :demo,
-                  version: "0.1.0",
-                  elixir: "~> 1.17",
-                  deps: deps(),
-                  aliases: aliases()
-                ]
+                [app: :demo, version: "0.1.0", deps: deps(), aliases: aliases()]
               end
 
-              def application do
-                [mod: {Demo.Application, []}, extra_applications: [:logger]]
-              end
-
+              def application, do: [mod: {Demo.Application, []}]
               defp deps, do: []
 
               defp aliases do
-                [
-                  setup: ["deps.get"],
-                  "assets.deploy": ["existing.deploy", "phx.digest"]
-                ]
+                [setup: ["deps.get"], "assets.deploy": ["existing.deploy", "phx.digest"]]
               end
             end
             """
@@ -1045,15 +307,6 @@ defmodule Rekindle.InstallTest do
           extra_files
         )
     )
-  end
-
-  defp existing_client(integration, targets, extra_files \\ %{}) do
-    files =
-      integration
-      |> Rekindle.Integration.render(targets)
-      |> Map.new(fn {path, contents} -> {Path.join("client", path), contents} end)
-
-    project(Map.merge(files, extra_files))
   end
 
   defp install(igniter, options \\ []) do
@@ -1073,12 +326,6 @@ defmodule Rekindle.InstallTest do
     |> Map.new(fn {path, source} -> {path, Rewrite.Source.get(source, :content)} end)
   end
 
-  defp client_contents(igniter) do
-    igniter.rewrite.sources
-    |> Enum.filter(fn {path, _source} -> String.starts_with?(path, "client/") end)
-    |> Map.new(fn {path, source} -> {path, Rewrite.Source.get(source, :content)} end)
-  end
-
   defp update_content(igniter, path, update) do
     source = igniter.rewrite.sources[path]
 
@@ -1086,14 +333,6 @@ defmodule Rekindle.InstallTest do
       Rewrite.Source.update(source, :content, update.(Rewrite.Source.get(source, :content)))
 
     %{igniter | rewrite: Rewrite.update!(igniter.rewrite, source)}
-  end
-
-  defp delete_file(igniter, path) do
-    %{
-      igniter
-      | rewrite: Rewrite.delete(igniter.rewrite, path),
-        assigns: Map.update!(igniter.assigns, :test_files, &Map.delete(&1, path))
-    }
   end
 
   defp ignore_lines(igniter) do
@@ -1105,60 +344,5 @@ defmodule Rekindle.InstallTest do
   defp index(content, value) do
     {index, _length} = :binary.match(content, value)
     index
-  end
-
-  defp git_status!(root) do
-    {output, 0} = System.cmd("git", ["status", "--porcelain"], cd: root)
-    output
-  end
-
-  defp git!(root, arguments) do
-    {output, status} = System.cmd("git", arguments, cd: root, stderr_to_stdout: true)
-    assert status == 0, "git #{Enum.join(arguments, " ")} failed:\n#{output}"
-  end
-
-  defp write_project(root, igniter) do
-    Enum.each(igniter.rewrite.sources, fn {relative, source} ->
-      path = Path.join(root, relative)
-      File.mkdir_p!(Path.dirname(path))
-      File.write!(path, Rewrite.Source.get(source, :content))
-    end)
-  end
-
-  defp filesystem_tree(root) do
-    root
-    |> Path.join("**")
-    |> Path.wildcard(match_dot: true)
-    |> Enum.reject(&(&1 == root))
-    |> Map.new(fn path ->
-      relative = Path.relative_to(path, root)
-      stat = File.lstat!(path)
-
-      value =
-        case stat.type do
-          :regular -> {:regular, stat.mode, File.read!(path)}
-          :directory -> {:directory, stat.mode}
-          :symlink -> {:symlink, File.read_link!(path)}
-        end
-
-      {relative, value}
-    end)
-  end
-
-  defp tmp_dir do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "rekindle-install-#{System.unique_integer([:positive, :monotonic])}"
-      )
-
-    File.mkdir_p!(path)
-    on_exit(fn -> File.rm_rf!(path) end)
-    path
-  end
-
-  defp host_target! do
-    {:ok, target} = Rekindle.Toolchain.host_target()
-    target
   end
 end

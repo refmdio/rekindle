@@ -50,7 +50,5 @@ desktop. GPUI uses `client/src/lib.rs`; eframe follows its official
 The `web` and `desktop` binaries contain platform startup code only.
 Target-specific behavior can be selected with the generated Cargo features.
 
-Re-running the installer does not replace an existing Cargo client. Adoption
-validates an isolated copy, so the existing crate and its lockfile state remain
-unchanged. See [Getting Started](../introduction/getting-started.md) for the
-required target entries.
+Re-running the installer preserves the generated Cargo client. The installer
+does not overwrite an unmanaged `client/Cargo.toml`.

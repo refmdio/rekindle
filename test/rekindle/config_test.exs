@@ -17,7 +17,7 @@ defmodule Rekindle.ConfigTest do
     :ok
   end
 
-  test "loads the fixed client root and configured targets" do
+  test "loads fixed project paths and configured targets" do
     root = tmp_dir()
 
     Application.put_env(:rekindle_config_test, Rekindle,
@@ -29,14 +29,13 @@ defmodule Rekindle.ConfigTest do
           features: ["web"],
           profiles: [dev: "fast", release: "shipping"]
         ]
-      ],
-      public_dir: "priv/static"
+      ]
     )
 
     assert {:ok, project} = Config.load(:rekindle_config_test, project_root: root)
     assert project.client_root == Path.join(root, "client")
-    assert project.integration == :egui
     assert project.public_dir == Path.join(root, "priv/static")
+    assert project.integration == :egui
 
     assert %Config.Target{
              name: :web,
@@ -48,7 +47,7 @@ defmodule Rekindle.ConfigTest do
            } = project.targets.web
   end
 
-  test "rejects unknown configuration and paths outside the project" do
+  test "rejects unknown configuration values" do
     Application.put_env(:rekindle_config_test, Rekindle,
       integration: :other,
       targets: [web: []]
@@ -60,23 +59,14 @@ defmodule Rekindle.ConfigTest do
     Application.put_env(:rekindle_config_test, Rekindle,
       integration: :gpui,
       targets: [web: []],
-      public_dir: "../static"
-    )
-
-    assert {:error, %Config.Error{kind: :invalid_path}} =
-             Config.load(:rekindle_config_test)
-
-    Application.put_env(:rekindle_config_test, Rekindle,
-      integration: :gpui,
-      targets: [web: []],
-      command: "cargo build"
+      public_dir: "web/static"
     )
 
     assert {:error, %Config.Error{kind: :unknown_key}} =
              Config.load(:rekindle_config_test)
   end
 
-  test "requires an explicit integration and at least one target" do
+  test "requires an integration and at least one target" do
     assert {:error, %Config.Error{kind: :missing_configuration}} =
              Config.load(:rekindle_config_test)
 
@@ -84,66 +74,6 @@ defmodule Rekindle.ConfigTest do
 
     assert {:error, %Config.Error{kind: :missing_targets}} =
              Config.load(:rekindle_config_test)
-  end
-
-  test "rejects configured and fixed paths that escape through symbolic links" do
-    root = tmp_dir()
-    outside = tmp_dir()
-
-    File.ln_s!(outside, Path.join(root, "static-link"))
-
-    Application.put_env(:rekindle_config_test, Rekindle,
-      integration: :gpui,
-      targets: [web: []],
-      public_dir: "static-link"
-    )
-
-    assert {:error, %Config.Error{kind: :invalid_path}} =
-             Config.load(:rekindle_config_test, project_root: root)
-
-    assert {:error, %Config.Error{kind: :invalid_path}} =
-             Config.validate(
-               [
-                 integration: :gpui,
-                 targets: [web: []],
-                 public_dir: "static-link"
-               ],
-               project_root: root
-             )
-
-    File.ln_s!(outside, Path.join(root, "client"))
-
-    Application.put_env(:rekindle_config_test, Rekindle,
-      integration: :gpui,
-      targets: [web: []]
-    )
-
-    assert {:error, %Config.Error{kind: :invalid_path}} =
-             Config.load(:rekindle_config_test, project_root: root)
-  end
-
-  test "resolves symbolic links that remain inside the project" do
-    root = tmp_dir()
-    File.mkdir_p!(Path.join(root, "priv/static"))
-    File.ln_s!("priv/static", Path.join(root, "static-link"))
-
-    Application.put_env(:rekindle_config_test, Rekindle,
-      integration: :gpui,
-      targets: [web: []],
-      public_dir: "static-link"
-    )
-
-    assert {:ok, project} = Config.load(:rekindle_config_test, project_root: root)
-    assert project.public_dir == Path.join(root, "priv/static")
-  end
-
-  test "rejects a client root linked outside the project" do
-    root = tmp_dir()
-    outside = tmp_dir()
-    File.ln_s!(outside, Path.join(root, "client"))
-
-    assert {:error, %Config.Error{kind: :invalid_path}} =
-             Config.validate_client_root(root)
   end
 
   defp tmp_dir do

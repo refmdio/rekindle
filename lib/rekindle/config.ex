@@ -5,7 +5,7 @@ defmodule Rekindle.Config do
 
   @integrations Rekindle.Integration.names()
   @target_names [:web, :desktop]
-  @config_keys [:integration, :targets, :public_dir]
+  @config_keys [:integration, :targets]
   @target_keys [:package, :binary, :features, :profiles]
   @profile_names [:dev, :release]
   @application_config_key :"Elixir.Rekindle"
@@ -24,47 +24,27 @@ defmodule Rekindle.Config do
 
   @spec load(atom(), keyword()) :: {:ok, t()} | {:error, Error.t()}
   def load(otp_app, options \\ []) when is_atom(otp_app) do
-    configured_root = options |> Keyword.get(:project_root, File.cwd!()) |> Path.expand()
+    root = options |> Keyword.get(:project_root, File.cwd!()) |> Path.expand()
 
-    with {:ok, root} <- resolve_path(configured_root),
-         {:ok, config} <- fetch(otp_app),
-         {:ok, parsed} <- parse(config),
-         {:ok, client_root} <- project_path(root, "client"),
-         {:ok, public_dir} <- project_path(root, parsed.public_dir) do
+    with {:ok, config} <- fetch(otp_app),
+         {:ok, parsed} <- parse(config) do
       {:ok,
        %__MODULE__{
          otp_app: otp_app,
          root: root,
-         client_root: client_root,
+         client_root: Path.join(root, "client"),
          integration: parsed.integration,
          targets: parsed.targets,
-         public_dir: public_dir
+         public_dir: Path.join(root, "priv/static")
        }}
     end
   end
 
   @doc false
-  @spec validate(keyword(), keyword()) :: :ok | {:error, Error.t()}
-  def validate(config, options \\ []) do
-    root = options |> Keyword.get(:project_root, File.cwd!()) |> Path.expand()
-
+  @spec validate(keyword()) :: :ok | {:error, Error.t()}
+  def validate(config) do
     case parse(config) do
-      {:ok, parsed} ->
-        case project_path(root, parsed.public_dir) do
-          {:ok, _public_dir} -> :ok
-          {:error, %Error{} = error} -> {:error, error}
-        end
-
-      {:error, %Error{} = error} ->
-        {:error, error}
-    end
-  end
-
-  @doc false
-  @spec validate_client_root(Path.t()) :: :ok | {:error, Error.t()}
-  def validate_client_root(project_root) do
-    case project_path(Path.expand(project_root), "client") do
-      {:ok, _client_root} -> :ok
+      {:ok, _parsed} -> :ok
       {:error, %Error{} = error} -> {:error, error}
     end
   end
@@ -74,22 +54,8 @@ defmodule Rekindle.Config do
          :ok <- unique_keys(config, "Rekindle configuration"),
          :ok <- known_keys(config, @config_keys, "Rekindle configuration"),
          {:ok, integration} <- integration(config),
-         {:ok, targets} <- targets(config),
-         {:ok, public_dir} <- public_dir(config) do
-      {:ok, %{integration: integration, targets: targets, public_dir: public_dir}}
-    end
-  end
-
-  defp public_dir(config) do
-    case Keyword.get(config, :public_dir, "priv/static") do
-      value when is_binary(value) ->
-        {:ok, value}
-
-      value ->
-        error(
-          :invalid_path,
-          "expected :public_dir to be a project-relative path, got: #{inspect(value)}"
-        )
+         {:ok, targets} <- targets(config) do
+      {:ok, %{integration: integration, targets: targets}}
     end
   end
 
@@ -216,72 +182,18 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp project_path(root, relative) when is_binary(relative) do
-    if Path.type(relative) == :relative do
-      expanded = Path.expand(relative, root)
-
-      with true <- expanded == root or String.starts_with?(expanded, root <> "/"),
-           {:ok, resolved} <- resolve_path(expanded),
-           true <- resolved == root or String.starts_with?(resolved, root <> "/") do
-        {:ok, resolved}
-      else
-        false -> error(:invalid_path, "path must remain inside the project: #{inspect(relative)}")
-        {:error, %Error{} = error} -> {:error, error}
-      end
-    else
-      error(:invalid_path, "path must be project-relative: #{inspect(relative)}")
-    end
-  end
-
-  defp resolve_path(path), do: resolve_path(Path.split(Path.expand(path)), nil, 40)
-
-  defp resolve_path(_parts, _resolved, 0),
-    do: error(:invalid_path, "path contains too many symbolic links")
-
-  defp resolve_path([], resolved, _links), do: {:ok, resolved}
-
-  defp resolve_path([part | rest], nil, links),
-    do: resolve_path(rest, part, links)
-
-  defp resolve_path([part | rest], resolved, links) do
-    candidate = Path.join(resolved, part)
-
-    case File.read_link(candidate) do
-      {:ok, target} ->
-        target =
-          if Path.type(target) == :absolute,
-            do: target,
-            else: Path.expand(target, Path.dirname(candidate))
-
-        resolve_path(Path.split(target) ++ rest, nil, links - 1)
-
-      {:error, :einval} ->
-        resolve_path(rest, candidate, links)
-
-      {:error, :enoent} ->
-        {:ok, Path.join([candidate | rest])}
-
-      {:error, reason} ->
-        error(:invalid_path, "cannot resolve path #{inspect(candidate)}: #{inspect(reason)}")
-    end
-  end
-
   defp keyword(value, label) do
-    if Keyword.keyword?(value) do
-      :ok
-    else
-      error(:invalid_configuration, "expected #{label} to be a keyword list")
-    end
+    if Keyword.keyword?(value),
+      do: :ok,
+      else: error(:invalid_configuration, "expected #{label} to be a keyword list")
   end
 
   defp unique_keys(value, label) do
     keys = Keyword.keys(value)
 
-    if length(keys) == MapSet.size(MapSet.new(keys)) do
-      :ok
-    else
-      error(:duplicate_key, "#{label} contains a duplicate key")
-    end
+    if length(keys) == MapSet.size(MapSet.new(keys)),
+      do: :ok,
+      else: error(:duplicate_key, "#{label} contains a duplicate key")
   end
 
   defp known_keys(value, allowed, label) do

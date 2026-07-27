@@ -32,9 +32,9 @@ priv/static/rekindle/entry.js
 The entry module imports and starts the selected complete generation. It is
 replaced only after that generation has been published. The installer adds a
 static endpoint at `/rekindle` and prepends the release build to
-`assets.deploy`, before `phx.digest`. Rekindle validates its canonical release
-generation under `.rekindle/release` before copying it into `priv/static`;
-Phoenix may add digested and compressed derivatives to the public copy.
+`assets.deploy`, before `phx.digest`. The current and immediately previous
+generation are retained. Phoenix may add digested and compressed derivatives
+to the published files.
 
 ## Browser requirements
 

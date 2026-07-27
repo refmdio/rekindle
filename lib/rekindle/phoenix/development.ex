@@ -6,7 +6,6 @@ defmodule Rekindle.Phoenix.Development do
   import Plug.Conn
 
   alias Rekindle.Config
-  alias Rekindle.OwnedPath
   alias Rekindle.Publication
   alias Rekindle.Web.Manifest
 
@@ -88,7 +87,7 @@ defmodule Rekindle.Phoenix.Development do
   def put_error(project, message) do
     path = error_path(project)
 
-    with :ok <- OwnedPath.ensure_directory(project.root, Path.dirname(path)),
+    with :ok <- File.mkdir_p(Path.dirname(path)),
          {:ok, temporary} <-
            Publication.temporary_file(Path.dirname(path), ".tmp-web-error-") do
       try do
@@ -99,7 +98,7 @@ defmodule Rekindle.Phoenix.Development do
           {:error, _reason} -> :ok
         end
       after
-        OwnedPath.remove_file(project.root, temporary)
+        File.rm(temporary)
       end
     else
       {:error, _reason} -> :ok
@@ -109,8 +108,9 @@ defmodule Rekindle.Phoenix.Development do
   @doc false
   @spec clear_error(Config.t()) :: :ok
   def clear_error(project) do
-    case OwnedPath.remove_file(project.root, error_path(project)) do
+    case File.rm(error_path(project)) do
       :ok -> :ok
+      {:error, :enoent} -> :ok
       {:error, _reason} -> :ok
     end
   end
@@ -125,7 +125,7 @@ defmodule Rekindle.Phoenix.Development do
   defp current(project) do
     selector_path = Path.join([project.root, ".rekindle", "dev", "web-current.json"])
 
-    with {:ok, contents} <- OwnedPath.read_file(project.root, selector_path),
+    with {:ok, contents} <- File.read(selector_path),
          {:ok, %{"generation" => generation}} <- Jason.decode(contents),
          true <- Regex.match?(@generation, generation),
          {:ok, manifest} <- manifest(project, generation) do
@@ -136,8 +136,7 @@ defmodule Rekindle.Phoenix.Development do
   defp manifest(project, generation) do
     root = Path.join([project.root, ".rekindle", "dev", "web", generation])
 
-    with :ok <- OwnedPath.validate_directory(project.root, root),
-         {:ok, %{"generation" => ^generation, "entry" => entry} = manifest} <-
+    with {:ok, %{"generation" => ^generation, "entry" => entry} = manifest} <-
            Manifest.read(root),
          true <- safe_member?(entry),
          :ok <- Manifest.validate(root, manifest) do
@@ -159,7 +158,7 @@ defmodule Rekindle.Phoenix.Development do
   defp build_error(project) do
     path = error_path(project)
 
-    with {:ok, contents} <- OwnedPath.read_file(project.root, path),
+    with {:ok, contents} <- File.read(path),
          {:ok, %{"error" => message}} when is_binary(message) <- Jason.decode(contents) do
       {:ok, message}
     else

@@ -58,6 +58,7 @@ selected immutable Web generation.
 The helper functions remain public for applications that intentionally move
 the generated host or script to another layout.
 
-The exact Rekindle generation remains under `.rekindle/release`. Its
-`priv/static` copy is deployment output, so Phoenix can add digested and
-compressed derivatives without changing the canonical generation identity.
+Rekindle publishes each complete generation below
+`priv/static/rekindle/web/` and updates `priv/static/rekindle/entry.js` only
+after publication succeeds. Phoenix can then add digested and compressed
+derivatives to those files.

@@ -7,8 +7,8 @@ if Code.ensure_loaded?(Igniter) do
         mix igniter.install rekindle --integration gpui --targets web,desktop
 
     Valid integrations are `gpui`, `egui`, and `slint`. Targets can be `web`,
-    `desktop`, or both. An existing `client/Cargo.toml` is adopted only when
-    both selections are explicit and the selected target entries exist.
+    `desktop`, or both. The installer creates `client/` and does not overwrite
+    an existing Rust project.
     """
 
     use Igniter.Mix.Task

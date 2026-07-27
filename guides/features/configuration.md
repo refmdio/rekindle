@@ -16,15 +16,15 @@ config :my_app, Rekindle,
 - `:integration` — required; `:gpui`, `:egui`, or `:slint`.
 - `:targets` — required; a non-empty keyword list containing `:web`,
   `:desktop`, or both.
-- `:public_dir` — project-relative Web publication directory. Defaults to
-  `"priv/static"` and must remain inside the project.
+
+The Rust client is located at `client/`. Web release output is published below
+`priv/static/rekindle/`.
 
 ## Target options
 
 Each target accepts:
 
-- `:features` — Cargo features enabled for the target. Defaults to an empty
-  list when configuring an adopted client.
+- `:features` — Cargo features enabled for the target.
 - `:package` — Cargo package name when the workspace contains more than one
   package.
 - `:binary` — Cargo binary name when it cannot be selected from the target
@@ -37,7 +37,6 @@ For example:
 ```elixir
 config :my_app, Rekindle,
   integration: :egui,
-  public_dir: "priv/static",
   targets: [
     web: [
       package: "editor_client",
