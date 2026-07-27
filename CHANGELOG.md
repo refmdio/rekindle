@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 - 2026-07-28
 
 - Resolve Cargo through rustup using the generated client toolchain.
 
