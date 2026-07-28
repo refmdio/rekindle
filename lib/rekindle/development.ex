@@ -13,18 +13,34 @@ defmodule Rekindle.Development do
   @spec ensure_started(keyword()) :: {:ok, pid()} | {:error, term()}
   def ensure_started(options) do
     otp_app = Keyword.fetch!(options, :otp_app)
-    name = {:via, Registry, {@registry, otp_app}}
-    options = Keyword.put(options, :name, name)
 
-    case Registry.lookup(@registry, otp_app) do
-      [{pid, _value}] ->
-        {:ok, pid}
+    with {:ok, project} <-
+           Config.load(otp_app,
+             project_root: Keyword.get(options, :project_root, File.cwd!())
+           ),
+         {:ok, targets} <- targets(project, Keyword.get(options, :targets)) do
+      identity = %{project_root: project.root, targets: targets}
+      name = {:via, Registry, {@registry, otp_app, identity}}
 
-      [] ->
-        case DynamicSupervisor.start_child(@supervisor, {__MODULE__, options}) do
-          {:error, {:already_started, pid}} -> {:ok, pid}
-          result -> result
-        end
+      options =
+        options
+        |> Keyword.put(:project_root, project.root)
+        |> Keyword.put(:targets, targets)
+        |> Keyword.put(:name, name)
+
+      case runtime(otp_app, identity) do
+        :missing ->
+          case DynamicSupervisor.start_child(@supervisor, {__MODULE__, options}) do
+            {:error, {:already_started, _pid}} = error ->
+              runtime_result(otp_app, identity, error)
+
+            result ->
+              result
+          end
+
+        result ->
+          result
+      end
     end
   end
 
@@ -113,5 +129,29 @@ defmodule Rekindle.Development do
   defp process_name(otp_app, role) do
     app = otp_app |> Atom.to_string() |> Macro.camelize()
     Module.concat([__MODULE__, app, role])
+  end
+
+  defp runtime(otp_app, identity) do
+    case Registry.lookup(@registry, otp_app) do
+      [{pid, ^identity}] -> {:ok, pid}
+      [{_pid, existing}] -> runtime_mismatch(identity, existing)
+      [] -> :missing
+    end
+  end
+
+  defp runtime_result(otp_app, identity, error) do
+    case runtime(otp_app, identity) do
+      :missing -> error
+      result -> result
+    end
+  end
+
+  defp runtime_mismatch(requested, existing) do
+    {:error,
+     Config.Error.new(
+       :development_runtime_mismatch,
+       "development runtime is already running for #{inspect(existing.targets)} at #{existing.project_root}; " <>
+         "stop it before requesting #{inspect(requested.targets)} at #{requested.project_root}"
+     )}
   end
 end
