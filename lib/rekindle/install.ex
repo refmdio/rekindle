@@ -111,6 +111,7 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp requested_targets(nil), do: {:ok, nil}
+    defp requested_targets([]), do: {:ok, nil}
 
     defp requested_targets(values) when is_binary(values),
       do: values |> String.split(",", trim: true) |> requested_targets()

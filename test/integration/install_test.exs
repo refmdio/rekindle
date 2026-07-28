@@ -257,11 +257,19 @@ defmodule Rekindle.InstallTest do
   test "rejects invalid selections before changing the project" do
     original = project()
 
-    for options <- [[plugin: "other"], [targets: ["mobile"]], [targets: []]] do
+    for options <- [[plugin: "other"], [targets: ["mobile"]]] do
       rejected = install(original, options)
       assert rejected.issues != []
       assert changed_contents(rejected) == changed_contents(original)
     end
+  end
+
+  test "uses the default targets when the csv option is omitted" do
+    installed = install(project(), targets: [])
+
+    assert installed.issues == []
+    assert content(installed, "config/config.exs") =~ "web: []"
+    assert content(installed, "config/config.exs") =~ "desktop: []"
   end
 
   test "installs the core without a Phoenix endpoint" do
