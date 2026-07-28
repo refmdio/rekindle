@@ -18,8 +18,8 @@ config :my_app, Rekindle,
   `Rekindle.Plugin.Egui`, and `Rekindle.Plugin.Slint`.
 - `:targets` — required; a non-empty keyword list containing `:web`,
   `:desktop`, or both.
-- `:public_dir` — Web release publication root, relative to the Elixir project
-  unless absolute. Defaults to `"priv/static"`.
+- `:public_dir` — Web release publication root. Defaults to `"priv/static"`;
+  another location must be an absolute path.
 
 The Rust client is located at `client/`. Web release output is published below
 `<public_dir>/rekindle/`.

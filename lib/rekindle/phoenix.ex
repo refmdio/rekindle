@@ -22,7 +22,7 @@ defmodule Rekindle.Phoenix do
     root =
       if public_dir == "priv/static",
         do: Application.app_dir(otp_app, public_dir),
-        else: Path.expand(public_dir)
+        else: public_dir
 
     Path.join(root, "rekindle")
   end

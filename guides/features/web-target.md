@@ -31,8 +31,8 @@ priv/static/rekindle/web/<generation>/
 priv/static/rekindle/entry.js
 ```
 
-Set the top-level `:public_dir` option to publish below another host-controlled
-static directory.
+Set the top-level `:public_dir` option to an absolute path to publish below
+another host-controlled static directory.
 
 The entry module imports and starts the selected complete generation. It is
 replaced only after that generation has been published. The installer adds a

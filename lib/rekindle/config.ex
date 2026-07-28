@@ -62,15 +62,26 @@ defmodule Rekindle.Config do
 
   defp public_dir(config) do
     case Keyword.get(config, :public_dir, "priv/static") do
-      value when is_binary(value) and value != "" ->
+      "priv/static" = value ->
         {:ok, value}
 
+      value when is_binary(value) and value != "" ->
+        if Path.type(value) == :absolute do
+          {:ok, value}
+        else
+          invalid_public_dir(value)
+        end
+
       value ->
-        error(
-          :invalid_public_dir,
-          "expected :public_dir to be a non-empty path, got: #{inspect(value)}"
-        )
+        invalid_public_dir(value)
     end
+  end
+
+  defp invalid_public_dir(value) do
+    error(
+      :invalid_public_dir,
+      ~s(expected :public_dir to be "priv/static" or an absolute path, got: #{inspect(value)})
+    )
   end
 
   defp fetch(otp_app) do

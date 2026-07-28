@@ -77,5 +77,6 @@ after publication succeeds. Phoenix can then add digested and compressed
 derivatives to those files.
 
 The generated Phoenix static Plug reads `:public_dir` from the Rekindle
-configuration. For another Plug-compatible host, mount that directory as
-static content and load `/rekindle/entry.js`.
+configuration. A custom directory must be an absolute path so the build and
+runtime resolve the same location. For another Plug-compatible host, mount that
+directory as static content and load `/rekindle/entry.js`.

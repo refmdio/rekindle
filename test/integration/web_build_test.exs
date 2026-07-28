@@ -97,10 +97,12 @@ defmodule Rekindle.WebBuildTest do
   end
 
   test "publishes release output below a configured public directory", %{root: root} do
+    public_dir = Path.join(root, "public")
+
     Application.put_env(:rekindle_web_build_test, Rekindle,
       plugin: Rekindle.Plugin.GPUI,
       targets: [web: [features: ["web"]]],
-      public_dir: "public"
+      public_dir: public_dir
     )
 
     tools = fake_tools(root, "custom-public-dir")
