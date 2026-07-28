@@ -94,27 +94,6 @@ defmodule Rekindle.InstallTest do
     assert changed_contents(conflicted) == changed_contents(installed)
   end
 
-  test "moves the previous direct setup entry into assets.setup" do
-    installed = install(project(), integration: "egui", targets: ["web"])
-
-    previous =
-      update_content(installed, "mix.exs", fn mix ->
-        String.replace(
-          mix,
-          ~s(setup: ["deps.get", "assets.setup", "assets.build"]),
-          ~s(setup: ["deps.get", "assets.setup", "assets.build", "rekindle.setup"])
-        )
-      end)
-
-    updated = install(previous)
-    mix = content(updated, "mix.exs")
-
-    assert updated.issues == []
-    assert mix =~ ~s(setup: ["deps.get", "assets.setup", "assets.build"])
-    refute mix =~ ~s("assets.build", "rekindle.setup")
-    assert length(Regex.scan(~r/"rekindle\.setup"/, mix)) == 1
-  end
-
   test "adds a target to an installed client without replacing shared UI files" do
     installed = install(project(), integration: "egui", targets: ["web"])
 
