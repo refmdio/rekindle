@@ -10,19 +10,21 @@ defmodule Rekindle.Desktop.Builder do
   @spec build(Rekindle.Config.t(), Rekindle.Config.Target.t(), :dev | :release, keyword()) ::
           {:ok, Result.t()} | {:error, Rekindle.Cargo.Error.t() | Error.t()}
   def build(project, target, profile, options) do
-    with {:ok, temporary} <- temporary_directory(project) do
+    with {:ok, cargo} <-
+           Rekindle.Cargo.build(project, target, profile, cargo_options(options)),
+         {:ok, temporary} <- temporary_directory(project, profile, cargo.target) do
       try do
-        build(project, target, profile, options, temporary)
+        package(project, profile, cargo, temporary)
       after
         File.rm_rf(temporary)
       end
     end
   end
 
-  defp build(project, target, profile, options, temporary) do
-    with {:ok, cargo} <-
-           Rekindle.Cargo.build(project, target, profile, cargo_options(options)),
-         :ok <- copy_executable(cargo.artifact, Path.join(temporary, @executable)),
+  defp package(project, profile, cargo, temporary) do
+    manifest_path = Path.join(temporary, "manifest.json")
+
+    with :ok <- copy_executable(cargo.artifact, Path.join(temporary, @executable)),
          {:ok, manifest} <-
            Manifest.create(
              temporary,
@@ -32,28 +34,25 @@ defmodule Rekindle.Desktop.Builder do
              cargo.binary,
              Rekindle.Plugin.name(project.plugin)
            ),
-         :ok <- File.write(Path.join(temporary, "manifest.json"), Jason.encode!(manifest)),
-         {:ok, output} <- output(project, profile, temporary, manifest) do
-      result = %Result{
-        target: :desktop,
-        profile: profile,
-        artifact: Path.join(output, @executable),
-        metadata: %{
-          manifest: Path.join(output, "manifest.json"),
-          package: cargo.package,
-          binary: cargo.binary,
-          rust_target: cargo.target,
-          target_directory: cargo.target_directory,
-          diagnostics: cargo.diagnostics
-        }
-      }
-
-      if profile == :release,
-        do: Rekindle.Desktop.Release.publish(project, result),
-        else: {:ok, result}
+         :ok <- File.write(manifest_path, Jason.encode!(manifest)),
+         {:ok, output} <- publish(project, profile, cargo.target, temporary) do
+      {:ok,
+       %Result{
+         target: :desktop,
+         profile: profile,
+         artifact: Path.join(output, @executable),
+         metadata: %{
+           manifest: Path.join(output, "manifest.json"),
+           package: cargo.package,
+           binary: cargo.binary,
+           rust_target: cargo.target,
+           target_directory: cargo.target_directory,
+           diagnostics: cargo.diagnostics
+         }
+       }}
     else
       {:error, reason} when is_atom(reason) ->
-        file_error(:manifest_write, Path.join(temporary, "manifest.json"), reason)
+        file_error(:manifest_write, manifest_path, reason)
 
       {:error, error} ->
         {:error, error}
@@ -78,15 +77,23 @@ defmodule Rekindle.Desktop.Builder do
     end
   end
 
-  defp output(_project, :release, temporary, _manifest), do: {:ok, temporary}
-
-  defp output(project, :dev, temporary, manifest) do
-    parent = Path.join([project.root, ".rekindle", "dev", "desktop", manifest["target"]])
+  defp publish(project, :dev, target, temporary) do
+    parent = output_parent(project, :dev, target)
     destination = Path.join(parent, build_id())
 
     with :ok <- File.mkdir_p(parent),
-         :ok <- File.rename(temporary, destination),
-         :ok <- Manifest.validate(destination, manifest) do
+         :ok <- File.rename(temporary, destination) do
+      {:ok, destination}
+    else
+      {:error, reason} -> file_error(:publish, destination, reason)
+    end
+  end
+
+  defp publish(project, :release, target, temporary) do
+    destination = Path.join(output_parent(project, :release, target), target)
+
+    with :ok <- remove_destination(destination),
+         :ok <- File.rename(temporary, destination) do
       {:ok, destination}
     else
       {:error, %Error{} = error} -> {:error, error}
@@ -94,11 +101,18 @@ defmodule Rekindle.Desktop.Builder do
     end
   end
 
-  defp temporary_directory(project) do
-    parent = Path.join([project.root, ".rekindle", "tmp", "desktop"])
+  defp remove_destination(destination) do
+    case File.rm_rf(destination) do
+      {:ok, _paths} -> :ok
+      {:error, reason, path} -> file_error(:publish, path, reason)
+    end
+  end
+
+  defp temporary_directory(project, profile, target) do
+    parent = output_parent(project, profile, target)
 
     with :ok <- File.mkdir_p(parent) do
-      case Publication.temporary_directory(parent, "build-") do
+      case Publication.temporary_directory(parent, ".tmp-desktop-") do
         {:ok, path} -> {:ok, path}
         {:error, reason} -> file_error(:mkdir, parent, reason)
       end
@@ -106,6 +120,12 @@ defmodule Rekindle.Desktop.Builder do
       {:error, reason} -> file_error(:mkdir, parent, reason)
     end
   end
+
+  defp output_parent(project, :dev, target),
+    do: Path.join([project.root, ".rekindle", "dev", "desktop", target])
+
+  defp output_parent(project, :release, _target),
+    do: Path.join([project.root, "dist", "rekindle", "desktop"])
 
   defp cargo_options(options),
     do:

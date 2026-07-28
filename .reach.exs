@@ -14,7 +14,6 @@ application = [
   "Rekindle.Check",
   "Rekindle.Desktop.Builder",
   "Rekindle.Desktop.Development",
-  "Rekindle.Desktop.Release",
   "Rekindle.Development",
   "Rekindle.Development.Builder",
   "Rekindle.Development.Core",

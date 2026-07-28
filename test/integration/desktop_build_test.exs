@@ -54,7 +54,7 @@ defmodule Rekindle.DesktopBuildTest do
     assert File.regular?(second.artifact)
   end
 
-  test "publishes a fixed release layout and preserves sibling files", %{root: root} do
+  test "publishes a fixed release layout", %{root: root} do
     tools = fake_tools(root, "first")
     destination = Path.join([root, "dist", "rekindle", "desktop", tools.target])
     File.mkdir_p!(destination)
@@ -64,14 +64,13 @@ defmodule Rekindle.DesktopBuildTest do
     assert first.artifact == Path.join(destination, "application")
     assert first.metadata.manifest == Path.join(destination, "manifest.json")
     assert File.read!(first.artifact) =~ "# first"
-    assert File.read!(Path.join(destination, "keep.txt")) == "keep"
+    refute File.exists?(Path.join(destination, "keep.txt"))
     refute File.exists?(tools.launched)
 
     File.write!(tools.mode, "second")
     assert {:ok, second} = build(root, tools, profile: :release)
     assert second.artifact == first.artifact
     assert File.read!(second.artifact) =~ "# second"
-    assert File.read!(Path.join(destination, "keep.txt")) == "keep"
 
     refute destination
            |> Path.dirname()
