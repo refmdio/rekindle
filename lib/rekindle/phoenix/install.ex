@@ -209,7 +209,7 @@ if Code.ensure_loaded?(Igniter) do
       with {:ok, options} <- Function.move_to_nth_argument(zipper, 1),
            {:ok, options} <- Common.expand_literal(options) do
         Keyword.get(options, :at) == "/rekindle" and
-          Keyword.get(options, :from) == {app, "priv/static/rekindle"}
+          Keyword.get(options, :from) == {Rekindle.Phoenix, :public_root, [app]}
       else
         _error -> false
       end
@@ -239,7 +239,7 @@ if Code.ensure_loaded?(Igniter) do
       """
       plug Plug.Static,
         at: "/rekindle",
-        from: {#{inspect(app)}, "priv/static/rekindle"},
+        from: {Rekindle.Phoenix, :public_root, [#{inspect(app)}]},
         gzip: false
       """
     end

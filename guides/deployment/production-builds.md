@@ -76,6 +76,6 @@ Rekindle publishes each complete generation below
 after publication succeeds. Phoenix can then add digested and compressed
 derivatives to those files.
 
-For a different Plug-compatible host, configure `:public_dir`, mount that
-directory as static content, and load `/rekindle/entry.js`. The default Phoenix
-installer continues to use `priv/static`.
+The generated Phoenix static Plug reads `:public_dir` from the Rekindle
+configuration. For another Plug-compatible host, mount that directory as
+static content and load `/rekindle/entry.js`.

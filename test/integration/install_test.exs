@@ -36,7 +36,7 @@ defmodule Rekindle.InstallTest do
 
     endpoint = content(installed, "lib/demo_web/endpoint.ex")
     assert endpoint =~ ~s(at: "/rekindle")
-    assert endpoint =~ ~s(from: {:demo, "priv/static/rekindle"})
+    assert endpoint =~ ~s(from: {Rekindle.Phoenix, :public_root, [:demo]})
     assert endpoint =~ "plug(Rekindle.DevServer, otp_app: :demo)"
 
     assert index(endpoint, "Phoenix.CodeReloader") <

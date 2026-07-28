@@ -13,6 +13,20 @@ defmodule Rekindle.Phoenix do
 
   @type plugin :: Rekindle.Plugin.configured()
 
+  @doc false
+  @spec public_root(atom()) :: Path.t()
+  def public_root(otp_app) do
+    config = Application.get_env(otp_app, Rekindle, [])
+    public_dir = Keyword.get(config, :public_dir, "priv/static")
+
+    root =
+      if public_dir == "priv/static",
+        do: Application.app_dir(otp_app, public_dir),
+        else: Path.expand(public_dir)
+
+    Path.join(root, "rekindle")
+  end
+
   @doc """
   Returns the Web host markup declared by a plugin.
 
