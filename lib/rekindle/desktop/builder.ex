@@ -92,19 +92,51 @@ defmodule Rekindle.Desktop.Builder do
   defp publish(project, :release, target, temporary) do
     destination = Path.join(output_parent(project, :release, target), target)
 
-    with :ok <- remove_destination(destination),
-         :ok <- File.rename(temporary, destination) do
+    with {:ok, previous} <- move_destination(destination),
+         :ok <- replace_destination(temporary, destination, previous) do
       {:ok, destination}
     else
       {:error, %Error{} = error} -> {:error, error}
+    end
+  end
+
+  defp move_destination(destination) do
+    previous = destination <> ".previous-" <> build_id()
+
+    case File.rename(destination, previous) do
+      :ok -> {:ok, previous}
+      {:error, :enoent} -> {:ok, nil}
       {:error, reason} -> file_error(:publish, destination, reason)
     end
   end
 
-  defp remove_destination(destination) do
-    case File.rm_rf(destination) do
+  defp replace_destination(temporary, destination, previous) do
+    case File.rename(temporary, destination) do
+      :ok ->
+        remove_previous(previous)
+
+      {:error, reason} ->
+        with :ok <- restore_previous(previous, destination) do
+          file_error(:publish, destination, reason)
+        end
+    end
+  end
+
+  defp remove_previous(nil), do: :ok
+
+  defp remove_previous(previous) do
+    case File.rm_rf(previous) do
       {:ok, _paths} -> :ok
       {:error, reason, path} -> file_error(:publish, path, reason)
+    end
+  end
+
+  defp restore_previous(nil, _destination), do: :ok
+
+  defp restore_previous(previous, destination) do
+    case File.rename(previous, destination) do
+      :ok -> :ok
+      {:error, reason} -> file_error(:restore, destination, reason)
     end
   end
 
