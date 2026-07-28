@@ -164,13 +164,38 @@ defmodule Rekindle.Plugin.Cargo do
   end
 
   defp dependencies?(dependencies) when is_list(dependencies),
-    do:
-      Enum.all?(dependencies, fn
-        %Dependency{features: features} -> is_list(features)
-        _dependency -> false
-      end)
+    do: Enum.all?(dependencies, &dependency?/1)
 
   defp dependencies?(_dependencies), do: false
+
+  defp dependency?(%Dependency{} = dependency) do
+    valid_dependency_name?(dependency.name) and
+      valid_dependency_source?(dependency) and
+      dependency.default_features in [nil, true, false] and
+      non_empty_strings?(dependency.features)
+  end
+
+  defp dependency?(_dependency), do: false
+
+  defp valid_dependency_name?(name) when is_binary(name),
+    do: Regex.match?(~r/\A[[:alnum:]_-]+\z/, name)
+
+  defp valid_dependency_name?(_name), do: false
+
+  defp valid_dependency_source?(%Dependency{version: version, git: nil, rev: nil}),
+    do: non_empty_string?(version)
+
+  defp valid_dependency_source?(%Dependency{version: nil, git: git, rev: rev}),
+    do: non_empty_string?(git) and non_empty_string?(rev)
+
+  defp valid_dependency_source?(_dependency), do: false
+
+  defp non_empty_strings?(values) when is_list(values),
+    do: Enum.all?(values, &non_empty_string?/1)
+
+  defp non_empty_strings?(_values), do: false
+
+  defp non_empty_string?(value), do: is_binary(value) and value != ""
 
   defp dependency_groups?(groups) when is_list(groups) do
     Enum.all?(groups, fn

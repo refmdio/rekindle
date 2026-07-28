@@ -3,6 +3,8 @@ defmodule Rekindle.PluginTest do
 
   alias Rekindle.Install.Client
   alias Rekindle.Plugin
+  alias Rekindle.Plugin.Cargo
+  alias Rekindle.Plugin.Cargo.Dependency
 
   @moduletag timeout: 600_000
   @plugins [
@@ -31,6 +33,16 @@ defmodule Rekindle.PluginTest do
     assert spec.name == "custom"
     assert spec.web.host == ~s(<canvas id="custom"></canvas>)
     assert Client.render(plugin, [:desktop])["src/bin/desktop.rs"] =~ "client::open"
+  end
+
+  test "rejects incomplete Cargo dependencies" do
+    refute Cargo.valid?(%Cargo{dependencies: [%Dependency{name: nil, version: "1"}]})
+    refute Cargo.valid?(%Cargo{dependencies: [%Dependency{name: "example"}]})
+    refute Cargo.valid?(%Cargo{dependencies: [%Dependency{name: "example", git: "git"}]})
+
+    refute Cargo.valid?(%Cargo{
+             dependencies: [%Dependency{name: "example", version: "1", features: [""]}]
+           })
   end
 
   test "renders application-owned sources for every built-in plugin" do
