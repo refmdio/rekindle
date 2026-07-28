@@ -16,15 +16,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
-    if: github.event_name != 'release' || github.event.release.prerelease == false
+  verify:
+    if: github.event_name != 'release'
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Check out the release tag
+      - name: Check out the source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Erlang and Elixir
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
-          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
+          otp-version: "29"
+          elixir-version: "1.20"
+
+      - name: Restore dependencies and build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            deps
+            _build
+          key: verify-${{ runner.os }}-otp-29-elixir-1.20-${{ hashFiles('mix.lock') }}
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Verify Elixir and documentation
+        run: |
+          mix format --check-formatted
+          mix compile --warnings-as-errors
+          mix reach.check --arch --dead-code
+          mix reach.check --smells --strict
+          mix test --exclude integration_matrix
+          mix docs --warnings-as-errors
+
+  integrations:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        integration: [gpui, egui, slint]
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Erlang and Elixir
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
@@ -65,20 +101,30 @@ jobs:
         run: |
           echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
           echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup toolchain install stable --profile minimal --component rustfmt
           rustup target add --toolchain stable wasm32-unknown-unknown
-          rustup toolchain install nightly --profile minimal --component rustfmt --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
           rustup target add --toolchain nightly wasm32-unknown-unknown
-          rustup run stable rustc --print target-libdir --target wasm32-unknown-unknown
-          rustup run nightly rustc --print target-libdir --target wasm32-unknown-unknown
 
-      - name: Restore dependencies and build cache
+      - name: Restore Elixir dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             deps
             _build
-          key: publish-${{ runner.os }}-otp-29-elixir-1.20-${{ hashFiles('mix.lock') }}
+            ~/.cache/rekindle/tools
+          key: integrations-${{ runner.os }}-otp-29-elixir-1.20-${{ hashFiles('mix.lock') }}
+
+      - name: Restore Rust dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: rust-${{ runner.os }}-${{ matrix.integration }}-${{ hashFiles('priv/templates/integrations/**/Cargo.lock.eex') }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ matrix.integration }}-
 
       - name: Install dependencies
         run: mix deps.get
@@ -92,8 +138,39 @@ jobs:
             end
           '
 
+      - name: Verify ${{ matrix.integration }} integration
+        env:
+          REKINDLE_INTEGRATION: ${{ matrix.integration }}
+        run: mix test test/integration/integrations_test.exs --include integration_matrix
+
+  publish:
+    if: github.event_name == 'release' && github.event.release.prerelease == false
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Erlang and Elixir
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        with:
+          otp-version: "29"
+          elixir-version: "1.20"
+
+      - name: Restore dependencies and build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            deps
+            _build
+          key: verify-${{ runner.os }}-otp-29-elixir-1.20-${{ hashFiles('mix.lock') }}
+
+      - name: Install dependencies
+        run: mix deps.get
+
       - name: Match the release tag to the package version
-        if: github.event_name == 'release'
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
@@ -112,23 +189,12 @@ jobs:
             exit 1
           fi
 
-      - name: Verify the release
-        run: |
-          mix format --check-formatted
-          mix compile --warnings-as-errors
-          mix reach.check --arch --dead-code
-          mix reach.check --smells --strict
-          mix test
-          mix docs --warnings-as-errors
-
       - name: Inspect the Hex publication
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
         run: mix hex.publish --dry-run
 
       - name: Publish package and documentation
-        if: github.event_name == 'release'
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
         run: mix hex.publish --yes

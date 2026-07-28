@@ -3,6 +3,7 @@ defmodule Rekindle.IntegrationsTest do
 
   alias Rekindle.Integration
 
+  @moduletag :integration_matrix
   @moduletag timeout: 600_000
 
   test "renders application-owned sources for every built-in integration" do
@@ -85,7 +86,7 @@ defmodule Rekindle.IntegrationsTest do
   end
 
   test "generated clients compile for every target selection" do
-    for name <- Integration.names() do
+    for name <- selected_integrations() do
       for targets <- [[:web], [:desktop], [:web, :desktop]] do
         root = tmp_dir("#{name}-#{Enum.join(targets, "-")}")
         write(root, Integration.render(name, targets))
@@ -124,7 +125,7 @@ defmodule Rekindle.IntegrationsTest do
       end
     end)
 
-    for name <- Integration.names() do
+    for name <- selected_integrations() do
       root = tmp_dir("#{name}-package")
       client = Path.join(root, "client")
       package = "matrix_#{name}"
@@ -313,6 +314,19 @@ defmodule Rekindle.IntegrationsTest do
   defp rustup_tool!(root, tool) do
     {path, 0} = System.cmd("rustup", ["which", tool], cd: root)
     String.trim(path)
+  end
+
+  defp selected_integrations do
+    case System.get_env("REKINDLE_INTEGRATION") do
+      nil ->
+        Integration.names()
+
+      selected ->
+        case Enum.find(Integration.names(), &(Atom.to_string(&1) == selected)) do
+          nil -> raise "unknown REKINDLE_INTEGRATION: #{selected}"
+          integration -> [integration]
+        end
+    end
   end
 
   defp desktop_target! do
