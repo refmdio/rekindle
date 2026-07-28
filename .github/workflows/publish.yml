@@ -30,6 +30,16 @@ jobs:
           otp-version: "29"
           elixir-version: "1.20"
 
+      - name: Install file watcher
+        run: sudo apt-get install --no-install-recommends --yes inotify-tools
+
+      - name: Prepare Rust
+        run: |
+          echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
+          rustup toolchain install stable --profile minimal
+          rustup target add --toolchain stable wasm32-unknown-unknown
+
       - name: Restore dependencies and build cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
