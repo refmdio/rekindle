@@ -293,6 +293,24 @@ defmodule Rekindle.InstallTest do
     refute mix =~ "rekindle.build web"
   end
 
+  test "creates configuration in a plain Mix project" do
+    original = project()
+
+    original =
+      %{
+        original
+        | rewrite: Rewrite.delete(original.rewrite, "config/config.exs"),
+          assigns:
+            Map.update!(original.assigns, :test_files, &Map.delete(&1, "config/config.exs"))
+      }
+
+    installed = install(original, plugin: "egui", targets: ["desktop"])
+
+    assert installed.issues == []
+    assert content(installed, "config/config.exs") =~ "plugin: Rekindle.Plugin.Egui"
+    assert content(installed, "client/Cargo.toml") =~ "eframe"
+  end
+
   test "rejects invalid existing Rekindle configuration" do
     installed = install(project(), plugin: "egui", targets: ["web"])
 

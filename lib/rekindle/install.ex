@@ -130,6 +130,15 @@ if Code.ensure_loaded?(Igniter) do
 
     defp existing_selection(igniter, app) do
       config_path = Application.config_path(igniter)
+
+      if Igniter.exists?(igniter, config_path) do
+        read_existing_selection(igniter, app, config_path)
+      else
+        {:ok, nil}
+      end
+    end
+
+    defp read_existing_selection(igniter, app, config_path) do
       igniter = Igniter.include_existing_file(igniter, config_path)
       source = Rewrite.source!(igniter.rewrite, config_path)
       zipper = source |> Rewrite.Source.get(:quoted) |> Sourceror.Zipper.zip()
