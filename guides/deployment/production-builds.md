@@ -4,7 +4,17 @@ Rekindle publishes production artifacts from the same Mix entry point used
 during development. Web and desktop publication use target-specific output
 formats while sharing configuration and Cargo execution.
 
-## Build a release artifact
+## Build Phoenix assets
+
+Build and digest all Phoenix assets, including the Rekindle Web target:
+
+```console
+mix assets.deploy
+```
+
+The installer places the Rekindle release build before `phx.digest`.
+
+## Build a target explicitly
 
 Use the target's configured Cargo release profile:
 
