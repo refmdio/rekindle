@@ -36,6 +36,10 @@ defmodule Rekindle.InstallTest do
     refute layout =~ ~r/^[ \t]+$/m
     refute layout =~ "{@inner_content}"
 
+    page_test = content(installed, "test/demo_web/controllers/page_controller_test.exs")
+    assert page_test =~ ~s(data-rust-ui="gpui")
+    refute page_test =~ "Peace of mind from prototype to production"
+
     mix = content(installed, "mix.exs")
     assert mix =~ ~s(setup: ["deps.get", "assets.setup", "assets.build"])
     assert mix =~ ~s("assets.setup": ["existing.setup", "rekindle.setup"])
@@ -263,6 +267,26 @@ defmodule Rekindle.InstallTest do
     assert changed_contents(rejected) == changed_contents(original)
   end
 
+  test "does not rewrite an application-owned page test" do
+    original =
+      project(%{
+        "test/demo_web/controllers/page_controller_test.exs" => """
+        defmodule DemoWeb.PageControllerTest do
+          use DemoWeb.ConnCase
+
+          test "GET /", %{conn: conn} do
+            assert html_response(get(conn, "/"), 200) =~ "Application home"
+          end
+        end
+        """
+      })
+
+    installed = install(original, integration: "egui", targets: ["web"])
+
+    assert content(installed, "test/demo_web/controllers/page_controller_test.exs") ==
+             content(original, "test/demo_web/controllers/page_controller_test.exs")
+  end
+
   test "rejects an unmanaged Rust client without modifying it" do
     original =
       project(%{
@@ -427,6 +451,16 @@ defmodule Rekindle.InstallTest do
                 {@inner_content}
               </body>
             </html>
+            """,
+            "test/demo_web/controllers/page_controller_test.exs" => """
+            defmodule DemoWeb.PageControllerTest do
+              use DemoWeb.ConnCase
+
+              test "GET /", %{conn: conn} do
+                conn = get(conn, ~p"/")
+                assert html_response(conn, 200) =~ "Peace of mind from prototype to production"
+              end
+            end
             """,
             "mix.exs" => """
             defmodule Demo.MixProject do

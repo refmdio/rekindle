@@ -25,10 +25,11 @@ if Code.ensure_loaded?(Igniter) do
     @spec install(Igniter.t(), atom(), module(), map(), prepared() | nil) :: Igniter.t()
     def install(igniter, _app, _endpoint, _selection, nil), do: igniter
 
-    def install(igniter, app, endpoint, _selection, prepared) do
+    def install(igniter, app, endpoint, selection, prepared) do
       igniter
       |> install_endpoint(app, endpoint)
       |> install_layout(prepared)
+      |> install_generated_page_test(prepared.layout_path, selection.integration)
     end
 
     defp prepare_layout(igniter, endpoint, integration) do
@@ -128,6 +129,48 @@ if Code.ensure_loaded?(Igniter) do
           |> install_style(style)
           |> install_host(host)
           |> install_script(script)
+
+        Rewrite.Source.update(source, :content, updated)
+      end)
+    end
+
+    defp install_generated_page_test(igniter, layout_path, integration) do
+      web_root = layout_path |> Path.dirname() |> Path.dirname() |> Path.dirname()
+
+      path =
+        Path.join([
+          "test",
+          Path.basename(web_root),
+          "controllers",
+          "page_controller_test.exs"
+        ])
+
+      igniter = Igniter.include_existing_file(igniter, path)
+
+      case Rewrite.source(igniter.rewrite, path) do
+        {:ok, _source} -> rewrite_generated_page_test(igniter, path, integration)
+        {:error, _error} -> igniter
+      end
+    end
+
+    defp rewrite_generated_page_test(igniter, path, integration) do
+      Igniter.create_or_update_file(igniter, path, "", fn source ->
+        content = Rewrite.Source.get(source, :content)
+
+        updated =
+          Regex.replace(
+            ~r/^([ \t]*)assert html_response\(conn, 200\) =~ "Peace of mind from prototype to production"$/m,
+            content,
+            fn _match, indentation ->
+              """
+              #{indentation}response = html_response(conn, 200)
+
+              #{indentation}assert response =~ ~s(data-rust-ui="#{integration}")
+              """
+              |> String.trim_trailing()
+            end,
+            global: false
+          )
 
         Rewrite.Source.update(source, :content, updated)
       end)
