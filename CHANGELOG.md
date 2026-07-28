@@ -2,7 +2,11 @@
 
 ## Unreleased
 
+## 0.1.8 - 2026-07-29
+
 - Add built-in Iced support for Web and native desktop targets.
+- Align the generated framework examples and their static asset delivery.
+- Resize Slint Web clients with the browser viewport.
 
 ## 0.1.7 - 2026-07-28
 
