@@ -1,9 +1,9 @@
 # Rekindle
 
-Rekindle brings Cargo-based Rust UI builds into Elixir and Phoenix projects.
-Mix is the entry point for installation, development, Web packaging, and native
-release artifacts, while Cargo continues to manage Rust dependencies,
-compilation, target directories, and incremental caches.
+Rekindle brings Cargo-based Rust UI builds into Elixir applications. Mix is the
+entry point for installation, development, Web packaging, and native release
+artifacts, while Cargo continues to manage Rust dependencies, compilation,
+target directories, and incremental caches.
 
 GPUI, egui/eframe, and Slint are supported. Each integration can generate a
 browser target compiled to WebAssembly, a native desktop target, or both from a
@@ -13,7 +13,6 @@ shared Rust UI crate.
 
 - Elixir 1.17 or later
 - Rust and Cargo
-- A Phoenix project generator
 - The Rust targets and native system libraries required by the selected UI
   integration
 

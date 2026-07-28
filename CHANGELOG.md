@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.4 - 2026-07-28
 
 - Start one supervised Web development runtime from the first
   `Rekindle.DevServer` request, without a Phoenix endpoint watcher.
