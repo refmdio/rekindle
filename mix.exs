@@ -23,7 +23,7 @@ defmodule Rekindle.MixProject do
 
   def application do
     [
-      extra_applications: [:logger],
+      extra_applications: [:crypto, :logger],
       mod: {Rekindle.Application, []}
     ]
   end
@@ -32,6 +32,7 @@ defmodule Rekindle.MixProject do
     [
       {:file_system, "~> 1.1"},
       {:jason, "~> 1.4"},
+      {:mime, "~> 2.0"},
       {:muontrap, "~> 1.8"},
       {:plug, "~> 1.16"},
       {:igniter, "~> 0.8", optional: true},
