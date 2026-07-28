@@ -44,6 +44,11 @@ defmodule Rekindle.Plugin.Slint do
              %Dependency{
                name: "wasm-bindgen",
                version: "=#{Rekindle.Toolchain.wasm_bindgen_version()}"
+             },
+             %Dependency{
+               name: "web-sys",
+               version: "0.3",
+               features: ["EventTarget", "Window"]
              }
            ]}
         ],
