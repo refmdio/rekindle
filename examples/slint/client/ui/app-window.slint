@@ -1,19 +1,166 @@
-import { Button, VerticalBox } from "std-widgets.slint";
+component Card inherits Rectangle {
+    background: white;
+    border-color: #e2e8f0;
+    border-width: 1px;
+    border-radius: 12px;
+}
 
 export component AppWindow inherits Window {
-    in-out property <int> counter: 42;
-    callback request-increase-value();
+    title: "Rekindle + Slint";
+    min-width: 480px;
+    min-height: 520px;
+    preferred-width: 820px;
+    preferred-height: 600px;
+    max-width: 10000px;
+    max-height: 10000px;
+    background: #f8fafc;
 
-    VerticalBox {
-        Text {
-            text: "Counter: \{root.counter}";
+    in-out property <int> count: 0;
+    callback increment();
+
+    VerticalLayout {
+        x: (root.width - self.width) / 2;
+        width: min(root.width - 48px, 640px);
+        padding-top: 40px;
+        padding-bottom: 40px;
+        spacing: 24px;
+
+        HorizontalLayout {
+            height: 48px;
+            spacing: 12px;
+
+            Rectangle {
+                width: 40px;
+                height: 40px;
+                border-radius: 8px;
+                background: #8b5cf6;
+
+                Text {
+                    text: "R";
+                    color: white;
+                    font-size: 18px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            VerticalLayout {
+                spacing: 2px;
+
+                Text {
+                    text: "Rekindle + Slint";
+                    color: #0f172a;
+                    font-size: 24px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "One Rust client for web and desktop";
+                    color: #64748b;
+                    font-size: 14px;
+                }
+            }
         }
 
-        Button {
-            text: "Increase value";
-            clicked => {
-                root.request-increase-value();
+        Card {
+            height: 176px;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 12px;
+
+                Text {
+                    text: "COUNTER";
+                    color: #64748b;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "Count is \{root.count}";
+                    color: #0f172a;
+                    font-size: 28px;
+                    font-weight: 700;
+                }
+
+                Rectangle {
+                    width: 112px;
+                    height: 44px;
+                    background: #7c3aed;
+                    border-radius: 22px;
+
+                    Text {
+                        text: "Increment";
+                        color: white;
+                        font-size: 14px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        clicked => {
+                            root.increment();
+                        }
+                    }
+                }
             }
+        }
+
+        Card {
+            height: 132px;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 10px;
+
+                Text {
+                    text: "TARGETS";
+                    color: #64748b;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+
+                HorizontalLayout {
+                    Text {
+                        text: "Web";
+                        color: #0f172a;
+                        font-size: 14px;
+                        font-weight: 700;
+                    }
+
+                    Text {
+                        text: "WebAssembly";
+                        color: #64748b;
+                        font-size: 14px;
+                        horizontal-alignment: right;
+                    }
+                }
+
+                HorizontalLayout {
+                    Text {
+                        text: "Desktop";
+                        color: #0f172a;
+                        font-size: 14px;
+                        font-weight: 700;
+                    }
+
+                    Text {
+                        text: "Native executable";
+                        color: #64748b;
+                        font-size: 14px;
+                        horizontal-alignment: right;
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: "Edit client/ui/app-window.slint and save to rebuild";
+            color: #94a3b8;
+            font-size: 12px;
+            horizontal-alignment: center;
         }
     }
 }

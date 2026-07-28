@@ -17,7 +17,7 @@ pub fn start() {
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(|context| Ok(Box::new(client::TemplateApp::new(context)))),
+                Box::new(|context| Ok(Box::new(client::Example::new(context)))),
             )
             .await
             .expect("failed to start the application");
