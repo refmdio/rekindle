@@ -189,6 +189,18 @@ defmodule Rekindle.DevelopmentTest do
     refute File.exists?(Path.dirname(replacement.artifact))
   end
 
+  test "routes build notifications by target", %{root: root} do
+    build = fn target, _options ->
+      {:ok, result(root, target, Atom.to_string(target))}
+    end
+
+    builder = start_builder(root, build, %{desktop: self()})
+    Builder.rebuild(builder, :all)
+
+    assert_receive {Builder, :desktop, {:ok, %Result{target: :desktop}}}
+    refute_receive {Builder, :web, _result}, 50
+  end
+
   test "serves the selected Web generation and reports build errors", %{root: root} do
     generation = publish_web(root, "export default async function init() {}")
     options = Development.init(otp_app: :rekindle_development_test, project_root: root)
@@ -270,13 +282,13 @@ defmodule Rekindle.DevelopmentTest do
     assert_receive {:DOWN, ^monitor, :process, ^task, _reason}
   end
 
-  defp start_builder(root, build) do
+  defp start_builder(root, build, notify \\ nil) do
     start_supervised!(
       {Builder,
        otp_app: :rekindle_development_test,
        project_root: root,
        debounce: 10,
-       notify: self(),
+       notify: notify || self(),
        build: build,
        activate: fn _result -> :ok end}
     )

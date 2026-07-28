@@ -50,7 +50,8 @@ defmodule Rekindle do
           []
         end
 
-      notifications = if Map.has_key?(project.targets, :desktop), do: [desktop], else: []
+      notifications =
+        if Map.has_key?(project.targets, :desktop), do: %{desktop: desktop}, else: %{}
 
       children =
         desktop_children ++

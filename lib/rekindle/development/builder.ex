@@ -258,8 +258,11 @@ defmodule Rekindle.Development.Builder do
 
   defp notify(nil, _target, _result), do: :ok
 
-  defp notify(destinations, target, result) when is_list(destinations) do
-    Enum.each(destinations, &notify(&1, target, result))
+  defp notify(destinations, target, result) when is_map(destinations) do
+    case Map.fetch(destinations, target) do
+      {:ok, destination} -> notify(destination, target, result)
+      :error -> :ok
+    end
   end
 
   defp notify(destination, target, result),
