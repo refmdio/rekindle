@@ -71,9 +71,9 @@ defmodule EguiExample.MixProject do
         "test",
         "rekindle.check"
       ],
-      "assets.setup": ["rekindle.setup"],
-      "assets.build": ["rekindle.build web"],
-      "assets.deploy": ["rekindle.build web --release"]
+      "assets.setup": "rekindle.setup",
+      "assets.build": "rekindle.build web",
+      "assets.deploy": "rekindle.build web --release"
     ]
   end
 end
