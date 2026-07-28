@@ -1,6 +1,10 @@
 defmodule GpuiExampleWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :gpui_example
-  plug Plug.Static, at: "/rekindle", from: {:gpui_example, "priv/static/rekindle"}, gzip: false
+
+  plug Plug.Static,
+    at: "/rekindle",
+    from: {Rekindle.Phoenix, :public_root, [:gpui_example]},
+    gzip: false
 
   # The session will be stored in the cookie and signed,
   # this means its contents can be read but not tampered with.

@@ -1,6 +1,10 @@
 defmodule SlintExampleWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :slint_example
-  plug Plug.Static, at: "/rekindle", from: {:slint_example, "priv/static/rekindle"}, gzip: false
+
+  plug Plug.Static,
+    at: "/rekindle",
+    from: {Rekindle.Phoenix, :public_root, [:slint_example]},
+    gzip: false
 
   # The session will be stored in the cookie and signed,
   # this means its contents can be read but not tampered with.
