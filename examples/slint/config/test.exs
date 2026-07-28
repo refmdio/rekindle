@@ -4,7 +4,7 @@ import Config
 # you can enable the server option below.
 config :slint_example, SlintExampleWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
-  secret_key_base: "i1wJwSVkZjgN4Rmiey0j1CXwHYSYczeAFhKZ878FS5eilJVQwXNS7o/mOSzIi9L0",
+  secret_key_base: "fPFFbyROjF6p4cs9MCKfBrXAHEv/Ql3wuD27IwVHVwdnaWGcwcD/XMpcIQ1juGwv",
   server: false
 
 # In test we don't send emails

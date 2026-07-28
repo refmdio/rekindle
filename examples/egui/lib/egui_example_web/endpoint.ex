@@ -8,7 +8,7 @@ defmodule EguiExampleWeb.Endpoint do
   @session_options [
     store: :cookie,
     key: "_egui_example_key",
-    signing_salt: "w/6q+Mtl",
+    signing_salt: "g0D8Y8wv",
     same_site: "Lax"
   ]
 

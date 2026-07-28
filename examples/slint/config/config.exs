@@ -21,7 +21,7 @@ config :slint_example, SlintExampleWeb.Endpoint,
     layout: false
   ],
   pubsub_server: SlintExample.PubSub,
-  live_view: [signing_salt: "apbSAM3+"]
+  live_view: [signing_salt: "wtN6xumd"]
 
 # Configure LiveView
 config :phoenix_live_view,

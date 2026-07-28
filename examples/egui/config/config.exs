@@ -21,7 +21,7 @@ config :egui_example, EguiExampleWeb.Endpoint,
     layout: false
   ],
   pubsub_server: EguiExample.PubSub,
-  live_view: [signing_salt: "RPOm3ewv"]
+  live_view: [signing_salt: "pQ6GTXZV"]
 
 # Configure LiveView
 config :phoenix_live_view,

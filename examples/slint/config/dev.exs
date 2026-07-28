@@ -13,7 +13,7 @@ config :slint_example, SlintExampleWeb.Endpoint,
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
-  secret_key_base: "0ndKxr0EhVMi6JR62Syospc9wyzEydhU4JJa0Yus0VT56vx2pQG5Nf4F9gVZuZjr",
+  secret_key_base: "+crh5baHDJiH3ahUiYNdrlmkV5lrcj1adMlLTKCvkJ95nK8Hmy6c47NnpChs5GSp",
   watchers: [
     esbuild: {Esbuild, :install_and_run, [:slint_example, ~w(--sourcemap=inline --watch)]},
     tailwind: {Tailwind, :install_and_run, [:slint_example, ~w(--watch)]}

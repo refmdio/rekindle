@@ -8,7 +8,7 @@ defmodule GpuiExampleWeb.Endpoint do
   @session_options [
     store: :cookie,
     key: "_gpui_example_key",
-    signing_salt: "bqsS0gsu",
+    signing_salt: "rkOEqaDv",
     same_site: "Lax"
   ]
 

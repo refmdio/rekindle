@@ -4,7 +4,7 @@ import Config
 # you can enable the server option below.
 config :gpui_example, GpuiExampleWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
-  secret_key_base: "Ro7mYe4HWIvFVPQ+s52XaOvuY5pl+09mdkyCMuhU3prOf529GbD+NT47vxAqdmea",
+  secret_key_base: "lqa7Rmlzgr5p1iCyG9k4792x7mpztKliOjPyD8X453c3thYW/lH6aycX8cbUzM0t",
   server: false
 
 # In test we don't send emails

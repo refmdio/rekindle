@@ -13,7 +13,7 @@ config :egui_example, EguiExampleWeb.Endpoint,
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
-  secret_key_base: "bQPBVLs+kZXWAyy4QycB0ZXOBmD2a37oUFN6X6QTWjLydn887QLofXvjoWXZXfdO",
+  secret_key_base: "GYuaqEw1/8SxcYtD0N0rGGRgHsIBEXWrdlxjRIQ4jqdBtZbHMhAnDZ7WC3D5XU1a",
   watchers: [
     esbuild: {Esbuild, :install_and_run, [:egui_example, ~w(--sourcemap=inline --watch)]},
     tailwind: {Tailwind, :install_and_run, [:egui_example, ~w(--watch)]}

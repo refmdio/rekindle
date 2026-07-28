@@ -21,7 +21,7 @@ config :gpui_example, GpuiExampleWeb.Endpoint,
     layout: false
   ],
   pubsub_server: GpuiExample.PubSub,
-  live_view: [signing_salt: "EMB7itb0"]
+  live_view: [signing_salt: "sCklXXyG"]
 
 # Configure LiveView
 config :phoenix_live_view,

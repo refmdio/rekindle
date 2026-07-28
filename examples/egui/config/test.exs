@@ -4,7 +4,7 @@ import Config
 # you can enable the server option below.
 config :egui_example, EguiExampleWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
-  secret_key_base: "A8o5haiUIAX+K8sJ5niB+WPT1yRoLcrcypyIk0eyX87Qnur6uvxjrMQSNOt6eoz7",
+  secret_key_base: "SKp+19PLrxvs+oeqROwhfZqEidTomYThl0SSkI/2jq3watUzdUkuObgpBotEQjjG",
   server: false
 
 # In test we don't send emails

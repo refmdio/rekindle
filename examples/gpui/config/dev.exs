@@ -13,7 +13,7 @@ config :gpui_example, GpuiExampleWeb.Endpoint,
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
-  secret_key_base: "QcgKq3sjj6cEOUM51cbeOAlsxMgiAO8Nl6Llxki5jQyuo51B4jH8dp9P7xEHPnrn",
+  secret_key_base: "abtFygLpAmpPNj2ONzSRlewoulT/HpuFU8OldWgbeWOk08RuIAQJHOYcv9M+Lcdk",
   watchers: [
     esbuild: {Esbuild, :install_and_run, [:gpui_example, ~w(--sourcemap=inline --watch)]},
     tailwind: {Tailwind, :install_and_run, [:gpui_example, ~w(--watch)]}

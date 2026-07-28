@@ -8,7 +8,7 @@ defmodule SlintExampleWeb.Endpoint do
   @session_options [
     store: :cookie,
     key: "_slint_example_key",
-    signing_salt: "/FSHJZn3",
+    signing_salt: "mYmllppe",
     same_site: "Lax"
   ]
 
