@@ -46,6 +46,17 @@ defmodule Rekindle.Plugin.Cargo do
           profiles: [profile()]
         }
 
+  @doc false
+  @spec valid?(term()) :: boolean()
+  def valid?(%__MODULE__{} = cargo) do
+    dependencies?(cargo.dependencies) and
+      dependency_groups?(cargo.target_dependencies) and
+      dependencies?(cargo.build_dependencies) and
+      profiles?(cargo.profiles)
+  end
+
+  def valid?(_cargo), do: false
+
   @spec render(t(), [Rekindle.Plugin.Spec.target()]) :: String.t()
   def render(%__MODULE__{} = cargo, targets) do
     [
@@ -151,4 +162,37 @@ defmodule Rekindle.Plugin.Cargo do
   defp string_array(values) do
     "[" <> Enum.map_join(values, ", ", &quote_string/1) <> "]"
   end
+
+  defp dependencies?(dependencies) when is_list(dependencies),
+    do:
+      Enum.all?(dependencies, fn
+        %Dependency{features: features} -> is_list(features)
+        _dependency -> false
+      end)
+
+  defp dependencies?(_dependencies), do: false
+
+  defp dependency_groups?(groups) when is_list(groups) do
+    Enum.all?(groups, fn
+      {target, dependencies} ->
+        is_binary(target) and target != "" and dependencies?(dependencies)
+
+      _group ->
+        false
+    end)
+  end
+
+  defp dependency_groups?(_groups), do: false
+
+  defp profiles?(profiles) when is_list(profiles) do
+    Enum.all?(profiles, fn
+      {name, values} when is_binary(name) and name != "" ->
+        Keyword.keyword?(values)
+
+      _profile ->
+        false
+    end)
+  end
+
+  defp profiles?(_profiles), do: false
 end

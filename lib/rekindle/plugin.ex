@@ -92,8 +92,20 @@ defmodule Rekindle.Plugin do
       not (is_binary(spec.dependency) and spec.dependency != "") ->
         {:error, "#{inspect(module)} returned an invalid Cargo dependency"}
 
-      not match?(%Cargo{}, spec.cargo) ->
+      not valid_source?(spec.source) ->
+        {:error, "#{inspect(module)} returned an invalid source root"}
+
+      not valid_files?(spec.files) ->
+        {:error, "#{inspect(module)} returned invalid source files"}
+
+      not valid_entries?(spec.entries) ->
+        {:error, "#{inspect(module)} returned invalid target entries"}
+
+      not Cargo.valid?(spec.cargo) ->
         {:error, "#{inspect(module)} returned invalid Cargo requirements"}
+
+      not (is_binary(spec.toolchain) and spec.toolchain != "") ->
+        {:error, "#{inspect(module)} returned an invalid Rust toolchain"}
 
       not valid_web?(spec.web) ->
         {:error, "#{inspect(module)} returned invalid Web requirements"}
@@ -105,6 +117,32 @@ defmodule Rekindle.Plugin do
 
   defp valid_name?(name),
     do: is_binary(name) and Regex.match?(~r/\A[a-z][a-z0-9_-]*\z/, name)
+
+  defp valid_source?(app) when is_atom(app), do: not is_nil(app)
+
+  defp valid_source?({app, root}) when is_atom(app) and not is_nil(app) and is_binary(root),
+    do: root == "" or valid_path?(root)
+
+  defp valid_source?(_source), do: false
+
+  defp valid_files?(files) when is_map(files) do
+    Enum.all?(files, fn {destination, source} ->
+      valid_path?(destination) and valid_path?(source)
+    end)
+  end
+
+  defp valid_files?(_files), do: false
+
+  defp valid_entries?(%{web: web, desktop: desktop} = entries) when map_size(entries) == 2,
+    do: valid_path?(web) and valid_path?(desktop)
+
+  defp valid_entries?(_entries), do: false
+
+  defp valid_path?(path) when is_binary(path) and path != "" do
+    Path.type(path) == :relative and ".." not in Path.split(path)
+  end
+
+  defp valid_path?(_path), do: false
 
   defp valid_web?(%Spec.Web{graphics: graphics, host: host, style: style}),
     do: graphics in [:webgpu, :webgl2] and is_binary(host) and is_binary(style)
