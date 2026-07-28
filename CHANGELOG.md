@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.7 - 2026-07-28
+
+- Make Phoenix integration optional and support installation into plain Mix
+  projects.
+- Simplify Web and desktop artifact publication while preserving complete
+  outputs during replacement.
+- Run Rekindle setup before asset builds and apply installer defaults when
+  target options are omitted.
+- Validate plugin Cargo dependencies and resolve custom publication paths
+  consistently.
+
 ## 0.1.6 - 2026-07-28
 
 - Replace the fixed framework registry with a public plugin contract.
