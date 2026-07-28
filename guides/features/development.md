@@ -48,6 +48,17 @@ runtime. For a desktop replacement, Rekindle stops the current process before
 starting the replacement. If the replacement exits, Rekindle reports the exit
 and waits for the next successful build.
 
+Phoenix logs the start and completion time of each Rust build. While the first
+Web build is running, the browser shows a loading status; build and graphics
+startup failures are shown in the page without discarding the last successful
+generation.
+
+Before a newer Web generation reloads the page, the runtime dispatches
+`rekindle:before-reload` on `window`. Applications may use this event to save
+serializable development state. It dispatches `rekindle:ready` after startup
+and `rekindle:error` when a build or startup fails. These hooks do not preserve
+state automatically.
+
 Rekindle's supervised development services run only when the Phoenix endpoint
 has code reloading enabled.
 

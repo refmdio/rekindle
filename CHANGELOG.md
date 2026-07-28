@@ -7,6 +7,8 @@
 - Integrate Web builds with `mix assets.build`, simplify generated target
   configuration, and allow the installer to add a target without replacing
   existing Rust UI source.
+- Add concise build timing, browser loading and failure feedback, and Web
+  development lifecycle events.
 
 ## 0.1.2 - 2026-07-28
 

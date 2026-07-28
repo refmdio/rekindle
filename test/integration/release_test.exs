@@ -19,7 +19,9 @@ defmodule Rekindle.ReleaseTest do
 
     assert {_output, 0} = mix(root, tools, ["deps.get"])
 
-    assert {_output, 0} = mix(root, tools, ["assets.deploy"])
+    assert {web_output, 0} = mix(root, tools, ["assets.deploy"])
+    assert web_output =~ ~r/Built Web in \d+(?:ms|\.\d+s)/
+    assert web_output =~ ~r|priv/static/rekindle/web/[0-9a-f]{32}/app\.js|
 
     assert File.read!(tools.order) |> String.split("\n", trim: true) == ["web-release"]
 
@@ -73,7 +75,11 @@ defmodule Rekindle.ReleaseTest do
     assert read_entry(web_entry_path).generation != repeated_entry.generation
     assert File.read!(Path.join(root, "priv/static/sibling.txt")) == "web-sibling"
 
-    assert {_output, 0} = mix(root, tools, ["rekindle.build", "desktop", "--release"])
+    assert {desktop_output, 0} =
+             mix(root, tools, ["rekindle.build", "desktop", "--release"])
+
+    assert desktop_output =~ ~r/Built desktop in \d+(?:ms|\.\d+s)/
+    assert desktop_output =~ "dist/rekindle/desktop/"
     desktop_root = Path.join([root, "dist", "rekindle", "desktop", tools.target])
     desktop_manifest_path = Path.join(desktop_root, "manifest.json")
     desktop_manifest = read_json(desktop_manifest_path)

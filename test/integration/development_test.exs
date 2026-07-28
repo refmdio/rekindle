@@ -87,6 +87,46 @@ defmodule Rekindle.DevelopmentTest do
     refute_receive {:started, 3, _pid}, 30
   end
 
+  test "reports completion before a queued replacement starts", %{root: root} do
+    test = self()
+
+    build = fn target, _options ->
+      send(test, {:started, self()})
+
+      receive do
+        :finish -> {:ok, result(root, target, "generation")}
+      end
+    end
+
+    log =
+      capture_log(fn ->
+        builder = start_builder(root, build)
+        Builder.rebuild(builder, :web)
+        assert_receive {:started, first}
+
+        Builder.rebuild(builder, :web)
+        send(first, :finish)
+        assert_receive {Builder, :web, {:ok, %Result{}}}
+        assert_receive {:started, second}
+
+        send(second, :finish)
+        assert_receive {Builder, :web, {:ok, %Result{}}}
+      end)
+
+    events =
+      log
+      |> String.split("\n")
+      |> Enum.filter(&String.contains?(&1, "Rekindle Web"))
+      |> Enum.map(&Regex.replace(~r/^.*\] /, &1, ""))
+
+    assert [
+             "Building Rekindle Web...",
+             "Built Rekindle Web" <> _first_duration,
+             "Building Rekindle Web...",
+             "Built Rekindle Web" <> _second_duration
+           ] = events
+  end
+
   test "replaces the desktop process and removes its previous output", %{root: root} do
     supervisor =
       start_supervised!(
@@ -170,6 +210,14 @@ defmodule Rekindle.DevelopmentTest do
     assert runtime.status == 200
     assert runtime.resp_body =~ "navigator.gpu"
     assert runtime.resp_body =~ "await module.default();"
+    assert runtime.resp_body =~ ~s(id = "rekindle-status")
+    assert runtime.resp_body =~ ~s(new CustomEvent("rekindle:ready")
+    assert runtime.resp_body =~ ~s(new CustomEvent("rekindle:before-reload")
+    assert runtime.resp_body =~ ~s(new CustomEvent("rekindle:error")
+    assert runtime.resp_body =~ "if (reportedError === identity) return;"
+    assert runtime.resp_body =~ "if (attemptedGeneration === current.generation) return;"
+    assert runtime.resp_body =~ "if (loading || reloading) return;"
+    assert runtime.resp_body =~ "reloading = true;"
 
     {:ok, project} =
       Rekindle.Config.load(:rekindle_development_test, project_root: root)

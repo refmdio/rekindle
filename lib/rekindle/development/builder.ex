@@ -100,9 +100,13 @@ defmodule Rekindle.Development.Builder do
 
       {target, target_state} ->
         Process.demonitor(reference, [:flush])
+        elapsed = elapsed(target_state.running.started_at)
         {target_state, result} = finish_current(state, target, target_state, result)
 
         state = put_target(state, target, target_state)
+
+        report(state.project, target, result, elapsed)
+        notify(state.notify, target, result)
 
         state =
           if target_state.pending? and is_nil(target_state.timer) do
@@ -111,9 +115,6 @@ defmodule Rekindle.Development.Builder do
           else
             state
           end
-
-        report(state.project, target, result)
-        notify(state.notify, target, result)
 
         {:noreply, state}
     end
@@ -126,10 +127,11 @@ defmodule Rekindle.Development.Builder do
 
       {target, target_state} ->
         result = {:error, {:build_process, reason}}
+        elapsed = elapsed(target_state.running.started_at)
         target_state = %{target_state | running: nil}
         state = put_target(state, target, target_state)
 
-        report(state.project, target, result)
+        report(state.project, target, result, elapsed)
         notify(state.notify, target, result)
 
         {:noreply, maybe_start_pending(state, target)}
@@ -182,12 +184,14 @@ defmodule Rekindle.Development.Builder do
 
   defp start_build(state, target, target_state) do
     build = state.build
+    Logger.info("Building Rekindle #{target_label(target)}...")
     task = Task.async(fn -> build.(target, state.build_options) end)
 
     running = %{
       task: task,
       pid: task.pid,
-      reference: task.ref
+      reference: task.ref,
+      started_at: System.monotonic_time()
     }
 
     put_target(state, target, %{target_state | running: running, pending?: false})
@@ -261,20 +265,44 @@ defmodule Rekindle.Development.Builder do
   defp notify(destination, target, result),
     do: send(destination, {__MODULE__, target, result})
 
-  defp report(project, :web, {:ok, _result}) do
+  defp report(project, :web, {:ok, _result}, elapsed) do
     Rekindle.Phoenix.Development.clear_error(project)
+    Logger.info("Built Rekindle Web in #{format_duration(elapsed)}")
   end
 
-  defp report(project, :web, {:error, error}) do
-    Logger.error("Rekindle Web build failed: #{error_message(error)}")
+  defp report(project, :web, {:error, error}, elapsed) do
+    Logger.error(
+      "Rekindle Web build failed after #{format_duration(elapsed)}: #{error_message(error)}"
+    )
+
     Rekindle.Phoenix.Development.put_error(project, error_message(error))
   end
 
-  defp report(_project, :desktop, {:error, error}) do
-    Logger.error("Rekindle desktop build failed: #{error_message(error)}")
+  defp report(_project, :desktop, {:error, error}, elapsed) do
+    Logger.error(
+      "Rekindle desktop build failed after #{format_duration(elapsed)}: #{error_message(error)}"
+    )
   end
 
-  defp report(_project, :desktop, {:ok, _result}), do: :ok
+  defp report(_project, :desktop, {:ok, _result}, elapsed) do
+    Logger.info("Built Rekindle desktop in #{format_duration(elapsed)}")
+  end
+
+  defp elapsed(started_at) do
+    System.monotonic_time()
+    |> Kernel.-(started_at)
+    |> System.convert_time_unit(:native, :millisecond)
+  end
+
+  defp format_duration(milliseconds) when milliseconds < 1_000, do: "#{milliseconds}ms"
+
+  defp format_duration(milliseconds) do
+    seconds = milliseconds / 1_000
+    "#{Float.round(seconds, 1)}s"
+  end
+
+  defp target_label(:web), do: "Web"
+  defp target_label(:desktop), do: "desktop"
 
   defp error_message(error) do
     if is_exception(error), do: Exception.message(error), else: inspect(error)

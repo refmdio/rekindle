@@ -29,10 +29,13 @@ defmodule Mix.Tasks.Rekindle.Build do
     target = parse_target(positional)
     profile = if options[:release], do: :release, else: :dev
     otp_app = Mix.Project.config()[:app]
+    started_at = System.monotonic_time()
 
     case Rekindle.build(target, otp_app: otp_app, project_root: File.cwd!(), profile: profile) do
       {:ok, result} ->
-        Mix.shell().info("Built #{target} artifacts: #{inspect(result)}")
+        Mix.shell().info(
+          "Built #{target_label(target)} in #{format_duration(started_at)}\n  #{display_path(result.artifact)}"
+        )
 
       {:error, error} ->
         print_diagnostics(error)
@@ -86,4 +89,22 @@ defmodule Mix.Tasks.Rekindle.Build do
   defp parse_target(["web"]), do: :web
   defp parse_target(["desktop"]), do: :desktop
   defp parse_target(_), do: Mix.raise("usage: mix rekindle.build web|desktop [--release]")
+
+  defp format_duration(started_at) do
+    milliseconds =
+      System.monotonic_time()
+      |> Kernel.-(started_at)
+      |> System.convert_time_unit(:native, :millisecond)
+
+    if milliseconds < 1_000 do
+      "#{milliseconds}ms"
+    else
+      "#{Float.round(milliseconds / 1_000, 1)}s"
+    end
+  end
+
+  defp display_path(path), do: Path.relative_to_cwd(path)
+
+  defp target_label(:web), do: "Web"
+  defp target_label(:desktop), do: "desktop"
 end
