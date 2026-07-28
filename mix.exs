@@ -104,7 +104,8 @@ defmodule Rekindle.MixProject do
     [
       licenses: ["MIT"],
       links: %{"Documentation" => @docs_url, "GitHub" => @source_url},
-      files: ~w[lib priv/templates guides .formatter.exs mix.exs README.md CHANGELOG.md LICENSE]
+      files:
+        ~w[lib priv/templates priv/runtime guides .formatter.exs mix.exs README.md CHANGELOG.md LICENSE]
     ]
   end
 end
