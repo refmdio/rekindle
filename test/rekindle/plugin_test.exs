@@ -206,7 +206,6 @@ defmodule Rekindle.PluginTest do
       assert web.metadata.package == package
       assert web.metadata.rust_target == "wasm32-unknown-unknown"
       assert File.regular?(web.artifact)
-      assert File.regular?(web.metadata.manifest)
 
       assert {:ok, desktop} = Rekindle.build(:desktop, options)
       assert desktop.metadata.package == package

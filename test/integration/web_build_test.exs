@@ -40,12 +40,6 @@ defmodule Rekindle.WebBuildTest do
     assert File.read!(Path.join(generation_root, "app_bg.wasm")) == "wasm-first"
     assert File.read!(Path.join(generation_root, "images/icon.txt")) == "icon"
 
-    assert read_json(first.metadata.manifest) == %{
-             "version" => 1,
-             "generation" => generation,
-             "entry" => "app.js"
-           }
-
     assert read_json(Path.join(root, ".rekindle/dev/web-current.json")) == %{
              "generation" => generation
            }
@@ -91,9 +85,13 @@ defmodule Rekindle.WebBuildTest do
     assert {:ok, third} = build(root, tools, profile: :release)
 
     assert release_generations(namespace) ==
-             MapSet.new([second.metadata.generation, third.metadata.generation])
+             MapSet.new([
+               first.metadata.generation,
+               second.metadata.generation,
+               third.metadata.generation
+             ])
 
-    refute File.exists?(first.artifact)
+    assert File.regular?(first.artifact)
     assert File.regular?(second.artifact)
     assert File.regular?(third.artifact)
   end
@@ -124,19 +122,6 @@ defmodule Rekindle.WebBuildTest do
     assert {:error, %Rekindle.Web.Error{kind: :missing_entry}} = build(root, tools)
     assert File.read!(selector) == selected_contents
     assert File.regular?(selected.artifact)
-  end
-
-  test "serves ordinary generation files but rejects escaping paths", %{root: root} do
-    tools = fake_tools(root, "first")
-    assert {:ok, result} = build(root, tools)
-    root = Path.dirname(result.artifact)
-    manifest = read_json(result.metadata.manifest)
-
-    assert {:ok, "wasm-first"} =
-             Rekindle.Web.Manifest.read_member(root, manifest, "app_bg.wasm")
-
-    assert {:error, %Rekindle.Web.Error{kind: :invalid_path}} =
-             Rekindle.Web.Manifest.read_member(root, manifest, "../outside")
   end
 
   test "rejects a public asset that collides with generated output", %{root: root} do

@@ -23,8 +23,13 @@ defmodule Rekindle.Development.Cleanup do
   end
 
   @spec discard(Rekindle.Config.t(), Rekindle.Build.Result.t()) :: :ok
-  def discard(project, %{target: :web, metadata: %{generation: generation, manifest: manifest}}) do
-    if selected_web(project.root) != generation, do: File.rm_rf(Path.dirname(manifest))
+  def discard(project, %{target: :web, artifact: artifact, metadata: %{generation: generation}}) do
+    directory = Path.dirname(artifact)
+    root = Path.join([project.root, ".rekindle", "dev", "web"])
+
+    if selected_web(project.root) != generation and inside?(directory, root),
+      do: File.rm_rf(directory)
+
     prune_web(project.root, selected_web(project.root))
     :ok
   end

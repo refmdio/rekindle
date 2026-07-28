@@ -39,7 +39,7 @@ The Mix tasks and Elixir API use the same build pipeline:
   )
 
 result.artifact
-result.metadata.manifest
+result.metadata.generation
 ```
 
 `Rekindle.build/2` returns typed errors for configuration, Cargo, toolchain, and

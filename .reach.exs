@@ -21,8 +21,7 @@ application = [
   "Rekindle.Development.Watcher",
   "Rekindle.Doctor",
   "Rekindle.Setup",
-  "Rekindle.Web.Builder",
-  "Rekindle.Web.Release"
+  "Rekindle.Web.Builder"
 ]
 
 service = [
@@ -44,8 +43,7 @@ service = [
   "Rekindle.Priv",
   "Rekindle.Publication",
   "Rekindle.Toolchain",
-  "Rekindle.Toolchain.Process",
-  "Rekindle.Web.Manifest"
+  "Rekindle.Toolchain.Process"
 ]
 
 model = [

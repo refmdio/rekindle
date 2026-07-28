@@ -4,7 +4,7 @@ defmodule Rekindle.Web.Builder do
   alias Rekindle.Build.Result
   alias Rekindle.Publication
   alias Rekindle.Toolchain.Process
-  alias Rekindle.Web.{Error, Manifest}
+  alias Rekindle.Web.Error
 
   @entry "app.js"
 
@@ -12,7 +12,7 @@ defmodule Rekindle.Web.Builder do
           {:ok, Result.t()}
           | {:error, Rekindle.Cargo.Error.t() | Rekindle.Toolchain.Error.t() | Error.t()}
   def build(project, target, profile, options) do
-    with {:ok, temporary} <- temporary_directory(project) do
+    with {:ok, temporary} <- temporary_directory(project, profile) do
       try do
         build(project, target, profile, options, temporary)
       after
@@ -22,6 +22,8 @@ defmodule Rekindle.Web.Builder do
   end
 
   defp build(project, target, profile, options, temporary) do
+    generation = generation()
+
     with {:ok, cargo} <-
            Rekindle.Cargo.build(project, target, profile, cargo_options(options)),
          {:ok, wasm_bindgen} <-
@@ -31,16 +33,14 @@ defmodule Rekindle.Web.Builder do
            ),
          :ok <- bindgen(wasm_bindgen, cargo.artifact, temporary, options),
          :ok <- copy_public(project.client_root, temporary),
-         {:ok, manifest} <- Manifest.create(temporary, @entry),
-         :ok <- write_manifest(temporary, manifest),
-         {:ok, generation_root} <- publish(project, profile, temporary, manifest) do
+         :ok <- ensure_entry(temporary),
+         {:ok, generation_root} <- publish(project, profile, temporary, generation) do
       result = %Result{
         target: :web,
         profile: profile,
         artifact: Path.join(generation_root, @entry),
         metadata: %{
-          generation: manifest["generation"],
-          manifest: Path.join(generation_root, "manifest.json"),
+          generation: generation,
           package: cargo.package,
           binary: cargo.binary,
           rust_target: cargo.target,
@@ -55,20 +55,20 @@ defmodule Rekindle.Web.Builder do
 
   @doc false
   @spec activate(Rekindle.Config.t(), Result.t()) :: :ok | {:error, Error.t()}
-  def activate(project, %Result{target: :web, profile: profile, metadata: metadata}) do
-    root = Path.join([state_root(project, profile), "web", metadata.generation])
-    previous = selected_generation(project, profile)
+  def activate(
+        project,
+        %Result{target: :web, profile: :dev, artifact: artifact, metadata: metadata}
+      ) do
+    root = Path.join([state_root(project, :dev), "web", metadata.generation])
+    expected = Path.join(root, @entry)
+    previous = selected_generation(project)
 
-    with {:ok, manifest} <- Manifest.read(root),
-         true <- manifest["generation"] == metadata.generation,
-         :ok <- Manifest.validate(root, manifest),
-         :ok <- select(project, profile, manifest) do
-      if profile == :dev,
-        do: Rekindle.Development.Cleanup.web(project, metadata.generation, previous)
-
+    with true <- artifact == expected and File.regular?(expected),
+         :ok <- select_development(project, metadata.generation) do
+      Rekindle.Development.Cleanup.web(project, metadata.generation, previous)
       :ok
     else
-      false -> error(:invalid_manifest, "Web generation does not match its manifest")
+      false -> error(:missing_entry, "Web generation entry is missing")
       {:error, %Error{} = error} -> {:error, error}
     end
   end
@@ -154,18 +154,17 @@ defmodule Rekindle.Web.Builder do
     end
   end
 
-  defp write_manifest(root, manifest) do
-    path = Path.join(root, "manifest.json")
-
-    case File.write(path, Jason.encode!(manifest)) do
-      :ok -> :ok
-      {:error, reason} -> file_error(:manifest_write, path, reason)
+  defp ensure_entry(root) do
+    if File.regular?(Path.join(root, @entry)) do
+      :ok
+    else
+      error(:missing_entry, "wasm-bindgen did not produce #{@entry}")
     end
   end
 
-  defp publish(project, profile, temporary, manifest) do
-    parent = Path.join([state_root(project, profile), "web"])
-    destination = Path.join(parent, manifest["generation"])
+  defp publish(project, profile, temporary, generation) do
+    parent = generation_parent(project, profile)
+    destination = Path.join(parent, generation)
 
     with :ok <- File.mkdir_p(parent),
          :ok <- File.rename(temporary, destination) do
@@ -175,10 +174,10 @@ defmodule Rekindle.Web.Builder do
     end
   end
 
-  defp select(project, profile, manifest) do
-    root = state_root(project, profile)
+  defp select_development(project, generation) do
+    root = state_root(project, :dev)
     destination = Path.join(root, "web-current.json")
-    selector = Jason.encode!(%{"generation" => manifest["generation"]})
+    selector = Jason.encode!(%{"generation" => generation})
 
     with :ok <- File.mkdir_p(root),
          {:ok, temporary} <- Publication.temporary_file(root, ".tmp-web-current-") do
@@ -197,13 +196,38 @@ defmodule Rekindle.Web.Builder do
     end
   end
 
-  defp finish(project, %Result{profile: :release, metadata: metadata} = result, _options) do
-    source = Path.dirname(metadata.manifest)
+  defp select_release(project, generation) do
+    namespace = Path.join(project.public_dir, "rekindle")
+    destination = Path.join(namespace, "entry.js")
+    module = Jason.encode!("./web/#{generation}/#{@entry}")
 
-    try do
-      Rekindle.Web.Release.publish(project, result)
-    after
-      File.rm_rf(source)
+    selector = """
+    // Rekindle generation: #{generation}
+    import init from #{module};
+    await init();
+    """
+
+    with :ok <- File.mkdir_p(namespace),
+         {:ok, temporary} <- Publication.temporary_file(namespace, ".tmp-entry-") do
+      try do
+        with :ok <- File.write(temporary, selector),
+             :ok <- File.rename(temporary, destination) do
+          :ok
+        else
+          {:error, reason} -> file_error(:selector_write, destination, reason)
+        end
+      after
+        File.rm(temporary)
+      end
+    else
+      {:error, reason} -> file_error(:selector_write, destination, reason)
+    end
+  end
+
+  defp finish(project, %Result{profile: :release, metadata: metadata} = result, _options) do
+    case select_release(project, metadata.generation) do
+      :ok -> {:ok, result}
+      {:error, %Error{} = error} -> {:error, error}
     end
   end
 
@@ -218,11 +242,15 @@ defmodule Rekindle.Web.Builder do
     end
   end
 
-  defp temporary_directory(project) do
-    parent = Path.join([project.root, ".rekindle", "tmp", "web"])
+  defp temporary_directory(project, profile) do
+    parent =
+      case profile do
+        :dev -> Path.join([project.root, ".rekindle", "tmp", "web"])
+        :release -> generation_parent(project, :release)
+      end
 
     with :ok <- File.mkdir_p(parent) do
-      case Publication.temporary_directory(parent, "build-") do
+      case Publication.temporary_directory(parent, ".tmp-web-") do
         {:ok, path} -> {:ok, path}
         {:error, reason} -> file_error(:mkdir, parent, reason)
       end
@@ -232,10 +260,15 @@ defmodule Rekindle.Web.Builder do
   end
 
   defp state_root(project, :dev), do: Path.join([project.root, ".rekindle", "dev"])
-  defp state_root(project, :release), do: Path.join([project.root, ".rekindle", "release"])
 
-  defp selected_generation(project, profile) do
-    path = Path.join(state_root(project, profile), "web-current.json")
+  defp generation_parent(project, :dev),
+    do: Path.join([state_root(project, :dev), "web"])
+
+  defp generation_parent(project, :release),
+    do: Path.join([project.public_dir, "rekindle", "web"])
+
+  defp selected_generation(project) do
+    path = Path.join(state_root(project, :dev), "web-current.json")
 
     with {:ok, contents} <- File.read(path),
          {:ok, %{"generation" => generation}} <- Jason.decode(contents),
@@ -244,6 +277,12 @@ defmodule Rekindle.Web.Builder do
     else
       _error -> nil
     end
+  end
+
+  defp generation do
+    16
+    |> :crypto.strong_rand_bytes()
+    |> Base.encode16(case: :lower)
   end
 
   defp cargo_options(options),

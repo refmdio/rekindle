@@ -4,8 +4,9 @@ defmodule Rekindle.Build.Result do
 
   `artifact` is the executable or Web entry selected by the completed build.
   Release builds return the published artifact path. Metadata includes the
-  manifest, Cargo package and binary, Rust target, target directory, compiler
-  diagnostics, and the Web generation when available.
+  Cargo package and binary, Rust target, target directory, compiler diagnostics,
+  and the Web generation when available. Desktop builds also include their
+  packaging manifest.
   """
 
   @enforce_keys [:target, :profile, :artifact]

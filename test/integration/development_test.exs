@@ -379,10 +379,12 @@ defmodule Rekindle.DevelopmentTest do
     File.mkdir_p!(temporary)
     File.write!(Path.join(temporary, "app.js"), source)
     File.write!(Path.join(temporary, "app_bg.wasm"), <<0, 97, 115, 109>>)
-    {:ok, manifest} = Rekindle.Web.Manifest.create(temporary, "app.js")
-    File.write!(Path.join(temporary, "manifest.json"), Jason.encode!(manifest))
 
-    generation = manifest["generation"]
+    generation =
+      16
+      |> :crypto.strong_rand_bytes()
+      |> Base.encode16(case: :lower)
+
     destination = Path.join([root, ".rekindle", "dev", "web", generation])
     File.mkdir_p!(Path.dirname(destination))
     File.rename!(temporary, destination)

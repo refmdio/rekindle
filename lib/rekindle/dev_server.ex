@@ -20,8 +20,8 @@ defmodule Rekindle.DevServer do
   alias Rekindle.Config
   alias Rekindle.Development
   alias Rekindle.Development.State
-  alias Rekindle.Web.Manifest
 
+  @entry "app.js"
   @prefix ["__rekindle"]
   @generation ~r/\A[0-9a-f]{32}\z/
 
@@ -88,9 +88,8 @@ defmodule Rekindle.DevServer do
     with true <- Regex.match?(@generation, generation),
          true <- safe_member?(requested),
          {:ok, project} <- project(options),
-         {:ok, manifest} <- manifest(project, generation),
          root = Path.join([project.root, ".rekindle", "dev", "web", generation]),
-         {:ok, contents} <- Manifest.read_member(root, manifest, requested) do
+         {:ok, contents} <- File.read(Path.join(root, requested)) do
       conn
       |> put_resp_header("cache-control", "public, max-age=31536000, immutable")
       |> put_asset_content_type(requested)
@@ -139,19 +138,9 @@ defmodule Rekindle.DevServer do
     with {:ok, contents} <- File.read(selector_path),
          {:ok, %{"generation" => generation}} <- Jason.decode(contents),
          true <- Regex.match?(@generation, generation),
-         {:ok, manifest} <- manifest(project, generation) do
-      {:ok, %{generation: generation, entry: manifest["entry"]}}
-    end
-  end
-
-  defp manifest(project, generation) do
-    root = Path.join([project.root, ".rekindle", "dev", "web", generation])
-
-    with {:ok, %{"generation" => ^generation, "entry" => entry} = manifest} <-
-           Manifest.read(root),
-         true <- safe_member?(entry),
-         :ok <- Manifest.validate(root, manifest) do
-      {:ok, manifest}
+         true <-
+           File.regular?(Path.join([project.root, ".rekindle", "dev", "web", generation, @entry])) do
+      {:ok, %{generation: generation, entry: @entry}}
     end
   end
 

@@ -37,8 +37,8 @@ static directory.
 The entry module imports and starts the selected complete generation. It is
 replaced only after that generation has been published. The installer adds a
 static endpoint at `/rekindle`, appends development building to `assets.build`,
-and prepends the release build to `assets.deploy` before `phx.digest`. The
-current and immediately previous generation are retained. Phoenix may add
+and prepends the release build to `assets.deploy` before `phx.digest`. Published
+generations remain available until the host removes them. Phoenix may add
 digested and compressed derivatives to the published files.
 
 ## Browser requirements

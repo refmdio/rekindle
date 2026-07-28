@@ -28,13 +28,9 @@ defmodule Rekindle.ReleaseTest do
     web_root = Path.join(root, "priv/static/rekindle")
     web_entry_path = Path.join(web_root, "entry.js")
     web_entry = read_entry(web_entry_path)
-    web_generation_root = Path.join([web_root, "web", web_entry.generation])
-    web_manifest_path = Path.join(web_generation_root, "manifest.json")
-    web_manifest = read_json(web_manifest_path)
 
     assert web_entry.module == "./web/#{web_entry.generation}/app.js"
     assert File.regular?(Path.join(web_root, String.trim_leading(web_entry.module, "./")))
-    assert :ok = Rekindle.Web.Manifest.validate(web_generation_root, web_manifest)
 
     digest_manifest = read_json(Path.join(root, "priv/static/cache_manifest.json"))
     digested_entry = digest_manifest["latest"]["rekindle/entry.js"]
