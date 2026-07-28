@@ -12,7 +12,8 @@ if Code.ensure_loaded?(Igniter) do
         )
 
     The regular Rekindle installer accepts the built-in `gpui`, `egui`, and
-    `slint` aliases.
+    `slint` aliases. When it finds a Phoenix endpoint, it also installs the Web
+    development and static delivery integration.
     """
 
     alias Igniter.Code.{Common, Function}
@@ -27,7 +28,6 @@ if Code.ensure_loaded?(Igniter) do
     @spec run(Igniter.t(), keyword()) :: Igniter.t()
     def run(igniter, options) do
       app = Application.app_name(igniter)
-      {igniter, endpoint} = Igniter.Libs.Phoenix.select_endpoint(igniter)
       cargo_exists? = Igniter.exists?(igniter, "client/Cargo.toml")
 
       igniter =
@@ -35,22 +35,41 @@ if Code.ensure_loaded?(Igniter) do
           do: Igniter.include_existing_file(igniter, "client/Cargo.toml"),
           else: igniter
 
-      with :ok <- endpoint_required(endpoint),
-           {:ok, requested} <- requested_selection(options),
+      with {:ok, requested} <- requested_selection(options),
            {:ok, existing} <- existing_selection(igniter, app),
            {:ok, selection, mode} <-
              select(requested, existing, cargo_exists?),
            {:ok, mode} <- validate_generated_paths(igniter, selection, mode),
-           {:ok, igniter, phoenix} <-
-             PhoenixInstall.prepare(igniter, app, endpoint, selection) do
+           {igniter, endpoint} <- select_phoenix_endpoint(igniter, selection),
+           {:ok, igniter, phoenix} <- prepare_phoenix(igniter, app, endpoint, selection) do
         install(igniter, app, endpoint, selection, mode, phoenix)
       else
         {:error, message} -> Igniter.add_issue(igniter, message)
       end
     end
 
-    defp endpoint_required(endpoint) when is_atom(endpoint) and not is_nil(endpoint), do: :ok
-    defp endpoint_required(_endpoint), do: {:error, "Rekindle requires a Phoenix endpoint"}
+    defp select_phoenix_endpoint(igniter, %{targets: targets}) do
+      if :web in targets,
+        do: Igniter.Libs.Phoenix.select_endpoint(igniter),
+        else: {igniter, nil}
+    end
+
+    defp prepare_phoenix(igniter, app, endpoint, selection)
+         when is_atom(endpoint) and not is_nil(endpoint),
+         do: PhoenixInstall.prepare(igniter, app, endpoint, selection)
+
+    defp prepare_phoenix(igniter, _app, _endpoint, %{targets: targets}) do
+      igniter =
+        if :web in targets do
+          Igniter.add_warning(igniter, """
+          No Phoenix endpoint was found. Mount Rekindle.DevServer in the development HTTP host and serve the configured public directory in production.
+          """)
+        else
+          igniter
+        end
+
+      {:ok, igniter, nil}
+    end
 
     defp requested_selection(options) do
       with {:ok, plugin} <- requested_plugin(options[:plugin]),
@@ -198,27 +217,14 @@ if Code.ensure_loaded?(Igniter) do
       igniter
       |> maybe_generate_client(selection, mode)
       |> configure(app, selection)
-      |> PhoenixInstall.install(app, endpoint, selection, phoenix)
       |> update_setup_aliases()
-      |> maybe_add_web_alias(selection.targets)
       |> TaskAliases.add_alias(:precommit, ["rekindle.check"], if_exists: :append)
       |> update_ignores(selection)
+      |> PhoenixInstall.install(app, endpoint, selection, phoenix)
     end
 
     defp update_setup_aliases(igniter) do
-      igniter
-      |> TaskAliases.modify_existing_alias(:setup, fn zipper ->
-        with {:ok, zipper} <-
-               Igniter.Code.List.remove_from_list(
-                 zipper,
-                 &Igniter.Code.Common.nodes_equal?(&1, "rekindle.setup")
-               ),
-             {:ok, zipper} <-
-               Igniter.Code.List.append_new_to_list(zipper, "assets.setup") do
-          {:ok, zipper}
-        end
-      end)
-      |> TaskAliases.add_alias(:"assets.setup", ["rekindle.setup"], if_exists: :append)
+      TaskAliases.add_alias(igniter, :setup, ["rekindle.setup"], if_exists: :append)
     end
 
     defp maybe_generate_client(igniter, _selection, :existing), do: igniter
@@ -260,20 +266,6 @@ if Code.ensure_loaded?(Igniter) do
         [Rekindle, :targets],
         targets
       )
-    end
-
-    defp maybe_add_web_alias(igniter, targets) do
-      if :web in targets do
-        igniter
-        |> TaskAliases.add_alias(:"assets.build", ["rekindle.build web"], if_exists: :append)
-        |> TaskAliases.add_alias(
-          :"assets.deploy",
-          ["rekindle.build web --release"],
-          if_exists: :prepend
-        )
-      else
-        igniter
-      end
     end
 
     defp update_ignores(igniter, selection) do

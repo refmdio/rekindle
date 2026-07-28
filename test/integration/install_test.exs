@@ -54,8 +54,8 @@ defmodule Rekindle.InstallTest do
     refute page_test =~ "Peace of mind from prototype to production"
 
     mix = content(installed, "mix.exs")
-    assert mix =~ ~s(setup: ["deps.get", "assets.setup", "assets.build"])
-    assert mix =~ ~s("assets.setup": ["existing.setup", "rekindle.setup"])
+    assert mix =~ ~s(setup: ["deps.get", "assets.setup", "assets.build", "rekindle.setup"])
+    assert mix =~ ~s("assets.setup": ["existing.setup"])
     assert mix =~ ~s("assets.build": ["existing.build", "rekindle.build web"])
     assert mix =~ ~s(precommit: ["existing.check", "rekindle.check"])
     assert index(mix, "rekindle.build web --release") < index(mix, "phx.digest")
@@ -264,7 +264,7 @@ defmodule Rekindle.InstallTest do
     end
   end
 
-  test "requires a Phoenix endpoint before changing the project" do
+  test "installs the core without a Phoenix endpoint" do
     original =
       project()
       |> then(fn igniter ->
@@ -280,9 +280,17 @@ defmodule Rekindle.InstallTest do
         }
       end)
 
-    rejected = install(original)
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "requires a Phoenix endpoint"))
-    assert changed_contents(rejected) == changed_contents(original)
+    installed = install(original)
+
+    assert installed.issues == []
+    assert Enum.any?(installed.warnings, &String.contains?(&1, "No Phoenix endpoint was found"))
+    assert content(installed, "client/Cargo.toml") =~ "gpui"
+    assert content(installed, "config/config.exs") =~ "plugin: Rekindle.Plugin.GPUI"
+
+    mix = content(installed, "mix.exs")
+    assert mix =~ "rekindle.setup"
+    assert mix =~ "rekindle.check"
+    refute mix =~ "rekindle.build web"
   end
 
   test "rejects invalid existing Rekindle configuration" do

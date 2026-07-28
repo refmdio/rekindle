@@ -4,6 +4,7 @@ if Code.ensure_loaded?(Igniter) do
 
     alias Igniter.Code.{Common, Function}
     alias Igniter.Project.Module, as: ProjectModule
+    alias Igniter.Project.TaskAliases
 
     @type prepared :: %{
             layout_path: String.t(),
@@ -30,6 +31,21 @@ if Code.ensure_loaded?(Igniter) do
       |> install_endpoint(app, endpoint)
       |> install_layout(prepared)
       |> install_generated_page_test(prepared.layout_path, selection.plugin)
+      |> install_build_aliases(selection.targets)
+    end
+
+    defp install_build_aliases(igniter, targets) do
+      if :web in targets do
+        igniter
+        |> TaskAliases.add_alias(:"assets.build", ["rekindle.build web"], if_exists: :append)
+        |> TaskAliases.add_alias(
+          :"assets.deploy",
+          ["rekindle.build web --release"],
+          if_exists: :prepend
+        )
+      else
+        igniter
+      end
     end
 
     defp prepare_layout(igniter, endpoint, plugin) do
