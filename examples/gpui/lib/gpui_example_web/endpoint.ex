@@ -8,7 +8,7 @@ defmodule GpuiExampleWeb.Endpoint do
   @session_options [
     store: :cookie,
     key: "_gpui_example_key",
-    signing_salt: "PwWB1QMz",
+    signing_salt: "bqsS0gsu",
     same_site: "Lax"
   ]
 
@@ -36,6 +36,10 @@ defmodule GpuiExampleWeb.Endpoint do
     plug Phoenix.CodeReloader
     plug Rekindle.DevServer, otp_app: :gpui_example
   end
+
+  plug Phoenix.LiveDashboard.RequestLogger,
+    param_key: "request_logger",
+    cookie_key: "request_logger"
 
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]

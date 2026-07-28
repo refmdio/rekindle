@@ -4,8 +4,14 @@ import Config
 # you can enable the server option below.
 config :egui_example, EguiExampleWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
-  secret_key_base: "UYJiKwbc+Po8nJ6kZsB+2l/78bYAWseb1cwR+CtgXfNMHUuijAnt8A5Z1Axk9VaN",
+  secret_key_base: "A8o5haiUIAX+K8sJ5niB+WPT1yRoLcrcypyIk0eyX87Qnur6uvxjrMQSNOt6eoz7",
   server: false
+
+# In test we don't send emails
+config :egui_example, EguiExample.Mailer, adapter: Swoosh.Adapters.Test
+
+# Disable swoosh api client as it is only required for production adapters
+config :swoosh, :api_client, false
 
 # Print only warnings and errors during test
 config :logger, level: :warning

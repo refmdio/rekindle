@@ -47,8 +47,28 @@ defmodule EguiExample.MixProject do
       {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:phoenix_live_view, "~> 1.2.0"},
       {:lazy_html, ">= 0.1.0", only: :test},
+      {:phoenix_live_dashboard, "~> 0.8.3"},
+      {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
+      {:tailwind, "~> 0.5", runtime: Mix.env() == :dev},
+      {:heroicons,
+       github: "tailwindlabs/heroicons",
+       tag: "v2.2.0",
+       sparse: "optimized",
+       app: false,
+       compile: false,
+       depth: 1},
+      {:daisyui,
+       github: "saadeghi/daisyui",
+       tag: "v5.5.20",
+       sparse: "packages/bundle",
+       app: false,
+       compile: false,
+       depth: 1},
+      {:swoosh, "~> 1.16"},
+      {:req, "~> 0.5"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
+      {:gettext, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"}
@@ -63,17 +83,31 @@ defmodule EguiExample.MixProject do
   # See the documentation for `Mix` for more info on aliases.
   defp aliases do
     [
-      setup: ["deps.get", "assets.setup"],
+      setup: ["deps.get", "assets.setup", "assets.build"],
+      "assets.setup": [
+        "tailwind.install --if-missing",
+        "esbuild.install --if-missing",
+        "rekindle.setup"
+      ],
+      "assets.build": [
+        "compile",
+        "tailwind egui_example",
+        "esbuild egui_example",
+        "rekindle.build web"
+      ],
+      "assets.deploy": [
+        "rekindle.build web --release",
+        "tailwind egui_example --minify",
+        "esbuild egui_example --minify",
+        "phx.digest"
+      ],
       precommit: [
         "compile --warnings-as-errors",
         "deps.unlock --unused",
         "format",
         "test",
         "rekindle.check"
-      ],
-      "assets.setup": "rekindle.setup",
-      "assets.build": "rekindle.build web",
-      "assets.deploy": "rekindle.build web --release"
+      ]
     ]
   end
 end

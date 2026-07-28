@@ -4,8 +4,14 @@ import Config
 # you can enable the server option below.
 config :gpui_example, GpuiExampleWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
-  secret_key_base: "+w5tp7re6GlLRZd5I/jdIlsDC8wRpx4/MzJNcUSD5Q6rWTzn4AL49vApvvVEuMan",
+  secret_key_base: "Ro7mYe4HWIvFVPQ+s52XaOvuY5pl+09mdkyCMuhU3prOf529GbD+NT47vxAqdmea",
   server: false
+
+# In test we don't send emails
+config :gpui_example, GpuiExample.Mailer, adapter: Swoosh.Adapters.Test
+
+# Disable swoosh api client as it is only required for production adapters
+config :swoosh, :api_client, false
 
 # Print only warnings and errors during test
 config :logger, level: :warning

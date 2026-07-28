@@ -27,6 +27,7 @@ defmodule SlintExampleWeb.CoreComponents do
 
   """
   use Phoenix.Component
+  use Gettext, backend: SlintExampleWeb.Gettext
 
   alias Phoenix.LiveView.JS
 
@@ -60,7 +61,7 @@ defmodule SlintExampleWeb.CoreComponents do
     <div
       :if={msg = render_slot(@inner_block) || Phoenix.Flash.get(@flash, @kind)}
       id={@id}
-      data-flash
+      phx-click={JS.push("lv:clear-flash", value: %{key: @kind}) |> hide("##{@id}")}
       role="alert"
       class="toast toast-top toast-end z-50"
       {@rest}
@@ -77,7 +78,7 @@ defmodule SlintExampleWeb.CoreComponents do
           <p>{msg}</p>
         </div>
         <div class="flex-1" />
-        <button type="button" class="group self-start cursor-pointer" aria-label="close">
+        <button type="button" class="group self-start cursor-pointer" aria-label={gettext("close")}>
           <.icon name="hero-x-mark" class="size-5 opacity-40 group-hover:opacity-70" />
         </button>
       </div>
@@ -371,7 +372,7 @@ defmodule SlintExampleWeb.CoreComponents do
         <tr>
           <th :for={col <- @col}>{col[:label]}</th>
           <th :if={@action != []}>
-            <span class="sr-only">Actions</span>
+            <span class="sr-only">{gettext("Actions")}</span>
           </th>
         </tr>
       </thead>
@@ -478,18 +479,21 @@ defmodule SlintExampleWeb.CoreComponents do
   Translates an error message using gettext.
   """
   def translate_error({msg, opts}) do
-    # You can make use of gettext to translate error messages by
-    # uncommenting and adjusting the following code:
-
-    # if count = opts[:count] do
-    #   Gettext.dngettext(SlintExampleWeb.Gettext, "errors", msg, msg, count, opts)
-    # else
-    #   Gettext.dgettext(SlintExampleWeb.Gettext, "errors", msg, opts)
-    # end
-
-    Enum.reduce(opts, msg, fn {key, value}, acc ->
-      String.replace(acc, "%{#{key}}", fn _ -> to_string(value) end)
-    end)
+    # When using gettext, we typically pass the strings we want
+    # to translate as a static argument:
+    #
+    #     # Translate the number of files with plural rules
+    #     dngettext("errors", "1 file", "%{count} files", count)
+    #
+    # However the error messages in our forms and APIs are generated
+    # dynamically, so we need to translate them by calling Gettext
+    # with our gettext backend as first argument. Translations are
+    # available in the errors.po file (as we use the "errors" domain).
+    if count = opts[:count] do
+      Gettext.dngettext(SlintExampleWeb.Gettext, "errors", msg, msg, count, opts)
+    else
+      Gettext.dgettext(SlintExampleWeb.Gettext, "errors", msg, opts)
+    end
   end
 
   @doc """

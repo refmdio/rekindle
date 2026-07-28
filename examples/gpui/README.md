@@ -1,16 +1,18 @@
-# GPUI example
+# GpuiExample
 
-This Phoenix application uses Rekindle with one GPUI client for Web and
-desktop.
+To start your Phoenix server:
 
-```console
-mix setup
-mix phx.server
-```
+* Run `mix setup` to install and setup dependencies
+* Start Phoenix endpoint with `mix phx.server` or inside IEx with `iex -S mix phx.server`
 
-Open [localhost:4000](http://localhost:4000) for the Web client. Run
-`mix rekindle.dev desktop` in another terminal for native development. Rust
-dependencies and entry points live in [`client/`](client/).
+Now you can visit [`localhost:4000`](http://localhost:4000) from your browser.
 
-GPUI Web requires WebGPU in a secure browser context. `localhost` qualifies;
-plain HTTP through a LAN address does not.
+Ready to run in production? Please [check our deployment guides](https://phoenix.hexdocs.pm/deployment.html).
+
+## Learn more
+
+* Official website: https://www.phoenixframework.org/
+* Guides: https://phoenix.hexdocs.pm/overview.html
+* Docs: https://phoenix.hexdocs.pm
+* Forum: https://elixirforum.com/c/phoenix-forum
+* Source: https://github.com/phoenixframework/phoenix

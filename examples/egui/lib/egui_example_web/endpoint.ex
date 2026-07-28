@@ -8,7 +8,7 @@ defmodule EguiExampleWeb.Endpoint do
   @session_options [
     store: :cookie,
     key: "_egui_example_key",
-    signing_salt: "yDYpWLWP",
+    signing_salt: "w/6q+Mtl",
     same_site: "Lax"
   ]
 
@@ -36,6 +36,10 @@ defmodule EguiExampleWeb.Endpoint do
     plug Phoenix.CodeReloader
     plug Rekindle.DevServer, otp_app: :egui_example
   end
+
+  plug Phoenix.LiveDashboard.RequestLogger,
+    param_key: "request_logger",
+    cookie_key: "request_logger"
 
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]

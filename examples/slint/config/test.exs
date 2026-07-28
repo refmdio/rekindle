@@ -4,8 +4,14 @@ import Config
 # you can enable the server option below.
 config :slint_example, SlintExampleWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
-  secret_key_base: "puAmxGe+qjyjUNN01BV/GWiJH6srqnjs+KynVnCTYX50tOMIdbPp+U/ZMSZjflf1",
+  secret_key_base: "i1wJwSVkZjgN4Rmiey0j1CXwHYSYczeAFhKZ878FS5eilJVQwXNS7o/mOSzIi9L0",
   server: false
+
+# In test we don't send emails
+config :slint_example, SlintExample.Mailer, adapter: Swoosh.Adapters.Test
+
+# Disable swoosh api client as it is only required for production adapters
+config :swoosh, :api_client, false
 
 # Print only warnings and errors during test
 config :logger, level: :warning

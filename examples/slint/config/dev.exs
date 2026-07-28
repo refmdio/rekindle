@@ -13,8 +13,11 @@ config :slint_example, SlintExampleWeb.Endpoint,
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
-  secret_key_base: "pdvp0KjW+woV3K7o5ZtL0iJG5Sg9lQeZqukFyIP9+TfSJjToygcPH12OiDCkhG90",
-  watchers: []
+  secret_key_base: "0ndKxr0EhVMi6JR62Syospc9wyzEydhU4JJa0Yus0VT56vx2pQG5Nf4F9gVZuZjr",
+  watchers: [
+    esbuild: {Esbuild, :install_and_run, [:slint_example, ~w(--sourcemap=inline --watch)]},
+    tailwind: {Tailwind, :install_and_run, [:slint_example, ~w(--watch)]}
+  ]
 
 # ## SSL Support
 #
@@ -59,3 +62,6 @@ config :phoenix_live_view,
   debug_attributes: true,
   # Enable helpful, but potentially expensive runtime checks
   enable_expensive_runtime_checks: true
+
+# Disable swoosh api client as it is only required for production adapters.
+config :swoosh, :api_client, false
