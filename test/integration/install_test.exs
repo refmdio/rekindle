@@ -54,8 +54,8 @@ defmodule Rekindle.InstallTest do
     refute page_test =~ "Peace of mind from prototype to production"
 
     mix = content(installed, "mix.exs")
-    assert mix =~ ~s(setup: ["deps.get", "assets.setup", "assets.build", "rekindle.setup"])
-    assert mix =~ ~s("assets.setup": ["existing.setup"])
+    assert mix =~ ~s(setup: ["deps.get", "assets.setup", "assets.build"])
+    assert mix =~ ~s("assets.setup": ["existing.setup", "rekindle.setup"])
     assert mix =~ ~s("assets.build": ["existing.build", "rekindle.build web"])
     assert mix =~ ~s(precommit: ["existing.check", "rekindle.check"])
     assert index(mix, "rekindle.build web --release") < index(mix, "phx.digest")
@@ -290,6 +290,7 @@ defmodule Rekindle.InstallTest do
     mix = content(installed, "mix.exs")
     assert mix =~ "rekindle.setup"
     assert mix =~ "rekindle.check"
+    assert mix =~ ~s(setup: ["deps.get", "assets.setup", "assets.build", "rekindle.setup"])
     refute mix =~ "rekindle.build web"
   end
 

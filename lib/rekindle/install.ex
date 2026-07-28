@@ -226,14 +226,30 @@ if Code.ensure_loaded?(Igniter) do
       igniter
       |> maybe_generate_client(selection, mode)
       |> configure(app, selection)
-      |> update_setup_aliases()
+      |> update_setup_aliases(phoenix)
       |> TaskAliases.add_alias(:precommit, ["rekindle.check"], if_exists: :append)
       |> update_ignores(selection)
       |> PhoenixInstall.install(app, endpoint, selection, phoenix)
     end
 
-    defp update_setup_aliases(igniter) do
+    defp update_setup_aliases(igniter, nil) do
       TaskAliases.add_alias(igniter, :setup, ["rekindle.setup"], if_exists: :append)
+    end
+
+    defp update_setup_aliases(igniter, _phoenix) do
+      igniter
+      |> TaskAliases.modify_existing_alias(:setup, fn zipper ->
+        with {:ok, zipper} <-
+               Igniter.Code.List.remove_from_list(
+                 zipper,
+                 &Igniter.Code.Common.nodes_equal?(&1, "rekindle.setup")
+               ),
+             {:ok, zipper} <-
+               Igniter.Code.List.append_new_to_list(zipper, "assets.setup") do
+          {:ok, zipper}
+        end
+      end)
+      |> TaskAliases.add_alias(:"assets.setup", ["rekindle.setup"], if_exists: :append)
     end
 
     defp maybe_generate_client(igniter, _selection, :existing), do: igniter
