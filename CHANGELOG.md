@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.5 - 2026-07-28
+
+- Make the generated Rust Web UI the primary Phoenix page surface for GPUI,
+  egui, and Slint.
+- Preserve each integration's upstream starter UI across Web and desktop
+  targets.
+- Keep the Slint Web event loop and UI instance alive after startup.
+- Serve WebAssembly with the standard `application/wasm` media type.
+- Keep freshly installed Phoenix projects formatted and passing their default
+  controller tests.
+
 ## 0.1.4 - 2026-07-28
 
 - Start one supervised Web development runtime from the first
