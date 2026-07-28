@@ -27,19 +27,30 @@ defmodule Rekindle.Toolchain do
   @spec cargo_environment(keyword(), atom()) :: [{String.t(), String.t()}]
   def cargo_environment(options, key \\ :env) do
     environment = options |> Keyword.get(key, []) |> Map.new()
+    directory = Keyword.get(options, :cd, File.cwd!())
 
-    cond do
-      rustc = Keyword.get(options, :rustc) ->
-        Map.put(environment, "RUSTC", rustc)
+    environment =
+      cond do
+        rustc = Keyword.get(options, :rustc) ->
+          Map.put(environment, "RUSTC", rustc)
 
-      environment["RUSTC"] ->
-        environment
+        environment["RUSTC"] ->
+          environment
 
-      project_toolchain?(Keyword.get(options, :cd, File.cwd!())) ->
-        Map.put(environment, "RUSTC", rustc_path(options))
+        project_toolchain?(directory) ->
+          Map.put(environment, "RUSTC", rustc_path(options))
 
-      true ->
-        environment
+        true ->
+          environment
+      end
+
+    if project_toolchain?(directory) do
+      path = environment["PATH"] || System.get_env("PATH", "")
+      toolchain_bin = options |> cargo_path() |> Path.dirname()
+      path = if path == "", do: toolchain_bin, else: toolchain_bin <> path_separator() <> path
+      Map.put(environment, "PATH", path)
+    else
+      environment
     end
     |> Map.to_list()
   end
@@ -264,6 +275,13 @@ defmodule Rekindle.Toolchain do
   defp project_toolchain?(directory) do
     File.regular?(Path.join(directory, "rust-toolchain.toml")) or
       File.regular?(Path.join(directory, "rust-toolchain"))
+  end
+
+  defp path_separator do
+    case :os.type() do
+      {:win32, _name} -> ";"
+      _type -> ":"
+    end
   end
 
   defp check_cargo_version(path, options) do

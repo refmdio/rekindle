@@ -75,6 +75,7 @@ defmodule Rekindle.MixProject do
         ],
         "Mix Tasks": [
           Mix.Tasks.Rekindle.Build,
+          Mix.Tasks.Rekindle.Check,
           Mix.Tasks.Rekindle.Doctor,
           Mix.Tasks.Rekindle.Install,
           Mix.Tasks.Rekindle.Setup

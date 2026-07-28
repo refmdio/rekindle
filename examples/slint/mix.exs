@@ -63,9 +63,17 @@ defmodule SlintExample.MixProject do
   # See the documentation for `Mix` for more info on aliases.
   defp aliases do
     [
-      setup: ["deps.get", "rekindle.setup"],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
-      "assets.deploy": "rekindle.build web --release"
+      setup: ["deps.get", "assets.setup", "assets.build"],
+      "assets.setup": ["rekindle.setup"],
+      "assets.build": ["rekindle.build web"],
+      "assets.deploy": ["rekindle.build web --release"],
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "test",
+        "rekindle.check"
+      ]
     ]
   end
 end

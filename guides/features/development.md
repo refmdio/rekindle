@@ -34,6 +34,16 @@ mix rekindle.doctor
 It checks the Rekindle configuration, Cargo metadata, target support, selected
 integration, and pinned Web tooling.
 
+Run the project's standard precommit checks, including Rust formatting, Clippy,
+and library tests:
+
+```console
+mix precommit
+```
+
+Run only the Rust checks with `mix rekindle.check`. Web library tests are
+compiled but not executed because browser test runners are application-specific.
+
 ## Start development
 
 Start Phoenix and the Rekindle development services together:

@@ -35,6 +35,7 @@ defmodule Rekindle.InstallTest do
     assert mix =~ ~s(setup: ["deps.get", "assets.setup", "assets.build"])
     assert mix =~ ~s("assets.setup": ["existing.setup", "rekindle.setup"])
     assert mix =~ ~s("assets.build": ["existing.build", "rekindle.build web"])
+    assert mix =~ ~s(precommit: ["existing.check", "rekindle.check"])
     assert index(mix, "rekindle.build web --release") < index(mix, "phx.digest")
 
     assert ignore_lines(installed) == [
@@ -440,7 +441,8 @@ defmodule Rekindle.InstallTest do
                   setup: ["deps.get", "assets.setup", "assets.build"],
                   "assets.setup": ["existing.setup"],
                   "assets.build": ["existing.build"],
-                  "assets.deploy": ["existing.deploy", "phx.digest"]
+                  "assets.deploy": ["existing.deploy", "phx.digest"],
+                  precommit: ["existing.check"]
                 ]
               end
             end

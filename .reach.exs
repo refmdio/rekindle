@@ -9,6 +9,7 @@ application = [
   "Rekindle",
   "Rekindle.Build",
   "Rekindle.Cargo",
+  "Rekindle.Check",
   "Rekindle.Desktop.Builder",
   "Rekindle.Desktop.Development",
   "Rekindle.Desktop.Release",

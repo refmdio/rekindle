@@ -10,7 +10,7 @@ import Config
 config :gpui_example,
        Rekindle,
        integration: :gpui,
-       targets: [web: [features: ["web"]], desktop: [features: ["desktop"]]]
+       targets: [web: [], desktop: []]
 
 config :gpui_example,
   generators: [timestamp_type: :utc_datetime]

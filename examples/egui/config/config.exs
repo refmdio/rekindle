@@ -10,7 +10,7 @@ import Config
 config :egui_example,
        Rekindle,
        integration: :egui,
-       targets: [web: [features: ["web"]], desktop: [features: ["desktop"]]]
+       targets: [web: [], desktop: []]
 
 config :egui_example,
   generators: [timestamp_type: :utc_datetime]

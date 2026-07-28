@@ -36,9 +36,9 @@ defmodule Rekindle.ToolchainTest do
     assert File.read!(trace) == client
     assert {:ok, "1.99.0-nightly"} = Toolchain.cargo_version(rustup: rustup, cd: client)
 
-    assert Toolchain.cargo_environment(rustup: rustup, cd: client) |> Map.new() == %{
-             "RUSTC" => rustc
-           }
+    environment = Toolchain.cargo_environment(rustup: rustup, cd: client) |> Map.new()
+    assert environment["RUSTC"] == rustc
+    assert environment["PATH"] |> String.split(":") |> hd() == Path.dirname(cargo)
   end
 
   test "an explicit Cargo executable takes precedence over rustup" do

@@ -188,7 +188,7 @@ defmodule Rekindle.IntegrationsTest do
     assert files["src/bin/web.rs"] =~ "gpui_platform::application().run_embedded"
     refute files["src/bin/web.rs"] =~ "single_threaded_web"
     assert files["src/bin/desktop.rs"] =~ "gpui_platform::application().run"
-    assert files["src/lib.rs"] =~ ~S|format!("Hello, {}!", &self.text)|
+    assert files["src/lib.rs"] =~ ~S|format!("Hello, {}!", self.text)|
     assert files["src/lib.rs"] =~ "gpui::red()"
   end
 

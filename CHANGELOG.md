@@ -9,6 +9,8 @@
   existing Rust UI source.
 - Add concise build timing, browser loading and failure feedback, and Web
   development lifecycle events.
+- Integrate target-aware Rust formatting, Clippy, and library checks with
+  Phoenix's `mix precommit` alias.
 
 ## 0.1.2 - 2026-07-28
 

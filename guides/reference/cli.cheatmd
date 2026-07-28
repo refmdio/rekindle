@@ -13,6 +13,7 @@ mix rekindle.setup
 mix rekindle.setup web
 mix rekindle.setup desktop
 mix rekindle.doctor
+mix rekindle.check
 ```
 
 ## Development
@@ -30,4 +31,5 @@ mix rekindle.build desktop
 mix rekindle.build web --release
 mix rekindle.build desktop --release
 mix assets.deploy
+mix precommit
 ```

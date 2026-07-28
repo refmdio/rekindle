@@ -10,7 +10,7 @@ import Config
 config :slint_example,
        Rekindle,
        integration: :slint,
-       targets: [web: [features: ["web"]], desktop: [features: ["desktop"]]]
+       targets: [web: [], desktop: []]
 
 config :slint_example,
   generators: [timestamp_type: :utc_datetime]

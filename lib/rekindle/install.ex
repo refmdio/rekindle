@@ -203,6 +203,7 @@ if Code.ensure_loaded?(Igniter) do
       |> PhoenixInstall.install(app, endpoint, selection, phoenix)
       |> update_setup_aliases()
       |> maybe_add_web_alias(selection.targets)
+      |> TaskAliases.add_alias(:precommit, "rekindle.check", if_exists: :append)
       |> update_ignores(selection)
     end
 
