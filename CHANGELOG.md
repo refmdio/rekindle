@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.3 - 2026-07-28
 
 - Use Phoenix's standard `mix phx.server` command for development and remove
   the redundant `mix rekindle.dev` wrapper.
