@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add built-in Iced support for Web and native desktop targets.
+
 ## 0.1.7 - 2026-07-28
 
 - Make Phoenix integration optional and support installation into plain Mix

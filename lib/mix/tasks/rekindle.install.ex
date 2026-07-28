@@ -6,10 +6,10 @@ if Code.ensure_loaded?(Igniter) do
 
         mix igniter.install rekindle --plugin gpui --targets web,desktop
 
-    Valid plugins are `gpui`, `egui`, and `slint`. Targets can be `web`,
-    `desktop`, or both. The installer creates `client/` and does not overwrite
-    an existing Rust project. When a Phoenix endpoint is present, it also
-    installs the Phoenix Web integration.
+    Valid plugins are `gpui`, `egui`, `slint`, and `iced`. Targets can be
+    `web`, `desktop`, or both. The installer creates `client/` and does not
+    overwrite an existing Rust project. When a Phoenix endpoint is present, it
+    also installs the Phoenix Web integration.
     """
 
     use Igniter.Mix.Task

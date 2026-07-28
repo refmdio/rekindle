@@ -76,6 +76,7 @@ defmodule Rekindle.MixProject do
           Rekindle.Plugin.Cargo.Dependency,
           Rekindle.Plugin.GPUI,
           Rekindle.Plugin.Egui,
+          Rekindle.Plugin.Iced,
           Rekindle.Plugin.Slint,
           Rekindle.Priv,
           Rekindle.Install

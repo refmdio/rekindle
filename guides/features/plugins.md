@@ -1,6 +1,6 @@
 # Plugins
 
-Rekindle provides client templates for GPUI, egui/eframe, and Slint. A
+Rekindle provides client templates for GPUI, egui/eframe, Slint, and Iced. A
 plugin selects the Rust dependencies, platform bootstrap code, browser
 host, Web shell CSS, and graphics backend expected by the generated client. The
 installer makes that shell the Phoenix root layout's primary surface, so Web
@@ -39,10 +39,21 @@ entry uses Slint's native runtime. The generated `build.rs` compiles
 callbacks for both targets. The generated Web shell gives the shared Slint
 window the complete browser surface.
 
+## Iced
+
+```console
+mix igniter.install rekindle --plugin iced --targets web,desktop
+```
+
+The generated client follows Iced's counter example and shares its state,
+messages, update logic, and view between Web and desktop. The browser target
+uses Iced's WebGL renderer, while the desktop target uses Iced's native
+runtime.
+
 ## Shared UI code
 
 Every plugin keeps one shared application implementation for Web and
-desktop. GPUI uses `client/src/lib.rs`; eframe follows its official
+desktop. GPUI and Iced use `client/src/lib.rs`; eframe follows its official
 `client/src/app.rs` plus `client/src/lib.rs` layout; Slint keeps its UI in
 `client/ui/app-window.slint` with shared Rust bindings in `client/src/lib.rs`.
 The `web` and `desktop` binaries contain platform startup code only.

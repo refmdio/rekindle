@@ -24,8 +24,8 @@ mix deps.get
 mix igniter.install rekindle --plugin gpui --targets web,desktop
 ```
 
-Valid plugins are `gpui`, `egui`, and `slint`. Valid target selections are
-`web`, `desktop`, and `web,desktop`. When the flags are omitted for a new
+Valid plugins are `gpui`, `egui`, `slint`, and `iced`. Valid target selections
+are `web`, `desktop`, and `web,desktop`. When the flags are omitted for a new
 client, Rekindle selects GPUI and enables both targets. The Web target is
 `wasm32-unknown-unknown`; desktop builds use the Rust host target.
 

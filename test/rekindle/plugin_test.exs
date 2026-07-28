@@ -10,7 +10,8 @@ defmodule Rekindle.PluginTest do
   @plugins [
     gpui: Rekindle.Plugin.GPUI,
     egui: Rekindle.Plugin.Egui,
-    slint: Rekindle.Plugin.Slint
+    slint: Rekindle.Plugin.Slint,
+    iced: Rekindle.Plugin.Iced
   ]
 
   defmodule CustomPlugin do
@@ -46,7 +47,7 @@ defmodule Rekindle.PluginTest do
   end
 
   test "renders application-owned sources for every built-in plugin" do
-    assert Enum.sort(Plugin.builtin_names()) == [:egui, :gpui, :slint]
+    assert Enum.sort(Plugin.builtin_names()) == [:egui, :gpui, :iced, :slint]
 
     for {name, module} <- @plugins do
       spec = Plugin.spec(module)
@@ -71,6 +72,9 @@ defmodule Rekindle.PluginTest do
               "src/lib.rs",
               "ui/app-window.slint"
             ]
+
+          :iced ->
+            ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "src/lib.rs"]
         end
 
       assert Map.keys(both) |> Enum.sort() ==
@@ -135,6 +139,7 @@ defmodule Rekindle.PluginTest do
              ~s(<canvas id="the_canvas_id"></canvas>)
 
     assert Rekindle.Phoenix.web_host(Rekindle.Plugin.Slint) == ~s(<canvas id="canvas"></canvas>)
+    assert Rekindle.Phoenix.web_host(Rekindle.Plugin.Iced) == ""
   end
 
   @tag :plugin_matrix
@@ -280,6 +285,19 @@ defmodule Rekindle.PluginTest do
     assert files["src/bin/desktop.rs"] =~ "::run()"
     assert files["ui/app-window.slint"] =~ "Counter: \\{root.counter}"
     assert files["ui/app-window.slint"] =~ ~s(text: "Increase value";)
+  end
+
+  defp assert_framework_entrypoints(:iced, files) do
+    assert files["Cargo.toml"] =~ ~s(iced = "=0.14.0")
+
+    assert files["Cargo.toml"] =~
+             ~s(features = ["wgpu", "webgl", "fira-sans"])
+
+    assert files["src/bin/web.rs"] =~ "wasm_bindgen(start)"
+    assert files["src/bin/desktop.rs"] =~ "client::run()"
+    assert files["src/lib.rs"] =~ "iced::run(Counter::update, Counter::view)"
+    assert files["src/lib.rs"] =~ ~S|button("Increment").on_press(Message::Increment)|
+    assert files["src/lib.rs"] =~ ~S|button("Decrement").on_press(Message::Decrement)|
   end
 
   defp cargo_check!(root, target, triple) do

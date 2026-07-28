@@ -36,6 +36,7 @@ service = [
   "Rekindle.Plugin.Cargo.Dependency",
   "Rekindle.Plugin.Egui",
   "Rekindle.Plugin.GPUI",
+  "Rekindle.Plugin.Iced",
   "Rekindle.Plugin.Slint",
   "Rekindle.Plugin.Spec",
   "Rekindle.Plugin.Spec.Web",

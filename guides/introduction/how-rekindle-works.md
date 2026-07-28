@@ -27,12 +27,12 @@ client/
 The application owns and edits this project. Rekindle does not hide it behind a
 global cache or a generated dependency.
 
-Shared UI and application logic remains outside the target binaries. GPUI keeps
-it in `client/src/lib.rs`, eframe uses `client/src/app.rs`, and Slint uses
-`client/ui/app-window.slint` with bindings in `client/src/lib.rs`. The binaries
-under `client/src/bin` select the browser or native platform and call that
-shared code. Cargo features let one crate include only the platform dependencies
-required for each target.
+Shared UI and application logic remains outside the target binaries. GPUI and
+Iced keep it in `client/src/lib.rs`, eframe uses `client/src/app.rs`, and Slint
+uses `client/ui/app-window.slint` with bindings in `client/src/lib.rs`. The
+binaries under `client/src/bin` select the browser or native platform and call
+that shared code. Cargo features let one crate include only the platform
+dependencies required for each target.
 
 ## Development and release
 

@@ -89,6 +89,7 @@ impl Render for Example {
                     .child(
                         Self::card()
                             .h(px(176.0))
+                            .gap_2()
                             .child(
                                 div()
                                     .text_xs()
@@ -107,8 +108,11 @@ impl Render for Example {
                                     .id("increment")
                                     .cursor_pointer()
                                     .self_start()
-                                    .px_5()
-                                    .py_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(112.0))
+                                    .h(px(44.0))
                                     .rounded_full()
                                     .bg(rgb(0xea580c))
                                     .text_color(rgb(0xffffff))

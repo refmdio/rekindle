@@ -10,19 +10,20 @@ defmodule Rekindle.Plugin do
   alias Rekindle.Plugin.{Cargo, Spec}
 
   @type configured :: module() | {module(), keyword()}
-  @type builtin :: :gpui | :egui | :slint
+  @type builtin :: :gpui | :egui | :slint | :iced
 
   @builtins %{
     gpui: Rekindle.Plugin.GPUI,
     egui: Rekindle.Plugin.Egui,
-    slint: Rekindle.Plugin.Slint
+    slint: Rekindle.Plugin.Slint,
+    iced: Rekindle.Plugin.Iced
   }
 
   @callback name() :: String.t()
   @callback spec(keyword()) :: Spec.t()
 
   @spec builtin_names() :: [builtin()]
-  def builtin_names, do: [:gpui, :egui, :slint]
+  def builtin_names, do: [:gpui, :egui, :slint, :iced]
 
   @spec builtin(builtin() | String.t()) :: {:ok, module()} | :error
   def builtin(name) when is_binary(name) do

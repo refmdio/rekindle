@@ -43,8 +43,8 @@ digested and compressed derivatives to the published files.
 
 ## Browser requirements
 
-GPUI requires WebGPU. The egui and Slint templates use WebGL2. Browser graphics
-APIs can require hardware acceleration and a supported adapter.
+GPUI requires WebGPU. The egui, Slint, and Iced templates use WebGL2. Browser
+graphics APIs can require hardware acceleration and a supported adapter.
 
 WebGPU also requires a secure context. `http://localhost` is treated as
 potentially trustworthy, but an HTTP address accessed from another device is

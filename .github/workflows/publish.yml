@@ -64,7 +64,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [gpui, egui, slint]
+        plugin: [gpui, egui, slint, iced]
 
     steps:
       - name: Check out the source

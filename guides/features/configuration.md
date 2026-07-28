@@ -15,7 +15,8 @@ config :my_app, Rekindle,
 
 - `:plugin` — required; a module implementing `Rekindle.Plugin`, or a
   `{module, options}` tuple. Rekindle includes `Rekindle.Plugin.GPUI`,
-  `Rekindle.Plugin.Egui`, and `Rekindle.Plugin.Slint`.
+  `Rekindle.Plugin.Egui`, `Rekindle.Plugin.Slint`, and
+  `Rekindle.Plugin.Iced`.
 - `:targets` — required; a non-empty keyword list containing `:web`,
   `:desktop`, or both.
 - `:public_dir` — Web release publication root. Defaults to `"priv/static"`;

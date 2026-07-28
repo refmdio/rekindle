@@ -69,7 +69,7 @@ defmodule Rekindle.InstallTest do
   end
 
   test "renders every plugin and target selection" do
-    for plugin <- ~w(gpui egui slint),
+    for plugin <- ~w(gpui egui slint iced),
         targets <- [["web"], ["desktop"], ["web", "desktop"]] do
       installed = install(project(), plugin: plugin, targets: targets)
       assert installed.issues == []
@@ -458,6 +458,7 @@ defmodule Rekindle.InstallTest do
   defp plugin_module("gpui"), do: Rekindle.Plugin.GPUI
   defp plugin_module("egui"), do: Rekindle.Plugin.Egui
   defp plugin_module("slint"), do: Rekindle.Plugin.Slint
+  defp plugin_module("iced"), do: Rekindle.Plugin.Iced
 
   defp install(igniter, options \\ []) do
     igniter

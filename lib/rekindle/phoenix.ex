@@ -30,9 +30,9 @@ defmodule Rekindle.Phoenix do
   @doc """
   Returns the Web host markup declared by a plugin.
 
-  GPUI does not require a host element. The built-in egui and Slint plugins
-  return their required canvas elements. Applications can render markup from a
-  trusted configured plugin with `Phoenix.HTML.raw/1`.
+  GPUI and Iced do not require a host element. The built-in egui and Slint
+  plugins return their required canvas elements. Applications can render
+  markup from a trusted configured plugin with `Phoenix.HTML.raw/1`.
   """
   @spec web_host(plugin()) :: String.t()
   def web_host(plugin), do: Rekindle.Plugin.spec(plugin).web.host

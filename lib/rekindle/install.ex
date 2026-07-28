@@ -11,9 +11,9 @@ if Code.ensure_loaded?(Igniter) do
           targets: [:web, :desktop]
         )
 
-    The regular Rekindle installer accepts the built-in `gpui`, `egui`, and
-    `slint` aliases. When it finds a Phoenix endpoint, it also installs the Web
-    development and static delivery integration.
+    The regular Rekindle installer accepts the built-in `gpui`, `egui`,
+    `slint`, and `iced` aliases. When it finds a Phoenix endpoint, it also
+    installs the Web development and static delivery integration.
     """
 
     alias Igniter.Code.{Common, Function}
@@ -107,7 +107,7 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp plugin_error(value) do
-      "expected --plugin to be gpui, egui, or slint; got: #{inspect(value)}"
+      "expected --plugin to be gpui, egui, slint, or iced; got: #{inspect(value)}"
     end
 
     defp requested_targets(nil), do: {:ok, nil}

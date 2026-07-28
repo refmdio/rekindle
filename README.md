@@ -5,9 +5,9 @@ entry point for installation, development, Web packaging, and native release
 artifacts, while Cargo continues to manage Rust dependencies, compilation,
 target directories, and incremental caches.
 
-GPUI, egui/eframe, and Slint are supported. Each plugin can generate a
-browser target compiled to WebAssembly, a native desktop target, or both from a
-shared Rust UI crate.
+GPUI, egui/eframe, Slint, and Iced are supported. Each plugin can generate a
+browser target compiled to WebAssembly, a native desktop target, or both from
+a shared Rust UI crate.
 
 ## Requirements
 
