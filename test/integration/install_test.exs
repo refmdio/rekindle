@@ -32,7 +32,8 @@ defmodule Rekindle.InstallTest do
     assert layout =~ "Rekindle.Phoenix.web_entry_path(DemoWeb.Endpoint)"
 
     mix = content(installed, "mix.exs")
-    assert mix =~ ~s(setup: ["deps.get", "rekindle.setup"])
+    assert mix =~ ~s(setup: ["deps.get", "assets.setup", "assets.build"])
+    assert mix =~ ~s("assets.setup": ["existing.setup", "rekindle.setup"])
     assert mix =~ ~s("assets.build": ["existing.build", "rekindle.build web"])
     assert index(mix, "rekindle.build web --release") < index(mix, "phx.digest")
 
@@ -92,15 +93,42 @@ defmodule Rekindle.InstallTest do
     assert changed_contents(conflicted) == changed_contents(installed)
   end
 
+  test "moves the previous direct setup entry into assets.setup" do
+    installed = install(project(), integration: "egui", targets: ["web"])
+
+    previous =
+      update_content(installed, "mix.exs", fn mix ->
+        String.replace(
+          mix,
+          ~s(setup: ["deps.get", "assets.setup", "assets.build"]),
+          ~s(setup: ["deps.get", "assets.setup", "assets.build", "rekindle.setup"])
+        )
+      end)
+
+    updated = install(previous)
+    mix = content(updated, "mix.exs")
+
+    assert updated.issues == []
+    assert mix =~ ~s(setup: ["deps.get", "assets.setup", "assets.build"])
+    refute mix =~ ~s("assets.build", "rekindle.setup")
+    assert length(Regex.scan(~r/"rekindle\.setup"/, mix)) == 1
+  end
+
   test "adds a target to an installed client without replacing shared UI files" do
     installed = install(project(), integration: "egui", targets: ["web"])
+
+    installed =
+      update_content(installed, "config/config.exs", fn config ->
+        String.replace(config, "web: []", ~s(web: [features: ["browser"]]))
+      end)
+
     shared_ui = content(installed, "client/src/app.rs")
 
     extended =
       install(installed, integration: "egui", targets: ["web", "desktop"])
 
     assert extended.issues == []
-    assert content(extended, "config/config.exs") =~ "web: []"
+    assert content(extended, "config/config.exs") =~ ~s(web: [features: ["browser"]])
     assert content(extended, "config/config.exs") =~ "desktop: []"
     assert content(extended, "client/src/app.rs") == shared_ui
     assert content(extended, "client/src/bin/desktop.rs") != ""
@@ -131,6 +159,44 @@ defmodule Rekindle.InstallTest do
 
     assert rejected.issues == ["client/Cargo.toml must contain a static package name"]
     assert changed_contents(rejected) == changed_contents(invalid)
+  end
+
+  test "accepts quoted static Cargo package names when adding a target" do
+    installed = install(project(), integration: "egui", targets: ["web"])
+
+    customized =
+      update_content(installed, "client/Cargo.toml", fn manifest ->
+        String.replace(manifest, ~s(name = "client"), "name = 'custom-client' # application UI")
+      end)
+
+    extended = install(customized, integration: "egui", targets: ["web", "desktop"])
+
+    assert extended.issues == []
+    assert content(extended, "client/src/bin/desktop.rs") =~ "custom_client::TemplateApp"
+  end
+
+  test "rejects an incompatible existing Cargo bin when adding a target" do
+    installed = install(project(), integration: "egui", targets: ["web"])
+
+    customized =
+      update_content(installed, "client/Cargo.toml", fn manifest ->
+        manifest <>
+          """
+
+          [[bin]]
+          name = "desktop"
+          path = "src/custom_desktop.rs"
+          required-features = ["desktop"]
+          """
+      end)
+
+    rejected = install(customized, integration: "egui", targets: ["web", "desktop"])
+
+    assert rejected.issues == [
+             "client/Cargo.toml already defines desktop with a non-canonical bin configuration"
+           ]
+
+    assert changed_contents(rejected) == changed_contents(customized)
   end
 
   test "adds a missing static plug without duplicating the development plug" do
@@ -371,7 +437,8 @@ defmodule Rekindle.InstallTest do
 
               defp aliases do
                 [
-                  setup: ["deps.get"],
+                  setup: ["deps.get", "assets.setup", "assets.build"],
+                  "assets.setup": ["existing.setup"],
                   "assets.build": ["existing.build"],
                   "assets.deploy": ["existing.deploy", "phx.digest"]
                 ]

@@ -183,9 +183,11 @@ if Code.ensure_loaded?(Igniter) do
     defp validate_generated_paths(_igniter, _selection, :existing), do: {:ok, :existing}
 
     defp validate_generated_paths(igniter, _selection, {:extend, targets}) do
-      case package_name(content(igniter, "client/Cargo.toml")) do
-        {:ok, package_name} -> {:ok, {:extend, targets, package_name}}
-        {:error, message} -> {:error, message}
+      manifest = content(igniter, "client/Cargo.toml")
+
+      with {:ok, package_name} <- package_name(manifest),
+           :ok <- validate_manifest_targets(manifest, targets) do
+        {:ok, {:extend, targets, package_name}}
       end
     end
 
@@ -199,9 +201,25 @@ if Code.ensure_loaded?(Igniter) do
           Sourceror.parse_string!("[otp_app: #{inspect(app)}, endpoint: #{inspect(endpoint)}]")}}
       )
       |> PhoenixInstall.install(app, endpoint, selection, phoenix)
-      |> TaskAliases.add_alias(:setup, "rekindle.setup", if_exists: :append)
+      |> update_setup_aliases()
       |> maybe_add_web_alias(selection.targets)
       |> update_ignores(selection)
+    end
+
+    defp update_setup_aliases(igniter) do
+      igniter
+      |> TaskAliases.modify_existing_alias(:setup, fn zipper ->
+        with {:ok, zipper} <-
+               Igniter.Code.List.remove_from_list(
+                 zipper,
+                 &Igniter.Code.Common.nodes_equal?(&1, "rekindle.setup")
+               ),
+             {:ok, zipper} <-
+               Igniter.Code.List.append_new_to_list(zipper, "assets.setup") do
+          {:ok, zipper}
+        end
+      end)
+      |> TaskAliases.add_alias(:"assets.setup", "rekindle.setup", if_exists: :append)
     end
 
     defp maybe_generate_client(igniter, _selection, :existing), do: igniter
@@ -287,10 +305,7 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp manifest_target?(manifest, target) do
-      manifest
-      |> String.split("[[bin]]")
-      |> Enum.drop(1)
-      |> Enum.any?(&Regex.match?(~r/^name\s*=\s*"#{target}"\s*$/m, &1))
+      Enum.any?(manifest_bin_blocks(manifest), &bin_name?(&1, target))
     end
 
     defp manifest_target(target) do
@@ -304,11 +319,56 @@ if Code.ensure_loaded?(Igniter) do
 
     defp package_name(manifest) do
       with [_, package] <- Regex.run(~r/^\[package\]\s*$\n(.*?)(?=^\[|\z)/ms, manifest),
-           [_, name] <- Regex.run(~r/^name\s*=\s*"([^"]+)"\s*$/m, package) do
+           [_, name] <-
+             Regex.run(~r/^name\s*=\s*["']([^"']+)["']\s*(?:#.*)?$/m, package) do
         {:ok, name}
       else
         _ -> {:error, "client/Cargo.toml must contain a static package name"}
       end
+    end
+
+    defp validate_manifest_targets(manifest, targets) do
+      Enum.reduce_while(targets, :ok, fn target, :ok ->
+        case Enum.filter(manifest_bin_blocks(manifest), &bin_name?(&1, target)) do
+          [] ->
+            {:cont, :ok}
+
+          [block] ->
+            if canonical_bin?(block, target) do
+              {:cont, :ok}
+            else
+              {:halt,
+               {:error,
+                "client/Cargo.toml already defines #{target} with a non-canonical bin configuration"}}
+            end
+
+          _duplicates ->
+            {:halt, {:error, "client/Cargo.toml defines #{target} more than once"}}
+        end
+      end)
+    end
+
+    defp manifest_bin_blocks(manifest) do
+      manifest
+      |> String.split("[[bin]]")
+      |> Enum.drop(1)
+      |> Enum.map(&(&1 |> String.split(~r/^\[/m, parts: 2) |> hd()))
+    end
+
+    defp bin_name?(block, target), do: toml_string_field?(block, "name", Atom.to_string(target))
+
+    defp canonical_bin?(block, target) do
+      name = Atom.to_string(target)
+
+      toml_string_field?(block, "path", "src/bin/#{name}.rs") and
+        Regex.match?(
+          ~r/^required-features\s*=\s*\[\s*["']#{name}["']\s*\]\s*(?:#.*)?$/m,
+          block
+        )
+    end
+
+    defp toml_string_field?(block, field, value) do
+      Regex.match?(~r/^#{field}\s*=\s*["']#{Regex.escape(value)}["']\s*(?:#.*)?$/m, block)
     end
 
     defp content(igniter, path) do
