@@ -53,6 +53,12 @@ has code reloading enabled.
 
 ## Build explicitly
 
+Build all Phoenix assets, including the Rekindle Web target:
+
+```console
+mix assets.build
+```
+
 Build an enabled target without starting its development runtime:
 
 ```console

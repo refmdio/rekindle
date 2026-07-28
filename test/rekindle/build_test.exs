@@ -34,7 +34,7 @@ defmodule Rekindle.BuildTest do
   test "rejects unknown and disabled targets before accessing an entry", %{root: root} do
     Application.put_env(:rekindle_build_test, Rekindle,
       integration: :gpui,
-      targets: [desktop: []]
+      targets: [desktop: [features: []]]
     )
 
     assert {:error, %Rekindle.Build.Error{kind: :unknown_target}} =
@@ -47,7 +47,7 @@ defmodule Rekindle.BuildTest do
   test "rejects missing canonical entries before dispatch", %{root: root} do
     Application.put_env(:rekindle_build_test, Rekindle,
       integration: :gpui,
-      targets: [desktop: []]
+      targets: [desktop: [features: []]]
     )
 
     assert {:error, %Rekindle.Build.Error{kind: :missing_entry, message: message}} =
@@ -65,7 +65,7 @@ defmodule Rekindle.BuildTest do
 
     Application.put_env(:rekindle_build_test, Rekindle,
       integration: :gpui,
-      targets: [desktop: [profiles: [dev: "dev", release: "release"]]]
+      targets: [desktop: [features: [], profiles: [dev: "dev", release: "release"]]]
     )
 
     assert {:ok, %Rekindle.Build.Result{} = result} =
@@ -107,7 +107,7 @@ defmodule Rekindle.BuildTest do
 
     Application.put_env(:rekindle, Rekindle,
       integration: :gpui,
-      targets: [desktop: []]
+      targets: [desktop: [features: []]]
     )
 
     System.put_env("PATH", fake_bin <> ":" <> previous_path)
@@ -159,7 +159,7 @@ defmodule Rekindle.BuildTest do
 
     Application.put_env(:rekindle, Rekindle,
       integration: :gpui,
-      targets: [desktop: []]
+      targets: [desktop: [features: []]]
     )
 
     System.put_env("PATH", fake_bin <> ":" <> previous_path)

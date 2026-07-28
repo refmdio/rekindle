@@ -19,6 +19,7 @@ mix rekindle.doctor
 
 ```console
 mix phx.server
+mix assets.build
 mix rekindle.build web
 mix rekindle.build desktop
 ```

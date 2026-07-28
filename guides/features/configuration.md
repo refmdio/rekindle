@@ -6,8 +6,8 @@ Rekindle uses the host application's standard Elixir configuration:
 config :my_app, Rekindle,
   integration: :gpui,
   targets: [
-    web: [features: ["web"]],
-    desktop: [features: ["desktop"]]
+    web: [],
+    desktop: []
   ]
 ```
 
@@ -24,7 +24,9 @@ The Rust client is located at `client/`. Web release output is published below
 
 Each target accepts:
 
-- `:features` — Cargo features enabled for the target.
+- `:features` — Cargo features enabled for the target. Defaults to the target
+  name (`"web"` or `"desktop"`). Set `features: []` explicitly when the Cargo
+  target does not require a feature.
 - `:package` — Cargo package name when the workspace contains more than one
   package.
 - `:binary` — Cargo binary name when it cannot be selected from the target

@@ -9,8 +9,8 @@ defmodule Rekindle.InstallTest do
 
     assert installed.issues == []
     assert content(installed, "config/config.exs") =~ "integration: :gpui"
-    assert content(installed, "config/config.exs") =~ "web: [features: [\"web\"]]"
-    assert content(installed, "config/config.exs") =~ "desktop: [features: [\"desktop\"]]"
+    assert content(installed, "config/config.exs") =~ "web: []"
+    assert content(installed, "config/config.exs") =~ "desktop: []"
     assert content(installed, "client/Cargo.toml") =~ "gpui"
     assert content(installed, "client/src/bin/web.rs") != ""
     assert content(installed, "client/src/bin/desktop.rs") != ""
@@ -33,6 +33,7 @@ defmodule Rekindle.InstallTest do
 
     mix = content(installed, "mix.exs")
     assert mix =~ ~s(setup: ["deps.get", "rekindle.setup"])
+    assert mix =~ ~s("assets.build": ["existing.build", "rekindle.build web"])
     assert index(mix, "rekindle.build web --release") < index(mix, "phx.digest")
 
     assert ignore_lines(installed) == [
@@ -89,6 +90,47 @@ defmodule Rekindle.InstallTest do
     conflicted = install(installed, integration: "slint", targets: ["web"])
     assert Enum.any?(conflicted.issues, &String.contains?(&1, "conflicts"))
     assert changed_contents(conflicted) == changed_contents(installed)
+  end
+
+  test "adds a target to an installed client without replacing shared UI files" do
+    installed = install(project(), integration: "egui", targets: ["web"])
+    shared_ui = content(installed, "client/src/app.rs")
+
+    extended =
+      install(installed, integration: "egui", targets: ["web", "desktop"])
+
+    assert extended.issues == []
+    assert content(extended, "config/config.exs") =~ "web: []"
+    assert content(extended, "config/config.exs") =~ "desktop: []"
+    assert content(extended, "client/src/app.rs") == shared_ui
+    assert content(extended, "client/src/bin/desktop.rs") != ""
+    assert content(extended, "client/Cargo.toml") =~ ~s(name = "desktop")
+
+    repeated = install(extended, integration: "egui", targets: ["web", "desktop"])
+    assert repeated.issues == []
+    assert changed_contents(repeated) == changed_contents(extended)
+  end
+
+  test "does not remove an installed target" do
+    installed = install(project(), integration: "egui", targets: ["web", "desktop"])
+    rejected = install(installed, integration: "egui", targets: ["web"])
+
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "conflicts"))
+    assert changed_contents(rejected) == changed_contents(installed)
+  end
+
+  test "rejects target addition when the Cargo package name is not static" do
+    installed = install(project(), integration: "egui", targets: ["web"])
+
+    invalid =
+      update_content(installed, "client/Cargo.toml", fn manifest ->
+        String.replace(manifest, ~s(name = "client"), "name = workspace.package.name")
+      end)
+
+    rejected = install(invalid, integration: "egui", targets: ["web", "desktop"])
+
+    assert rejected.issues == ["client/Cargo.toml must contain a static package name"]
+    assert changed_contents(rejected) == changed_contents(invalid)
   end
 
   test "adds a missing static plug without duplicating the development plug" do
@@ -225,7 +267,7 @@ defmodule Rekindle.InstallTest do
 
     invalid =
       update_content(installed, "config/config.exs", fn config ->
-        String.replace(config, ~s(web: [features: ["web"]]), ~s(web: [features: :invalid]))
+        String.replace(config, ~s(web: []), ~s(web: [features: :invalid]))
       end)
 
     rejected = install(invalid)
@@ -328,7 +370,11 @@ defmodule Rekindle.InstallTest do
               defp deps, do: []
 
               defp aliases do
-                [setup: ["deps.get"], "assets.deploy": ["existing.deploy", "phx.digest"]]
+                [
+                  setup: ["deps.get"],
+                  "assets.build": ["existing.build"],
+                  "assets.deploy": ["existing.deploy", "phx.digest"]
+                ]
               end
             end
             """

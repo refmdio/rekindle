@@ -14,13 +14,19 @@ if Code.ensure_loaded?(Igniter) do
     def run(igniter, options) do
       app = Application.app_name(igniter)
       {igniter, endpoint} = Igniter.Libs.Phoenix.select_endpoint(igniter)
+      cargo_exists? = Igniter.exists?(igniter, "client/Cargo.toml")
+
+      igniter =
+        if cargo_exists?,
+          do: Igniter.include_existing_file(igniter, "client/Cargo.toml"),
+          else: igniter
 
       with :ok <- endpoint_required(endpoint),
            {:ok, requested} <- requested_selection(options),
            {:ok, existing} <- existing_selection(igniter, app),
            {:ok, selection, mode} <-
-             select(requested, existing, Igniter.exists?(igniter, "client/Cargo.toml")),
-           :ok <- validate_generated_paths(igniter, selection, mode),
+             select(requested, existing, cargo_exists?),
+           {:ok, mode} <- validate_generated_paths(igniter, selection, mode),
            {:ok, igniter, phoenix} <-
              PhoenixInstall.prepare(igniter, app, endpoint, selection) do
         install(igniter, app, endpoint, selection, mode, phoenix)
@@ -100,6 +106,7 @@ if Code.ensure_loaded?(Igniter) do
                targets <- Keyword.fetch!(config, :targets) do
             {:ok,
              %{
+               config: config,
                integration: integration,
                targets: Enum.filter(@targets, &Keyword.has_key?(targets, &1))
              }}
@@ -128,9 +135,8 @@ if Code.ensure_loaded?(Igniter) do
       do: {:error, "client/Cargo.toml already exists; Rekindle will not overwrite it"}
 
     defp select(requested, existing, true) do
-      with :ok <- same_or_omitted(:integration, requested.integration, existing.integration),
-           :ok <- same_or_omitted(:targets, requested.targets, existing.targets) do
-        {:ok, existing, :existing}
+      with :ok <- same_or_omitted(:integration, requested.integration, existing.integration) do
+        select_existing_targets(requested.targets, existing)
       end
     end
 
@@ -146,6 +152,20 @@ if Code.ensure_loaded?(Igniter) do
        "requested #{name} #{inspect(requested)} conflicts with existing Rekindle configuration #{inspect(existing)}"}
     end
 
+    defp select_existing_targets(nil, existing), do: {:ok, existing, :existing}
+
+    defp select_existing_targets(targets, %{targets: targets} = existing),
+      do: {:ok, existing, :existing}
+
+    defp select_existing_targets(requested, existing) do
+      if MapSet.subset?(MapSet.new(existing.targets), MapSet.new(requested)) do
+        added = requested -- existing.targets
+        {:ok, %{existing | targets: requested}, {:extend, added}}
+      else
+        same_or_omitted(:targets, requested, existing.targets)
+      end
+    end
+
     defp validate_generated_paths(igniter, selection, :generate) do
       generated_paths =
         selection.integration
@@ -155,12 +175,19 @@ if Code.ensure_loaded?(Igniter) do
       generated_paths
       |> Enum.find(&Igniter.exists?(igniter, Path.join("client", &1)))
       |> case do
-        nil -> :ok
+        nil -> {:ok, :generate}
         path -> {:error, "client/#{path} already exists; Rekindle will not overwrite it"}
       end
     end
 
-    defp validate_generated_paths(_igniter, _selection, :existing), do: :ok
+    defp validate_generated_paths(_igniter, _selection, :existing), do: {:ok, :existing}
+
+    defp validate_generated_paths(igniter, _selection, {:extend, targets}) do
+      case package_name(content(igniter, "client/Cargo.toml")) do
+        {:ok, package_name} -> {:ok, {:extend, targets, package_name}}
+        {:error, message} -> {:error, message}
+      end
+    end
 
     defp install(igniter, app, endpoint, selection, mode, phoenix) do
       igniter
@@ -177,7 +204,7 @@ if Code.ensure_loaded?(Igniter) do
       |> update_ignores(selection)
     end
 
-    defp maybe_generate_client(igniter, _selection, mode) when mode != :generate, do: igniter
+    defp maybe_generate_client(igniter, _selection, :existing), do: igniter
 
     defp maybe_generate_client(igniter, selection, :generate) do
       selection.integration
@@ -188,11 +215,23 @@ if Code.ensure_loaded?(Igniter) do
       |> Igniter.mkdir("client/public")
     end
 
-    defp configure(igniter, app, selection) do
-      targets =
-        Enum.map(selection.targets, fn target ->
-          {target, features: [Atom.to_string(target)]}
-        end)
+    defp maybe_generate_client(igniter, selection, {:extend, targets, package_name}) do
+      targets
+      |> Enum.reduce(igniter, fn target, igniter ->
+        path = "src/bin/#{target}.rs"
+
+        contents =
+          selection.integration
+          |> Integration.render([target], package_name: package_name)
+          |> Map.fetch!(path)
+
+        Igniter.create_new_file(igniter, Path.join("client", path), contents, on_exists: :skip)
+      end)
+      |> update_manifest_targets(targets)
+    end
+
+    defp configure(igniter, app, selection) when not is_map_key(selection, :config) do
+      targets = Enum.map(selection.targets, &{&1, []})
 
       ProjectConfig.configure_new(
         igniter,
@@ -204,10 +243,85 @@ if Code.ensure_loaded?(Igniter) do
       )
     end
 
+    defp configure(igniter, app, selection) do
+      existing_targets = Keyword.fetch!(selection.config, :targets)
+
+      targets =
+        Enum.map(selection.targets, fn target ->
+          {target, Keyword.get(existing_targets, target, [])}
+        end)
+
+      ProjectConfig.configure(
+        igniter,
+        "config.exs",
+        app,
+        [Rekindle, :targets],
+        targets
+      )
+    end
+
+    defp update_manifest_targets(igniter, targets) do
+      Igniter.create_or_update_file(igniter, "client/Cargo.toml", "", fn source ->
+        manifest = Rewrite.Source.get(source, :content)
+
+        missing =
+          targets
+          |> Enum.reject(&manifest_target?(manifest, &1))
+          |> Enum.map(&manifest_target/1)
+
+        updated =
+          case missing do
+            [] ->
+              manifest
+
+            blocks ->
+              IO.iodata_to_binary([
+                String.trim_trailing(manifest),
+                "\n\n",
+                Enum.intersperse(blocks, "\n")
+              ])
+          end
+
+        Rewrite.Source.update(source, :content, updated)
+      end)
+    end
+
+    defp manifest_target?(manifest, target) do
+      manifest
+      |> String.split("[[bin]]")
+      |> Enum.drop(1)
+      |> Enum.any?(&Regex.match?(~r/^name\s*=\s*"#{target}"\s*$/m, &1))
+    end
+
+    defp manifest_target(target) do
+      """
+      [[bin]]
+      name = "#{target}"
+      path = "src/bin/#{target}.rs"
+      required-features = ["#{target}"]
+      """
+    end
+
+    defp package_name(manifest) do
+      with [_, package] <- Regex.run(~r/^\[package\]\s*$\n(.*?)(?=^\[|\z)/ms, manifest),
+           [_, name] <- Regex.run(~r/^name\s*=\s*"([^"]+)"\s*$/m, package) do
+        {:ok, name}
+      else
+        _ -> {:error, "client/Cargo.toml must contain a static package name"}
+      end
+    end
+
+    defp content(igniter, path) do
+      igniter.rewrite
+      |> Rewrite.source!(path)
+      |> Rewrite.Source.get(:content)
+    end
+
     defp maybe_add_web_alias(igniter, targets) do
       if :web in targets do
-        TaskAliases.add_alias(
-          igniter,
+        igniter
+        |> TaskAliases.add_alias(:"assets.build", "rekindle.build web", if_exists: :append)
+        |> TaskAliases.add_alias(
           :"assets.deploy",
           "rekindle.build web --release",
           if_exists: :prepend

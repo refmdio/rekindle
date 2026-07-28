@@ -29,9 +29,13 @@ Valid integrations are `gpui`, `egui`, and `slint`. Valid target selections are
 client, Rekindle selects GPUI and enables both targets. The Web target is
 `wasm32-unknown-unknown`; desktop builds use the Rust host target.
 
+Run the installer again with the current integration and a superset of the
+configured targets to add a target later. Existing Rust UI source files are
+preserved. The installer does not remove targets or switch integrations.
+
 The installer adds Rekindle as an application dependency, creates the Rust
-client, configures the Phoenix development runtime, and adds Web release
-building to `assets.deploy`.
+client, configures the Phoenix development runtime, and adds Web builds to the
+standard `assets.build` and `assets.deploy` aliases.
 
 ## Existing client directory
 

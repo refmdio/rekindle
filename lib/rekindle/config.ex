@@ -131,7 +131,11 @@ defmodule Rekindle.Config do
   end
 
   defp features(config, target) do
-    value = Keyword.get(config, :features, [])
+    value =
+      case Keyword.fetch(config, :features) do
+        {:ok, features} -> features
+        :error -> [Atom.to_string(target)]
+      end
 
     if is_list(value) and Enum.all?(value, &(is_binary(&1) and &1 != "")) do
       {:ok, value}

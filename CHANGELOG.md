@@ -4,6 +4,9 @@
 
 - Use Phoenix's standard `mix phx.server` command for development and remove
   the redundant `mix rekindle.dev` wrapper.
+- Integrate Web builds with `mix assets.build`, simplify generated target
+  configuration, and allow the installer to add a target without replacing
+  existing Rust UI source.
 
 ## 0.1.2 - 2026-07-28
 

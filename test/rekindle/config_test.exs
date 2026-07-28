@@ -47,6 +47,27 @@ defmodule Rekindle.ConfigTest do
            } = project.targets.web
   end
 
+  test "uses the target name as the default Cargo feature" do
+    Application.put_env(:rekindle_config_test, Rekindle,
+      integration: :gpui,
+      targets: [web: [], desktop: []]
+    )
+
+    assert {:ok, project} = Config.load(:rekindle_config_test)
+    assert project.targets.web.features == ["web"]
+    assert project.targets.desktop.features == ["desktop"]
+  end
+
+  test "preserves an explicitly empty Cargo feature list" do
+    Application.put_env(:rekindle_config_test, Rekindle,
+      integration: :gpui,
+      targets: [desktop: [features: []]]
+    )
+
+    assert {:ok, project} = Config.load(:rekindle_config_test)
+    assert project.targets.desktop.features == []
+  end
+
   test "rejects unknown configuration values" do
     Application.put_env(:rekindle_config_test, Rekindle,
       integration: :other,
