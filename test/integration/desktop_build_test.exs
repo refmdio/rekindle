@@ -13,7 +13,7 @@ defmodule Rekindle.DesktopBuildTest do
     File.write!(Path.join(root, "client/src/bin/desktop.rs"), "fn main() {}\n")
 
     Application.put_env(:rekindle_desktop_build_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [desktop: []]
     )
 
@@ -42,7 +42,7 @@ defmodule Rekindle.DesktopBuildTest do
              "target" => tools.target,
              "package" => "fixture_ui",
              "binary" => "desktop",
-             "integration" => "gpui",
+             "plugin" => "gpui",
              "executable" => "application"
            }
 
@@ -90,7 +90,7 @@ defmodule Rekindle.DesktopBuildTest do
       "target" => "x86_64-unknown-linux-gnu",
       "package" => "fixture_ui",
       "binary" => "desktop",
-      "integration" => "gpui",
+      "plugin" => "gpui",
       "executable" => "application"
     }
 

@@ -2,7 +2,7 @@
 
 The desktop target compiles and runs the native binary selected from the shared
 client crate for the host target reported by `rustc -vV`. Platform support and
-required native libraries depend on the selected UI integration.
+required native libraries depend on the selected UI plugin.
 
 ## Development
 
@@ -30,7 +30,7 @@ dist/rekindle/desktop/<rust-target>/application
 dist/rekindle/desktop/<rust-target>/manifest.json
 ```
 
-The manifest identifies the executable, Rust target, selected integration,
+The manifest identifies the executable, Rust target, selected plugin,
 Cargo package, and binary. A release build packages the executable but never
 launches it. Use the manifest from an application packager, installer, or
 deployment pipeline.

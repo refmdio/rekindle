@@ -21,7 +21,7 @@ defmodule Rekindle.ConfigTest do
     root = tmp_dir()
 
     Application.put_env(:rekindle_config_test, Rekindle,
-      integration: :egui,
+      plugin: Rekindle.Plugin.Egui,
       targets: [
         web: [
           package: "sample_ui",
@@ -35,7 +35,7 @@ defmodule Rekindle.ConfigTest do
     assert {:ok, project} = Config.load(:rekindle_config_test, project_root: root)
     assert project.client_root == Path.join(root, "client")
     assert project.public_dir == Path.join(root, "priv/static")
-    assert project.integration == :egui
+    assert project.plugin == Rekindle.Plugin.Egui
 
     assert %Config.Target{
              name: :web,
@@ -49,7 +49,7 @@ defmodule Rekindle.ConfigTest do
 
   test "uses the target name as the default Cargo feature" do
     Application.put_env(:rekindle_config_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [web: [], desktop: []]
     )
 
@@ -62,7 +62,7 @@ defmodule Rekindle.ConfigTest do
     root = tmp_dir()
 
     Application.put_env(:rekindle_config_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [web: []],
       public_dir: "public"
     )
@@ -73,7 +73,7 @@ defmodule Rekindle.ConfigTest do
 
   test "preserves an explicitly empty Cargo feature list" do
     Application.put_env(:rekindle_config_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [desktop: [features: []]]
     )
 
@@ -83,15 +83,15 @@ defmodule Rekindle.ConfigTest do
 
   test "rejects unknown configuration values" do
     Application.put_env(:rekindle_config_test, Rekindle,
-      integration: :other,
+      plugin: :other,
       targets: [web: []]
     )
 
-    assert {:error, %Config.Error{kind: :invalid_integration}} =
+    assert {:error, %Config.Error{kind: :invalid_plugin}} =
              Config.load(:rekindle_config_test)
 
     Application.put_env(:rekindle_config_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [web: []],
       unknown: true
     )
@@ -100,7 +100,7 @@ defmodule Rekindle.ConfigTest do
              Config.load(:rekindle_config_test)
 
     Application.put_env(:rekindle_config_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [web: []],
       public_dir: ""
     )
@@ -109,11 +109,14 @@ defmodule Rekindle.ConfigTest do
              Config.load(:rekindle_config_test)
   end
 
-  test "requires an integration and at least one target" do
+  test "requires a plugin and at least one target" do
     assert {:error, %Config.Error{kind: :missing_configuration}} =
              Config.load(:rekindle_config_test)
 
-    Application.put_env(:rekindle_config_test, Rekindle, integration: :gpui, targets: [])
+    Application.put_env(:rekindle_config_test, Rekindle,
+      plugin: Rekindle.Plugin.GPUI,
+      targets: []
+    )
 
     assert {:error, %Config.Error{kind: :missing_targets}} =
              Config.load(:rekindle_config_test)

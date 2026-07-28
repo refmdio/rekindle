@@ -1,19 +1,46 @@
-defmodule Rekindle.IntegrationsTest do
+defmodule Rekindle.PluginTest do
   use ExUnit.Case, async: false
 
-  alias Rekindle.Integration
+  alias Rekindle.Install.Client
+  alias Rekindle.Plugin
 
-  @moduletag :integration_matrix
   @moduletag timeout: 600_000
+  @plugins [
+    gpui: Rekindle.Plugin.GPUI,
+    egui: Rekindle.Plugin.Egui,
+    slint: Rekindle.Plugin.Slint
+  ]
 
-  test "renders application-owned sources for every built-in integration" do
-    assert Enum.sort(Integration.names()) == [:egui, :gpui, :slint]
+  defmodule CustomPlugin do
+    @behaviour Rekindle.Plugin
 
-    for name <- Integration.names() do
-      framework = Integration.dependency(name)
-      both = Integration.render(name, [:web, :desktop], package_name: "sample-client")
-      web = Integration.render(name, [:web])
-      desktop = Integration.render(name, [:desktop])
+    @impl true
+    def name, do: "custom"
+
+    @impl true
+    def spec(options) do
+      base = Rekindle.Plugin.GPUI.spec([])
+      %{base | name: name(), web: %{base.web | host: Keyword.get(options, :host, "")}}
+    end
+  end
+
+  test "loads an external plugin module with options" do
+    plugin = {CustomPlugin, host: ~s(<canvas id="custom"></canvas>)}
+
+    assert {:ok, {CustomPlugin, [host: _host], spec}} = Plugin.load(plugin)
+    assert spec.name == "custom"
+    assert spec.web.host == ~s(<canvas id="custom"></canvas>)
+    assert Client.render(plugin, [:desktop])["src/bin/desktop.rs"] =~ "client::open"
+  end
+
+  test "renders application-owned sources for every built-in plugin" do
+    assert Enum.sort(Plugin.builtin_names()) == [:egui, :gpui, :slint]
+
+    for {name, module} <- @plugins do
+      spec = Plugin.spec(module)
+      both = Client.render(module, [:web, :desktop])
+      web = Client.render(module, [:web])
+      desktop = Client.render(module, [:desktop])
 
       expected_files =
         case name do
@@ -42,9 +69,9 @@ defmodule Rekindle.IntegrationsTest do
       assert Map.has_key?(desktop, "src/bin/desktop.rs")
       refute Map.has_key?(desktop, "src/bin/web.rs")
 
-      assert both["Cargo.toml"] =~ ~s(name = "sample-client")
-      assert both["Cargo.lock"] =~ ~s(name = "sample-client")
-      assert both["Cargo.toml"] =~ framework
+      assert both["Cargo.toml"] =~ ~s(name = "client")
+      assert both["Cargo.lock"] =~ ~s(name = "client")
+      assert both["Cargo.toml"] =~ spec.dependency
 
       assert_framework_entrypoints(name, both)
 
@@ -56,54 +83,58 @@ defmodule Rekindle.IntegrationsTest do
       end
 
       assert both["src/lib.rs"] != ""
-      assert both["src/bin/web.rs"] =~ "sample_client"
-      assert both["src/bin/desktop.rs"] =~ "sample_client"
+      assert both["src/bin/web.rs"] =~ "client"
+      assert both["src/bin/desktop.rs"] =~ "client"
     end
   end
 
-  test "keeps host and graphics requirements with each integration" do
-    assert {:ok, %{graphics: %{web: :webgpu}, host: "", style: gpui_style}} =
-             Integration.fetch(:gpui)
+  test "keeps host and graphics requirements with each plugin" do
+    assert %{web: %{graphics: :webgpu, host: "", style: gpui_style}} =
+             Plugin.spec(Rekindle.Plugin.GPUI)
 
     assert gpui_style =~ "body > canvas"
     assert gpui_style =~ "touch-action: none"
 
-    assert {:ok, %{graphics: %{web: :webgl2}, host: egui_host, style: egui_style}} =
-             Integration.fetch(:egui)
+    assert %{web: %{graphics: :webgl2, host: egui_host, style: egui_style}} =
+             Plugin.spec(Rekindle.Plugin.Egui)
 
     assert egui_host == ~s(<canvas id="the_canvas_id"></canvas>)
     assert egui_style =~ "#the_canvas_id"
     assert egui_style =~ "width: 100%"
 
-    assert {:ok, %{graphics: %{web: :webgl2}, host: slint_host, style: slint_style}} =
-             Integration.fetch(:slint)
+    assert %{web: %{graphics: :webgl2, host: slint_host, style: slint_style}} =
+             Plugin.spec(Rekindle.Plugin.Slint)
 
     assert slint_host =~ ~s(id="canvas")
     assert slint_style =~ "#canvas"
     assert slint_style =~ "height: 100%"
 
-    for name <- Integration.names() do
-      assert {:ok, %{host: host, style: style}} = Integration.fetch(name)
-      assert Rekindle.Phoenix.web_host(name) == host
-      assert Rekindle.Phoenix.web_style(name) == style
+    for {_name, module} <- @plugins do
+      %{web: %{host: host, style: style}} = Plugin.spec(module)
+      assert Rekindle.Phoenix.web_host(module) == host
+      assert Rekindle.Phoenix.web_style(module) == style
       refute host =~ ~r/rekindle/i
       refute style =~ ~r/rekindle/i
     end
 
-    assert Rekindle.Phoenix.web_host(:gpui) == ""
-    assert Rekindle.Phoenix.web_host(:egui) == ~s(<canvas id="the_canvas_id"></canvas>)
-    assert Rekindle.Phoenix.web_host(:slint) == ~s(<canvas id="canvas"></canvas>)
+    assert Rekindle.Phoenix.web_host(Rekindle.Plugin.GPUI) == ""
+
+    assert Rekindle.Phoenix.web_host(Rekindle.Plugin.Egui) ==
+             ~s(<canvas id="the_canvas_id"></canvas>)
+
+    assert Rekindle.Phoenix.web_host(Rekindle.Plugin.Slint) == ~s(<canvas id="canvas"></canvas>)
   end
 
+  @tag :plugin_matrix
   test "generated clients compile for every target selection" do
-    for name <- selected_integrations() do
+    for {name, module} <- selected_plugins() do
       for targets <- [[:web], [:desktop], [:web, :desktop]] do
         root = tmp_dir("#{name}-#{Enum.join(targets, "-")}")
-        write(root, Integration.render(name, targets))
+        write(root, Client.render(module, targets))
         commit_generated_client!(root)
         dependency_names = cargo_dependency_names!(root)
 
-        assert Integration.dependency(name) in dependency_names
+        assert Plugin.spec(module).dependency in dependency_names
         refute Enum.any?(dependency_names, &String.starts_with?(&1, "rekindle"))
 
         if name == :slint do
@@ -124,25 +155,26 @@ defmodule Rekindle.IntegrationsTest do
   end
 
   @tag timeout: 1_800_000
-  test "packages Web and desktop generations for every built-in integration" do
-    previous = Application.get_env(:rekindle_integration_matrix_test, Rekindle)
+  @tag :plugin_matrix
+  test "packages Web and desktop generations for every built-in plugin" do
+    previous = Application.get_env(:rekindle_plugin_matrix_test, Rekindle)
 
     on_exit(fn ->
       if previous do
-        Application.put_env(:rekindle_integration_matrix_test, Rekindle, previous)
+        Application.put_env(:rekindle_plugin_matrix_test, Rekindle, previous)
       else
-        Application.delete_env(:rekindle_integration_matrix_test, Rekindle)
+        Application.delete_env(:rekindle_plugin_matrix_test, Rekindle)
       end
     end)
 
-    for name <- selected_integrations() do
+    for {name, module} <- selected_plugins() do
       root = tmp_dir("#{name}-package")
       client = Path.join(root, "client")
-      package = "matrix_#{name}"
-      write(client, Integration.render(name, [:web, :desktop], package_name: package))
+      package = "client"
+      write(client, Client.render(module, [:web, :desktop]))
 
-      Application.put_env(:rekindle_integration_matrix_test, Rekindle,
-        integration: name,
+      Application.put_env(:rekindle_plugin_matrix_test, Rekindle,
+        plugin: module,
         targets: [
           web: [package: package, binary: "web", features: ["web"]],
           desktop: [package: package, binary: "desktop", features: ["desktop"]]
@@ -156,13 +188,13 @@ defmodule Rekindle.IntegrationsTest do
         System.get_env()
         |> Map.put(
           "CARGO_TARGET_DIR",
-          Path.join(System.tmp_dir!(), "rekindle-integration-package-target")
+          Path.join(System.tmp_dir!(), "rekindle-plugin-package-target")
         )
         |> Map.put("CARGO_TERM_COLOR", "never")
         |> Map.put("RUSTC", String.trim(rustc))
 
       options = [
-        otp_app: :rekindle_integration_matrix_test,
+        otp_app: :rekindle_plugin_matrix_test,
         project_root: root,
         cargo: cargo,
         rustc: String.trim(rustc),
@@ -249,7 +281,7 @@ defmodule Rekindle.IntegrationsTest do
         ["check", "--locked", "--target", triple, "--bin", target, "--features", target],
         cd: root,
         env: [
-          {"CARGO_TARGET_DIR", Path.join(System.tmp_dir!(), "rekindle-integration-target")},
+          {"CARGO_TARGET_DIR", Path.join(System.tmp_dir!(), "rekindle-plugin-target")},
           {"CARGO_TERM_COLOR", "never"},
           {"RUSTC", String.trim(rustc)}
         ],
@@ -332,15 +364,15 @@ defmodule Rekindle.IntegrationsTest do
     String.trim(path)
   end
 
-  defp selected_integrations do
-    case System.get_env("REKINDLE_INTEGRATION") do
+  defp selected_plugins do
+    case System.get_env("REKINDLE_PLUGIN") do
       nil ->
-        Integration.names()
+        @plugins
 
       selected ->
-        case Enum.find(Integration.names(), &(Atom.to_string(&1) == selected)) do
-          nil -> raise "unknown REKINDLE_INTEGRATION: #{selected}"
-          integration -> [integration]
+        case Enum.find(@plugins, fn {name, _module} -> Atom.to_string(name) == selected end) do
+          nil -> raise "unknown REKINDLE_PLUGIN: #{selected}"
+          plugin -> [plugin]
         end
     end
   end

@@ -10,7 +10,7 @@ thread_local! {
 pub fn start() {
     gpui_platform::web_init();
 
-    let application = gpui_platform::application().run_embedded(<%= @crate_name %>::open);
+    let application = gpui_platform::application().run_embedded(client::open);
     APPLICATION.with(|slot| {
         assert!(
             slot.set(application).is_ok(),

@@ -5,7 +5,7 @@ use std::cell::OnceCell;
 use slint::ComponentHandle;
 
 thread_local! {
-    static UI: OnceCell<<%= @crate_name %>::AppWindow> = const { OnceCell::new() };
+    static UI: OnceCell<client::AppWindow> = const { OnceCell::new() };
 }
 
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
@@ -18,7 +18,7 @@ pub fn start() {
     slint::platform::set_platform(Box::new(backend))
         .expect("failed to install the Slint Web backend");
 
-    let ui = <%= @crate_name %>::create().expect("failed to create the application");
+    let ui = client::create().expect("failed to create the application");
     ui.show().expect("failed to show the application");
     UI.with(|slot| {
         assert!(slot.set(ui).is_ok(), "the application is already running");

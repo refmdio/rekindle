@@ -7,7 +7,7 @@
 # General application configuration
 import Config
 
-config :slint_example, Rekindle, integration: :slint, targets: [web: [], desktop: []]
+config :slint_example, Rekindle, plugin: Rekindle.Plugin.Slint, targets: [web: [], desktop: []]
 
 config :slint_example,
   generators: [timestamp_type: :utc_datetime]

@@ -39,11 +39,11 @@ defmodule Rekindle.DevServer do
          options
        ) do
     with {:ok, project} <- project(options),
-         {:ok, integration} <- Rekindle.Integration.fetch(project.integration) do
+         {:ok, {_module, _plugin_options, plugin}} <- Rekindle.Plugin.load(project.plugin) do
       conn
       |> no_store()
       |> put_resp_content_type("text/javascript")
-      |> send_resp(200, runtime(integration.graphics.web))
+      |> send_resp(200, runtime(plugin.web.graphics))
       |> halt()
     else
       _error -> unavailable(conn)

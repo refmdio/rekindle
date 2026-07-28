@@ -13,7 +13,7 @@ defmodule Rekindle.WebBuildTest do
     File.write!(Path.join(root, "client/src/bin/web.rs"), "fn main() {}\n")
 
     Application.put_env(:rekindle_web_build_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [web: [features: ["web"]]]
     )
 
@@ -100,7 +100,7 @@ defmodule Rekindle.WebBuildTest do
 
   test "publishes release output below a configured public directory", %{root: root} do
     Application.put_env(:rekindle_web_build_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [web: [features: ["web"]]],
       public_dir: "public"
     )

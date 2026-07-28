@@ -1,4 +1,4 @@
-defmodule Rekindle.ToolingIntegrationTest do
+defmodule Rekindle.ToolingTest do
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
@@ -13,7 +13,7 @@ defmodule Rekindle.ToolingIntegrationTest do
     previous = Application.get_env(:rekindle_tooling_test, Rekindle)
 
     Application.put_env(:rekindle_tooling_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [web: [], desktop: []]
     )
 
@@ -108,7 +108,7 @@ defmodule Rekindle.ToolingIntegrationTest do
 
     assert {:ok, checks} = Doctor.run(:rekindle_tooling_test, context.options)
     assert Enum.all?(checks, &(&1.status == :ok))
-    assert Enum.any?(checks, &(&1.name == :web_integration))
+    assert Enum.any?(checks, &(&1.name == :web_plugin))
     assert Enum.any?(checks, &(&1.name == :desktop_binary))
 
     refute Enum.any?(
@@ -126,7 +126,7 @@ defmodule Rekindle.ToolingIntegrationTest do
     real_cargo = System.find_executable("cargo")
 
     Application.put_env(:rekindle_tooling_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [desktop: []]
     )
 
@@ -186,7 +186,7 @@ defmodule Rekindle.ToolingIntegrationTest do
 
   test "Doctor reports malformed configuration and missing prerequisites", context do
     Application.put_env(:rekindle_tooling_test, Rekindle,
-      integration: :unknown,
+      plugin: :unknown,
       targets: [web: []]
     )
 
@@ -256,7 +256,7 @@ defmodule Rekindle.ToolingIntegrationTest do
     end)
 
     Application.put_env(:rekindle, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [desktop: []]
     )
 
@@ -290,7 +290,7 @@ defmodule Rekindle.ToolingIntegrationTest do
       end
 
       Application.put_env(:rekindle, Rekindle,
-        integration: :invalid,
+        plugin: :invalid,
         targets: [desktop: []]
       )
 

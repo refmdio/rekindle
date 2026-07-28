@@ -1,6 +1,6 @@
 # Web Target
 
-The Web target compiles the selected Rust UI integration to WebAssembly and
+The Web target compiles the selected Rust UI plugin to WebAssembly and
 publishes the JavaScript, WebAssembly, and public files as one immutable
 generation.
 

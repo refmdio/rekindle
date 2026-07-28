@@ -4,9 +4,9 @@ if Code.ensure_loaded?(Igniter) do
     @moduledoc """
     Installs Rekindle into a Phoenix project through Igniter.
 
-        mix igniter.install rekindle --integration gpui --targets web,desktop
+        mix igniter.install rekindle --plugin gpui --targets web,desktop
 
-    Valid integrations are `gpui`, `egui`, and `slint`. Targets can be `web`,
+    Valid plugins are `gpui`, `egui`, and `slint`. Targets can be `web`,
     `desktop`, or both. The installer creates `client/` and does not overwrite
     an existing Rust project.
     """
@@ -17,8 +17,8 @@ if Code.ensure_loaded?(Igniter) do
     def info(_argv, _composing_task) do
       %Igniter.Mix.Task.Info{
         group: :rekindle,
-        example: "mix igniter.install rekindle --integration gpui --targets web,desktop",
-        schema: [integration: :string, targets: :csv]
+        example: "mix igniter.install rekindle --plugin gpui --targets web,desktop",
+        schema: [plugin: :string, targets: :csv]
       }
     end
 

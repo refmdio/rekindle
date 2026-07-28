@@ -16,7 +16,7 @@ defmodule Rekindle.Desktop.Release do
 
     with {:ok, manifest} <- Manifest.read(source),
          true <- manifest["target"] == metadata.rust_target,
-         true <- manifest["integration"] == Atom.to_string(project.integration),
+         true <- manifest["plugin"] == Rekindle.Plugin.name(project.plugin),
          :ok <- Manifest.validate(source, manifest),
          :ok <- publish_files(source, destination, manifest) do
       {:ok,

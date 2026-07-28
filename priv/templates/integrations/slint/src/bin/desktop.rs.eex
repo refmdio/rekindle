@@ -1,3 +1,0 @@
-fn main() {
-    <%= @crate_name %>::run().expect("failed to start the application");
-}

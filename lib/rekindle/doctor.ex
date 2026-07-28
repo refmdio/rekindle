@@ -4,7 +4,7 @@ defmodule Rekindle.Doctor do
   alias Rekindle.Cargo
   alias Rekindle.Cargo.Metadata
   alias Rekindle.Config
-  alias Rekindle.Integration
+  alias Rekindle.Plugin
   alias Rekindle.Toolchain
   alias Rekindle.Toolchain.Check
 
@@ -118,17 +118,17 @@ defmodule Rekindle.Doctor do
 
     case Cargo.resolve(metadata, project, target) do
       {:ok, package, binary} ->
-        dependency = Integration.dependency(project.integration)
+        dependency = project.plugin |> Plugin.spec() |> Map.fetch!(:dependency)
 
         dependency_check =
           if dependency in package.dependencies do
             passed(
-              :"#{target_name}_integration",
+              :"#{target_name}_plugin",
               "#{package.name} directly depends on #{dependency}"
             )
           else
             failed(
-              :"#{target_name}_integration",
+              :"#{target_name}_plugin",
               "#{package.name} must directly depend on #{dependency}"
             )
           end

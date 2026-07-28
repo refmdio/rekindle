@@ -7,7 +7,7 @@
 # General application configuration
 import Config
 
-config :egui_example, Rekindle, integration: :egui, targets: [web: [], desktop: []]
+config :egui_example, Rekindle, plugin: Rekindle.Plugin.Egui, targets: [web: [], desktop: []]
 
 config :egui_example,
   generators: [timestamp_type: :utc_datetime]

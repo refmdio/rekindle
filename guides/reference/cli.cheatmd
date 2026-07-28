@@ -3,7 +3,7 @@
 ## Install
 
 ```console
-mix igniter.install rekindle --integration gpui --targets web,desktop
+mix igniter.install rekindle --plugin gpui --targets web,desktop
 ```
 
 ## Tooling

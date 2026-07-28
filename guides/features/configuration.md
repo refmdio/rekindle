@@ -4,7 +4,7 @@ Rekindle uses the host application's standard Elixir configuration:
 
 ```elixir
 config :my_app, Rekindle,
-  integration: :gpui,
+  plugin: Rekindle.Plugin.GPUI,
   targets: [
     web: [],
     desktop: []
@@ -13,7 +13,9 @@ config :my_app, Rekindle,
 
 ## Top-level options
 
-- `:integration` — required; `:gpui`, `:egui`, or `:slint`.
+- `:plugin` — required; a module implementing `Rekindle.Plugin`, or a
+  `{module, options}` tuple. Rekindle includes `Rekindle.Plugin.GPUI`,
+  `Rekindle.Plugin.Egui`, and `Rekindle.Plugin.Slint`.
 - `:targets` — required; a non-empty keyword list containing `:web`,
   `:desktop`, or both.
 - `:public_dir` — Web release publication root, relative to the Elixir project
@@ -40,7 +42,7 @@ For example:
 
 ```elixir
 config :my_app, Rekindle,
-  integration: :egui,
+  plugin: Rekindle.Plugin.Egui,
   targets: [
     web: [
       package: "editor_client",

@@ -18,7 +18,7 @@ defmodule Rekindle.CargoTest do
       otp_app: :fixture,
       root: root,
       client_root: Path.join(root, "client"),
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: %{},
       public_dir: Path.join(root, "priv/static")
     }

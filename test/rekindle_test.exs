@@ -12,7 +12,7 @@ defmodule RekindleTest do
     assert %{start: {Development, :start_link, [^options]}} =
              Supervisor.child_spec({Development, options}, [])
 
-    Application.put_env(:demo, Rekindle, integration: :gpui, targets: [web: []])
+    Application.put_env(:demo, Rekindle, plugin: Rekindle.Plugin.GPUI, targets: [web: []])
 
     on_exit(fn ->
       Application.delete_env(:demo, Rekindle)
@@ -39,7 +39,7 @@ defmodule RekindleTest do
     options = [otp_app: :combined_demo, project_root: root, targets: [:desktop]]
 
     Application.put_env(:combined_demo, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [web: [], desktop: []]
     )
 
@@ -70,7 +70,7 @@ defmodule RekindleTest do
     root = temporary_client([:web, :desktop])
 
     Application.put_env(:isolated_demo, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [web: [], desktop: []]
     )
 
@@ -99,7 +99,7 @@ defmodule RekindleTest do
 
   test "rejects development targets that are not enabled" do
     root = temporary_client([:web])
-    Application.put_env(:web_demo, Rekindle, integration: :gpui, targets: [web: []])
+    Application.put_env(:web_demo, Rekindle, plugin: Rekindle.Plugin.GPUI, targets: [web: []])
 
     on_exit(fn ->
       Application.delete_env(:web_demo, Rekindle)

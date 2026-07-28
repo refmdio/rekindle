@@ -17,7 +17,6 @@ concurrency:
 
 jobs:
   verify:
-    if: github.event_name != 'release'
     runs-on: ubuntu-24.04
 
     steps:
@@ -57,16 +56,15 @@ jobs:
           mix compile --warnings-as-errors
           mix reach.check --arch --dead-code
           mix reach.check --smells --strict
-          mix test --exclude integration_matrix
+          mix test --exclude plugin_matrix
           mix docs --warnings-as-errors
 
-  integrations:
-    if: github.event_name != 'release'
+  plugins:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        integration: [gpui, egui, slint]
+        plugin: [gpui, egui, slint]
 
     steps:
       - name: Check out the source
@@ -123,7 +121,7 @@ jobs:
             deps
             _build
             ~/.cache/rekindle/tools
-          key: integrations-${{ runner.os }}-otp-29-elixir-1.20-${{ hashFiles('mix.lock') }}
+          key: plugins-${{ runner.os }}-otp-29-elixir-1.20-${{ hashFiles('mix.lock') }}
 
       - name: Restore Rust dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -132,9 +130,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/registry/index
             ~/.cargo/git/db
-          key: rust-${{ runner.os }}-${{ matrix.integration }}-${{ hashFiles('priv/templates/integrations/**/Cargo.lock.eex') }}
+          key: rust-${{ runner.os }}-${{ matrix.plugin }}-${{ hashFiles('priv/templates/client/**/Cargo.lock') }}
           restore-keys: |
-            rust-${{ runner.os }}-${{ matrix.integration }}-
+            rust-${{ runner.os }}-${{ matrix.plugin }}-
 
       - name: Install dependencies
         run: mix deps.get
@@ -148,12 +146,13 @@ jobs:
             end
           '
 
-      - name: Verify ${{ matrix.integration }} integration
+      - name: Verify ${{ matrix.plugin }} plugin
         env:
-          REKINDLE_INTEGRATION: ${{ matrix.integration }}
-        run: mix test test/integration/integrations_test.exs --include integration_matrix
+          REKINDLE_PLUGIN: ${{ matrix.plugin }}
+        run: mix test test/rekindle/plugin_test.exs --include plugin_matrix
 
   publish:
+    needs: [verify, plugins]
     if: github.event_name == 'release' && github.event.release.prerelease == false
     runs-on: ubuntu-24.04
 

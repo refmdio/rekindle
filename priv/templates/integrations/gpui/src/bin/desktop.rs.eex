@@ -1,3 +1,0 @@
-fn main() {
-    gpui_platform::application().run(<%= @crate_name %>::open);
-}

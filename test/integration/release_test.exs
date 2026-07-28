@@ -44,8 +44,12 @@ defmodule Rekindle.ReleaseTest do
 
     assert Rekindle.Phoenix.web_entry_path(Endpoint) == "/" <> digested_entry
 
-    for integration <- [:gpui, :egui, :slint] do
-      assert is_binary(Rekindle.Phoenix.web_host(integration))
+    for plugin <- [
+          Rekindle.Plugin.GPUI,
+          Rekindle.Plugin.Egui,
+          Rekindle.Plugin.Slint
+        ] do
+      assert is_binary(Rekindle.Phoenix.web_host(plugin))
       assert Rekindle.Phoenix.web_entry_path(Endpoint) == "/" <> digested_entry
     end
 
@@ -86,7 +90,7 @@ defmodule Rekindle.ReleaseTest do
     desktop_executable = Path.join(desktop_root, desktop_manifest["executable"])
 
     assert desktop_manifest["target"] == tools.target
-    assert desktop_manifest["integration"] == "gpui"
+    assert desktop_manifest["plugin"] == "gpui"
     assert desktop_manifest["executable"] == "application"
     assert executable?(desktop_executable)
     refute File.exists?(tools.launched)
@@ -153,7 +157,7 @@ defmodule Rekindle.ReleaseTest do
       import Config
 
       config :release_fixture, Rekindle,
-        integration: :gpui,
+        plugin: Rekindle.Plugin.GPUI,
         targets: [
           web: [package: "release_client", binary: "web", features: ["web"]],
           desktop: [package: "release_client", binary: "desktop", features: ["desktop"]]

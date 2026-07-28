@@ -31,7 +31,7 @@ defmodule Rekindle.CheckTest do
     previous = Application.get_env(:rekindle_check_test, Rekindle)
 
     Application.put_env(:rekindle_check_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [web: [], desktop: []]
     )
 

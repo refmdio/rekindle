@@ -770,7 +770,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "<%= @package_name %>"
+name = "client"
 version = "0.1.0"
 dependencies = [
  "i-slint-backend-winit",

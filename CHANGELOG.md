@@ -1,10 +1,20 @@
 # Changelog
 
+## 0.1.6 - 2026-07-28
+
+- Replace the fixed framework registry with a public plugin contract.
+- Generate Cargo manifests from plugin specifications while keeping Cargo
+  authoritative after installation.
+- Let external Igniter packages provide client resources and delegate project
+  installation to Rekindle.
+- Configure framework support exclusively through plugin modules and keep
+  generated Cargo projects application-owned.
+
 ## 0.1.5 - 2026-07-28
 
 - Make the generated Rust Web UI the primary Phoenix page surface for GPUI,
   egui, and Slint.
-- Preserve each integration's upstream starter UI across Web and desktop
+- Preserve each framework's upstream starter UI across Web and desktop
   targets.
 - Keep the Slint Web event loop and UI instance alive after startup.
 - Serve WebAssembly with the standard `application/wasm` media type.
@@ -29,8 +39,7 @@
 - Use Phoenix's standard `mix phx.server` command for development and remove
   the redundant `mix rekindle.dev` wrapper.
 - Integrate Web builds with `mix assets.build`, simplify generated target
-  configuration, and allow the installer to add a target without replacing
-  existing Rust UI source.
+  configuration, and preserve application-owned Rust UI source.
 - Add concise build timing, browser loading and failure feedback, and Web
   development lifecycle events.
 - Integrate target-aware Rust formatting, Clippy, and library checks with

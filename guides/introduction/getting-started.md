@@ -21,10 +21,10 @@ Fetch the dependency, then install Rekindle:
 
 ```console
 mix deps.get
-mix igniter.install rekindle --integration gpui --targets web,desktop
+mix igniter.install rekindle --plugin gpui --targets web,desktop
 ```
 
-Valid integrations are `gpui`, `egui`, and `slint`. Valid target selections are
+Valid plugins are `gpui`, `egui`, and `slint`. Valid target selections are
 `web`, `desktop`, and `web,desktop`. When the flags are omitted for a new
 client, Rekindle selects GPUI and enables both targets. The Web target is
 `wasm32-unknown-unknown`; desktop builds use the Rust host target.
@@ -34,10 +34,6 @@ request starts Web development automatically, so the normal command remains
 `mix phx.server`. Run `mix rekindle.dev desktop` when developing the native
 application, or `mix rekindle.dev web,desktop` to select both targets
 explicitly.
-
-Run the installer again with the current integration and a superset of the
-configured targets to add a target later. Existing Rust UI source files are
-preserved. The installer does not remove targets or switch integrations.
 
 The installer adds Rekindle as an application dependency, creates the Rust
 client, configures the Phoenix development runtime, and adds Web builds to the

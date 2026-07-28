@@ -4,11 +4,24 @@ defmodule Rekindle.InstallTest do
   alias Igniter.Mix.Task.Args
   alias Igniter.Test
 
+  defmodule ExternalPlugin do
+    @behaviour Rekindle.Plugin
+
+    @impl true
+    def name, do: "external"
+
+    @impl true
+    def spec(_options) do
+      base = Rekindle.Plugin.Egui.spec([])
+      %{base | name: name()}
+    end
+  end
+
   test "fresh installation defaults to GPUI with both targets" do
     installed = install(project())
 
     assert installed.issues == []
-    assert content(installed, "config/config.exs") =~ "integration: :gpui"
+    assert content(installed, "config/config.exs") =~ "plugin: Rekindle.Plugin.GPUI"
     assert content(installed, "config/config.exs") =~ "web: []"
     assert content(installed, "config/config.exs") =~ "desktop: []"
     assert content(installed, "client/Cargo.toml") =~ "gpui"
@@ -55,14 +68,15 @@ defmodule Rekindle.InstallTest do
            ]
   end
 
-  test "renders every integration and target selection" do
-    for integration <- ~w(gpui egui slint),
+  test "renders every plugin and target selection" do
+    for plugin <- ~w(gpui egui slint),
         targets <- [["web"], ["desktop"], ["web", "desktop"]] do
-      installed = install(project(), integration: integration, targets: targets)
+      installed = install(project(), plugin: plugin, targets: targets)
       assert installed.issues == []
 
       manifest = content(installed, "client/Cargo.toml")
-      assert manifest =~ Rekindle.Integration.dependency(String.to_existing_atom(integration))
+      spec = plugin |> plugin_module() |> Rekindle.Plugin.spec()
+      assert manifest =~ spec.dependency
       assert content(installed, "client/Cargo.lock") =~ ~s(name = "client")
 
       for target <- ~w(web desktop) do
@@ -81,10 +95,10 @@ defmodule Rekindle.InstallTest do
       if "web" in targets do
         assert endpoint =~ "Rekindle.DevServer"
         assert layout =~ "Rekindle.Phoenix.web_entry_path"
-        assert layout =~ ~s(<style data-rust-ui="#{integration}">)
+        assert layout =~ ~s(<style data-rust-ui="#{plugin}">)
         refute layout =~ "{@inner_content}"
 
-        host = Rekindle.Integration.host(String.to_existing_atom(integration))
+        host = spec.web.host
         if host != "", do: assert(layout =~ host)
       else
         refute endpoint =~ "Rekindle.DevServer"
@@ -96,101 +110,33 @@ defmodule Rekindle.InstallTest do
     end
   end
 
-  test "repeat installation is idempotent and rejects conflicting selection" do
-    installed = install(project(), integration: "egui", targets: ["web"])
+  test "accepts a plugin module from another package" do
+    installed = install(project(), plugin: ExternalPlugin, targets: ["web"])
+
+    assert installed.issues == []
+
+    assert content(installed, "config/config.exs") =~
+             "plugin: Rekindle.InstallTest.ExternalPlugin"
+
+    assert content(installed, "client/Cargo.toml") =~ "eframe"
+    assert content(installed, "client/src/bin/web.rs") =~ "client::TemplateApp"
+
+    assert content(installed, "lib/demo_web/components/layouts/root.html.heex") =~
+             ~s(data-rust-ui="external")
+  end
+
+  test "repeat installation is idempotent and does not replace its selection" do
+    installed = install(project(), plugin: "egui", targets: ["web"])
     repeated = install(installed)
 
     assert repeated.issues == []
     assert changed_contents(repeated) == changed_contents(installed)
 
-    conflicted = install(installed, integration: "slint", targets: ["web"])
-    assert Enum.any?(conflicted.issues, &String.contains?(&1, "conflicts"))
-    assert changed_contents(conflicted) == changed_contents(installed)
-  end
-
-  test "adds a target to an installed client without replacing shared UI files" do
-    installed = install(project(), integration: "egui", targets: ["web"])
-
-    installed =
-      update_content(installed, "config/config.exs", fn config ->
-        String.replace(config, "web: []", ~s(web: [features: ["browser"]]))
-      end)
-
-    shared_ui = content(installed, "client/src/app.rs")
-
-    extended =
-      install(installed, integration: "egui", targets: ["web", "desktop"])
-
-    assert extended.issues == []
-    assert content(extended, "config/config.exs") =~ ~s(web: [features: ["browser"]])
-    assert content(extended, "config/config.exs") =~ "desktop: []"
-    assert content(extended, "client/src/app.rs") == shared_ui
-    assert content(extended, "client/src/bin/desktop.rs") != ""
-    assert content(extended, "client/Cargo.toml") =~ ~s(name = "desktop")
-
-    repeated = install(extended, integration: "egui", targets: ["web", "desktop"])
-    assert repeated.issues == []
-    assert changed_contents(repeated) == changed_contents(extended)
-  end
-
-  test "does not remove an installed target" do
-    installed = install(project(), integration: "egui", targets: ["web", "desktop"])
-    rejected = install(installed, integration: "egui", targets: ["web"])
-
-    assert Enum.any?(rejected.issues, &String.contains?(&1, "conflicts"))
-    assert changed_contents(rejected) == changed_contents(installed)
-  end
-
-  test "rejects target addition when the Cargo package name is not static" do
-    installed = install(project(), integration: "egui", targets: ["web"])
-
-    invalid =
-      update_content(installed, "client/Cargo.toml", fn manifest ->
-        String.replace(manifest, ~s(name = "client"), "name = workspace.package.name")
-      end)
-
-    rejected = install(invalid, integration: "egui", targets: ["web", "desktop"])
-
-    assert rejected.issues == ["client/Cargo.toml must contain a static package name"]
-    assert changed_contents(rejected) == changed_contents(invalid)
-  end
-
-  test "accepts quoted static Cargo package names when adding a target" do
-    installed = install(project(), integration: "egui", targets: ["web"])
-
-    customized =
-      update_content(installed, "client/Cargo.toml", fn manifest ->
-        String.replace(manifest, ~s(name = "client"), "name = 'custom-client' # application UI")
-      end)
-
-    extended = install(customized, integration: "egui", targets: ["web", "desktop"])
-
-    assert extended.issues == []
-    assert content(extended, "client/src/bin/desktop.rs") =~ "custom_client::TemplateApp"
-  end
-
-  test "rejects an incompatible existing Cargo bin when adding a target" do
-    installed = install(project(), integration: "egui", targets: ["web"])
-
-    customized =
-      update_content(installed, "client/Cargo.toml", fn manifest ->
-        manifest <>
-          """
-
-          [[bin]]
-          name = "desktop"
-          path = "src/custom_desktop.rs"
-          required-features = ["desktop"]
-          """
-      end)
-
-    rejected = install(customized, integration: "egui", targets: ["web", "desktop"])
-
-    assert rejected.issues == [
-             "client/Cargo.toml already defines desktop with a non-canonical bin configuration"
-           ]
-
-    assert changed_contents(rejected) == changed_contents(customized)
+    for options <- [[plugin: "slint"], [targets: ["web", "desktop"]]] do
+      rejected = install(installed, options)
+      assert Enum.any?(rejected.issues, &String.contains?(&1, "conflicts"))
+      assert changed_contents(rejected) == changed_contents(installed)
+    end
   end
 
   test "adds a missing static plug without duplicating the development plug" do
@@ -217,7 +163,7 @@ defmodule Rekindle.InstallTest do
     assert length(Regex.scan(~r/Rekindle\.DevServer/, endpoint)) == 1
   end
 
-  test "adds missing integration host markup independently from the script" do
+  test "adds missing plugin host markup independently from the script" do
     script =
       ~s|<script type="module" src={Rekindle.Phoenix.web_entry_path(DemoWeb.Endpoint)}></script>|
 
@@ -233,7 +179,7 @@ defmodule Rekindle.InstallTest do
           </html>
           """
         }),
-        integration: "egui",
+        plugin: "egui",
         targets: ["web"]
       )
 
@@ -249,7 +195,7 @@ defmodule Rekindle.InstallTest do
         "lib/demo_web/components/layouts/root.html.heex" => "<html><head></head></html>\n"
       })
 
-    rejected = install(original, integration: "egui", targets: ["web"])
+    rejected = install(original, plugin: "egui", targets: ["web"])
 
     assert Enum.any?(rejected.issues, &String.contains?(&1, "must contain </body>"))
     assert changed_contents(rejected) == changed_contents(original)
@@ -261,7 +207,7 @@ defmodule Rekindle.InstallTest do
         "lib/demo_web/components/layouts/root.html.heex" => "<html><body></body></html>\n"
       })
 
-    rejected = install(original, integration: "egui", targets: ["web"])
+    rejected = install(original, plugin: "egui", targets: ["web"])
 
     assert Enum.any?(rejected.issues, &String.contains?(&1, "must contain </head>"))
     assert changed_contents(rejected) == changed_contents(original)
@@ -281,7 +227,7 @@ defmodule Rekindle.InstallTest do
         """
       })
 
-    installed = install(original, integration: "egui", targets: ["web"])
+    installed = install(original, plugin: "egui", targets: ["web"])
 
     assert content(installed, "test/demo_web/controllers/page_controller_test.exs") ==
              content(original, "test/demo_web/controllers/page_controller_test.exs")
@@ -294,7 +240,7 @@ defmodule Rekindle.InstallTest do
         "client/src/lib.rs" => "pub struct Existing;\n"
       })
 
-    rejected = install(original, integration: "gpui", targets: ["web"])
+    rejected = install(original, plugin: "gpui", targets: ["web"])
     assert rejected.issues == ["client/Cargo.toml already exists; Rekindle will not overwrite it"]
     assert changed_contents(rejected) == changed_contents(original)
   end
@@ -308,26 +254,10 @@ defmodule Rekindle.InstallTest do
     assert content(rejected, "client/src/lib.rs") == "pub struct Existing;\n"
   end
 
-  test "preserves an entry for a target that is not being generated" do
-    original =
-      project(%{
-        "client/src/bin/desktop.rs" => "fn main() { println!(\"existing\"); }\n"
-      })
-
-    installed = install(original, integration: "gpui", targets: ["web"])
-
-    assert installed.issues == []
-
-    assert content(installed, "client/src/bin/desktop.rs") ==
-             content(original, "client/src/bin/desktop.rs")
-
-    assert content(installed, "client/src/bin/web.rs") != ""
-  end
-
   test "rejects invalid selections before changing the project" do
     original = project()
 
-    for options <- [[integration: "other"], [targets: ["mobile"]], [targets: []]] do
+    for options <- [[plugin: "other"], [targets: ["mobile"]], [targets: []]] do
       rejected = install(original, options)
       assert rejected.issues != []
       assert changed_contents(rejected) == changed_contents(original)
@@ -356,7 +286,7 @@ defmodule Rekindle.InstallTest do
   end
 
   test "rejects invalid existing Rekindle configuration" do
-    installed = install(project(), integration: "egui", targets: ["web"])
+    installed = install(project(), plugin: "egui", targets: ["web"])
 
     invalid =
       update_content(installed, "config/config.exs", fn config ->
@@ -380,7 +310,7 @@ defmodule Rekindle.InstallTest do
         """
       })
 
-    installed = install(original, integration: "egui", targets: ["web"])
+    installed = install(original, plugin: "egui", targets: ["web"])
 
     assert content(installed, ".gitignore") ==
              """
@@ -403,7 +333,7 @@ defmodule Rekindle.InstallTest do
   end
 
   test "desktop-only installation does not add browser hooks" do
-    installed = install(project(), integration: "gpui", targets: ["desktop"])
+    installed = install(project(), plugin: "gpui", targets: ["desktop"])
     refute content(installed, "lib/demo_web/endpoint.ex") =~ "Rekindle.DevServer"
     refute content(installed, "lib/demo_web/components/layouts/root.html.heex") =~ "Rekindle"
   end
@@ -489,6 +419,10 @@ defmodule Rekindle.InstallTest do
         )
     )
   end
+
+  defp plugin_module("gpui"), do: Rekindle.Plugin.GPUI
+  defp plugin_module("egui"), do: Rekindle.Plugin.Egui
+  defp plugin_module("slint"), do: Rekindle.Plugin.Slint
 
   defp install(igniter, options \\ []) do
     igniter

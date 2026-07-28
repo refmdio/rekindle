@@ -3,34 +3,34 @@ defmodule Rekindle.Phoenix do
   Connects Rekindle's Web artifacts to a Phoenix endpoint.
 
   The installer adds the development endpoint plug, static delivery, and the
-  selected integration's Web shell and module script to the Phoenix root
+  selected plugin's Web shell and module script to the Phoenix root
   layout.
   `web_entry_path/1` selects the development runtime while code reloading is
   enabled and resolves the production entry module through the application's
   Phoenix static-path implementation otherwise. `web_host/1` and `web_style/1`
-  supply the integration-owned shell when a custom layout needs it.
+  supply the plugin-owned shell when a custom layout needs it.
   """
 
-  @type integration :: :gpui | :egui | :slint
+  @type plugin :: Rekindle.Plugin.configured()
 
   @doc """
-  Returns the trusted Web host markup for a built-in integration.
+  Returns the Web host markup declared by a plugin.
 
-  GPUI does not require a host element. egui and Slint return their required
-  canvas elements. The returned markup is fixed by Rekindle and can be rendered
-  with `Phoenix.HTML.raw/1`.
+  GPUI does not require a host element. The built-in egui and Slint plugins
+  return their required canvas elements. Applications can render markup from a
+  trusted configured plugin with `Phoenix.HTML.raw/1`.
   """
-  @spec web_host(integration()) :: String.t()
-  def web_host(integration), do: Rekindle.Integration.host(integration)
+  @spec web_host(plugin()) :: String.t()
+  def web_host(plugin), do: Rekindle.Plugin.spec(plugin).web.host
 
   @doc """
-  Returns the Web shell CSS for a built-in integration.
+  Returns the Web shell CSS declared by a plugin.
 
   The generated Phoenix layout places this CSS in its document head so the
   browser target occupies the same application surface as its desktop target.
   """
-  @spec web_style(integration()) :: String.t()
-  def web_style(integration), do: Rekindle.Integration.style(integration)
+  @spec web_style(plugin()) :: String.t()
+  def web_style(plugin), do: Rekindle.Plugin.spec(plugin).web.style
 
   @doc """
   Returns the Web entry module path for a Phoenix endpoint.

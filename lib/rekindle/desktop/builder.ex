@@ -30,7 +30,7 @@ defmodule Rekindle.Desktop.Builder do
              cargo.target,
              cargo.package,
              cargo.binary,
-             project.integration
+             Rekindle.Plugin.name(project.plugin)
            ),
          :ok <- File.write(Path.join(temporary, "manifest.json"), Jason.encode!(manifest)),
          {:ok, output} <- output(project, profile, temporary, manifest) do

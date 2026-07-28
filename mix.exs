@@ -1,7 +1,7 @@
 defmodule Rekindle.MixProject do
   use Mix.Project
 
-  @version "0.1.5"
+  @version "0.1.6"
   @source_url "https://github.com/refmdio/rekindle"
   @docs_url "https://rekindle.hexdocs.pm"
 
@@ -50,7 +50,7 @@ defmodule Rekindle.MixProject do
         "CHANGELOG.md",
         "guides/introduction/getting-started.md",
         "guides/introduction/how-rekindle-works.md",
-        "guides/features/integrations.md",
+        "guides/features/plugins.md",
         "guides/features/configuration.md",
         "guides/features/development.md",
         "guides/features/web-target.md",
@@ -67,6 +67,18 @@ defmodule Rekindle.MixProject do
       ],
       groups_for_modules: [
         Core: [Rekindle, Rekindle.DevServer, Rekindle.Phoenix],
+        Plugins: [
+          Rekindle.Plugin,
+          Rekindle.Plugin.Spec,
+          Rekindle.Plugin.Spec.Web,
+          Rekindle.Plugin.Cargo,
+          Rekindle.Plugin.Cargo.Dependency,
+          Rekindle.Plugin.GPUI,
+          Rekindle.Plugin.Egui,
+          Rekindle.Plugin.Slint,
+          Rekindle.Priv,
+          Rekindle.Install
+        ],
         "Build results": [Rekindle.Build.Result, Rekindle.Diagnostic],
         Errors: [
           Rekindle.Build.Error,

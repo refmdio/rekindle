@@ -5,7 +5,7 @@ entry point for installation, development, Web packaging, and native release
 artifacts, while Cargo continues to manage Rust dependencies, compilation,
 target directories, and incremental caches.
 
-GPUI, egui/eframe, and Slint are supported. Each integration can generate a
+GPUI, egui/eframe, and Slint are supported. Each plugin can generate a
 browser target compiled to WebAssembly, a native desktop target, or both from a
 shared Rust UI crate.
 
@@ -14,7 +14,7 @@ shared Rust UI crate.
 - Elixir 1.17 or later
 - Rust and Cargo
 - The Rust targets and native system libraries required by the selected UI
-  integration
+  plugin
 
 ## Create a project
 
@@ -31,7 +31,7 @@ Create a Phoenix application with a GPUI client for Web and desktop:
 mix igniter.new my_app \
   --with phx.new \
   --install rekindle \
-  --integration gpui \
+  --plugin gpui \
   --targets web,desktop
 ```
 

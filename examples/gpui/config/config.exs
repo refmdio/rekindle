@@ -7,7 +7,7 @@
 # General application configuration
 import Config
 
-config :gpui_example, Rekindle, integration: :gpui, targets: [web: [], desktop: []]
+config :gpui_example, Rekindle, plugin: Rekindle.Plugin.GPUI, targets: [web: [], desktop: []]
 
 config :gpui_example,
   generators: [timestamp_type: :utc_datetime]

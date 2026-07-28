@@ -8,7 +8,7 @@ defmodule Mix.Tasks.Rekindle.Doctor do
 
       mix rekindle.doctor
 
-  The command reports configuration, Cargo, integration, target, and pinned
+  The command reports configuration, Cargo, plugin, target, and pinned
   Web tool readiness and exits unsuccessfully when a required check fails.
   """
 

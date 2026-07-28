@@ -1,11 +1,25 @@
 if Code.ensure_loaded?(Igniter) do
   defmodule Rekindle.Install do
-    @moduledoc false
+    @moduledoc """
+    Installs Rekindle and generates the selected plugin's Rust client.
+
+    External plugin packages can call `run/2` from their own Igniter task with
+    the plugin module already selected:
+
+        Rekindle.Install.run(igniter,
+          plugin: MyUi.RekindlePlugin,
+          targets: [:web, :desktop]
+        )
+
+    The regular Rekindle installer accepts the built-in `gpui`, `egui`, and
+    `slint` aliases.
+    """
 
     alias Igniter.Code.{Common, Function}
     alias Igniter.Project.{Application, TaskAliases}
     alias Igniter.Project.Config, as: ProjectConfig
-    alias Rekindle.{Config, Integration}
+    alias Rekindle.{Config, Plugin}
+    alias Rekindle.Install.Client
     alias Rekindle.Phoenix.Install, as: PhoenixInstall
 
     @targets [:web, :desktop]
@@ -39,31 +53,42 @@ if Code.ensure_loaded?(Igniter) do
     defp endpoint_required(_endpoint), do: {:error, "Rekindle requires a Phoenix endpoint"}
 
     defp requested_selection(options) do
-      with {:ok, integration} <- requested_integration(options[:integration]),
+      with {:ok, plugin} <- requested_plugin(options[:plugin]),
            {:ok, targets} <- requested_targets(options[:targets]) do
-        {:ok, %{integration: integration, targets: targets}}
+        {:ok, %{plugin: plugin, targets: targets}}
       end
     end
 
-    defp requested_integration(nil), do: {:ok, nil}
+    defp requested_plugin(nil), do: {:ok, nil}
 
-    defp requested_integration(value) when is_atom(value) do
-      if value in Integration.names(),
-        do: {:ok, value},
-        else: {:error, integration_error(value)}
-    end
-
-    defp requested_integration(value) when is_binary(value) do
-      case Enum.find(Integration.names(), &(Atom.to_string(&1) == value)) do
-        nil -> {:error, integration_error(value)}
-        integration -> {:ok, integration}
+    defp requested_plugin(value) when is_atom(value) do
+      case Plugin.builtin(value) do
+        {:ok, module} -> {:ok, module}
+        :error -> validate_requested_plugin(value)
       end
     end
 
-    defp requested_integration(value), do: {:error, integration_error(value)}
+    defp requested_plugin(value) when is_binary(value) do
+      case Plugin.builtin(value) do
+        {:ok, module} -> {:ok, module}
+        :error -> {:error, plugin_error(value)}
+      end
+    end
 
-    defp integration_error(value) do
-      "expected --integration to be gpui, egui, or slint; got: #{inspect(value)}"
+    defp requested_plugin({_module, options} = value) when is_list(options),
+      do: validate_requested_plugin(value)
+
+    defp requested_plugin(value), do: {:error, plugin_error(value)}
+
+    defp validate_requested_plugin(value) do
+      case Plugin.load(value) do
+        {:ok, _loaded} -> {:ok, value}
+        {:error, _message} -> {:error, plugin_error(value)}
+      end
+    end
+
+    defp plugin_error(value) do
+      "expected --plugin to be gpui, egui, or slint; got: #{inspect(value)}"
     end
 
     defp requested_targets(nil), do: {:ok, nil}
@@ -102,12 +127,12 @@ if Code.ensure_loaded?(Igniter) do
           with {:ok, zipper} <- Function.move_to_nth_argument(zipper, 2),
                {:ok, config} <- Common.expand_literal(zipper),
                :ok <- validate_existing_config(config),
-               integration <- Keyword.fetch!(config, :integration),
+               plugin <- Keyword.fetch!(config, :plugin),
                targets <- Keyword.fetch!(config, :targets) do
             {:ok,
              %{
                config: config,
-               integration: integration,
+               plugin: plugin,
                targets: Enum.filter(@targets, &Keyword.has_key?(targets, &1))
              }}
           else
@@ -126,7 +151,7 @@ if Code.ensure_loaded?(Igniter) do
     defp select(requested, nil, false) do
       {:ok,
        %{
-         integration: requested.integration || :gpui,
+         plugin: requested.plugin || Rekindle.Plugin.GPUI,
          targets: requested.targets || @targets
        }, :generate}
     end
@@ -135,8 +160,9 @@ if Code.ensure_loaded?(Igniter) do
       do: {:error, "client/Cargo.toml already exists; Rekindle will not overwrite it"}
 
     defp select(requested, existing, true) do
-      with :ok <- same_or_omitted(:integration, requested.integration, existing.integration) do
-        select_existing_targets(requested.targets, existing)
+      with :ok <- same_or_omitted(:plugin, requested.plugin, existing.plugin),
+           :ok <- same_or_omitted(:targets, requested.targets, existing.targets) do
+        {:ok, existing, :existing}
       end
     end
 
@@ -152,24 +178,10 @@ if Code.ensure_loaded?(Igniter) do
        "requested #{name} #{inspect(requested)} conflicts with existing Rekindle configuration #{inspect(existing)}"}
     end
 
-    defp select_existing_targets(nil, existing), do: {:ok, existing, :existing}
-
-    defp select_existing_targets(targets, %{targets: targets} = existing),
-      do: {:ok, existing, :existing}
-
-    defp select_existing_targets(requested, existing) do
-      if MapSet.subset?(MapSet.new(existing.targets), MapSet.new(requested)) do
-        added = requested -- existing.targets
-        {:ok, %{existing | targets: requested}, {:extend, added}}
-      else
-        same_or_omitted(:targets, requested, existing.targets)
-      end
-    end
-
     defp validate_generated_paths(igniter, selection, :generate) do
       generated_paths =
-        selection.integration
-        |> Integration.render(selection.targets)
+        selection.plugin
+        |> Client.render(selection.targets)
         |> Map.keys()
 
       generated_paths
@@ -181,15 +193,6 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp validate_generated_paths(_igniter, _selection, :existing), do: {:ok, :existing}
-
-    defp validate_generated_paths(igniter, _selection, {:extend, targets}) do
-      manifest = content(igniter, "client/Cargo.toml")
-
-      with {:ok, package_name} <- package_name(manifest),
-           :ok <- validate_manifest_targets(manifest, targets) do
-        {:ok, {:extend, targets, package_name}}
-      end
-    end
 
     defp install(igniter, app, endpoint, selection, mode, phoenix) do
       igniter
@@ -221,27 +224,12 @@ if Code.ensure_loaded?(Igniter) do
     defp maybe_generate_client(igniter, _selection, :existing), do: igniter
 
     defp maybe_generate_client(igniter, selection, :generate) do
-      selection.integration
-      |> Integration.render(selection.targets)
+      selection.plugin
+      |> Client.render(selection.targets)
       |> Enum.reduce(igniter, fn {relative, contents}, igniter ->
         Igniter.create_new_file(igniter, Path.join("client", relative), contents)
       end)
       |> Igniter.mkdir("client/public")
-    end
-
-    defp maybe_generate_client(igniter, selection, {:extend, targets, package_name}) do
-      targets
-      |> Enum.reduce(igniter, fn target, igniter ->
-        path = "src/bin/#{target}.rs"
-
-        contents =
-          selection.integration
-          |> Integration.render([target], package_name: package_name)
-          |> Map.fetch!(path)
-
-        Igniter.create_new_file(igniter, Path.join("client", path), contents, on_exists: :skip)
-      end)
-      |> update_manifest_targets(targets)
     end
 
     defp configure(igniter, app, selection) when not is_map_key(selection, :config) do
@@ -252,7 +240,7 @@ if Code.ensure_loaded?(Igniter) do
         "config.exs",
         app,
         [Rekindle],
-        integration: selection.integration,
+        plugin: selection.plugin,
         targets: targets
       )
     end
@@ -272,105 +260,6 @@ if Code.ensure_loaded?(Igniter) do
         [Rekindle, :targets],
         targets
       )
-    end
-
-    defp update_manifest_targets(igniter, targets) do
-      Igniter.create_or_update_file(igniter, "client/Cargo.toml", "", fn source ->
-        manifest = Rewrite.Source.get(source, :content)
-
-        missing =
-          targets
-          |> Enum.reject(&manifest_target?(manifest, &1))
-          |> Enum.map(&manifest_target/1)
-
-        updated =
-          case missing do
-            [] ->
-              manifest
-
-            blocks ->
-              IO.iodata_to_binary([
-                String.trim_trailing(manifest),
-                "\n\n",
-                Enum.intersperse(blocks, "\n")
-              ])
-          end
-
-        Rewrite.Source.update(source, :content, updated)
-      end)
-    end
-
-    defp manifest_target?(manifest, target) do
-      Enum.any?(manifest_bin_blocks(manifest), &bin_name?(&1, target))
-    end
-
-    defp manifest_target(target) do
-      """
-      [[bin]]
-      name = "#{target}"
-      path = "src/bin/#{target}.rs"
-      required-features = ["#{target}"]
-      """
-    end
-
-    defp package_name(manifest) do
-      with [_, package] <- Regex.run(~r/^\[package\]\s*$\n(.*?)(?=^\[|\z)/ms, manifest),
-           [_, name] <-
-             Regex.run(~r/^name\s*=\s*["']([^"']+)["']\s*(?:#.*)?$/m, package) do
-        {:ok, name}
-      else
-        _ -> {:error, "client/Cargo.toml must contain a static package name"}
-      end
-    end
-
-    defp validate_manifest_targets(manifest, targets) do
-      Enum.reduce_while(targets, :ok, fn target, :ok ->
-        case Enum.filter(manifest_bin_blocks(manifest), &bin_name?(&1, target)) do
-          [] ->
-            {:cont, :ok}
-
-          [block] ->
-            if canonical_bin?(block, target) do
-              {:cont, :ok}
-            else
-              {:halt,
-               {:error,
-                "client/Cargo.toml already defines #{target} with a non-canonical bin configuration"}}
-            end
-
-          _duplicates ->
-            {:halt, {:error, "client/Cargo.toml defines #{target} more than once"}}
-        end
-      end)
-    end
-
-    defp manifest_bin_blocks(manifest) do
-      manifest
-      |> String.split("[[bin]]")
-      |> Enum.drop(1)
-      |> Enum.map(&(&1 |> String.split(~r/^\[/m, parts: 2) |> hd()))
-    end
-
-    defp bin_name?(block, target), do: toml_string_field?(block, "name", Atom.to_string(target))
-
-    defp canonical_bin?(block, target) do
-      name = Atom.to_string(target)
-
-      toml_string_field?(block, "path", "src/bin/#{name}.rs") and
-        Regex.match?(
-          ~r/^required-features\s*=\s*\[\s*["']#{name}["']\s*\]\s*(?:#.*)?$/m,
-          block
-        )
-    end
-
-    defp toml_string_field?(block, field, value) do
-      Regex.match?(~r/^#{field}\s*=\s*["']#{Regex.escape(value)}["']\s*(?:#.*)?$/m, block)
-    end
-
-    defp content(igniter, path) do
-      igniter.rewrite
-      |> Rewrite.source!(path)
-      |> Rewrite.Source.get(:content)
     end
 
     defp maybe_add_web_alias(igniter, targets) do

@@ -2,22 +2,22 @@ defmodule Rekindle.Config do
   @moduledoc false
 
   alias Rekindle.Config.{Error, Target}
+  alias Rekindle.Plugin
 
-  @integrations Rekindle.Integration.names()
   @target_names [:web, :desktop]
-  @config_keys [:integration, :targets, :public_dir]
+  @config_keys [:plugin, :targets, :public_dir]
   @target_keys [:package, :binary, :features, :profiles]
   @profile_names [:dev, :release]
   @application_config_key :"Elixir.Rekindle"
 
-  @enforce_keys [:otp_app, :root, :client_root, :integration, :targets, :public_dir]
-  defstruct [:otp_app, :root, :client_root, :integration, :targets, :public_dir]
+  @enforce_keys [:otp_app, :root, :client_root, :plugin, :targets, :public_dir]
+  defstruct [:otp_app, :root, :client_root, :plugin, :targets, :public_dir]
 
   @type t :: %__MODULE__{
           otp_app: atom(),
           root: Path.t(),
           client_root: Path.t(),
-          integration: :gpui | :egui | :slint,
+          plugin: Plugin.configured(),
           targets: %{optional(:web | :desktop) => Target.t()},
           public_dir: Path.t()
         }
@@ -33,7 +33,7 @@ defmodule Rekindle.Config do
          otp_app: otp_app,
          root: root,
          client_root: Path.join(root, "client"),
-         integration: parsed.integration,
+         plugin: parsed.plugin,
          targets: parsed.targets,
          public_dir: Path.expand(parsed.public_dir, root)
        }}
@@ -53,10 +53,10 @@ defmodule Rekindle.Config do
     with :ok <- keyword(config, "Rekindle configuration"),
          :ok <- unique_keys(config, "Rekindle configuration"),
          :ok <- known_keys(config, @config_keys, "Rekindle configuration"),
-         {:ok, integration} <- integration(config),
+         {:ok, plugin} <- plugin(config),
          {:ok, targets} <- targets(config),
          {:ok, public_dir} <- public_dir(config) do
-      {:ok, %{integration: integration, targets: targets, public_dir: public_dir}}
+      {:ok, %{plugin: plugin, targets: targets, public_dir: public_dir}}
     end
   end
 
@@ -86,19 +86,16 @@ defmodule Rekindle.Config do
     end
   end
 
-  defp integration(config) do
-    case Keyword.fetch(config, :integration) do
-      {:ok, value} when value in @integrations ->
-        {:ok, value}
-
+  defp plugin(config) do
+    case Keyword.fetch(config, :plugin) do
       {:ok, value} ->
-        error(
-          :invalid_integration,
-          "expected :integration to be one of #{inspect(@integrations)}, got: #{inspect(value)}"
-        )
+        case Plugin.load(value) do
+          {:ok, _loaded} -> {:ok, value}
+          {:error, message} -> error(:invalid_plugin, message)
+        end
 
       :error ->
-        error(:missing_integration, "Rekindle configuration requires :integration")
+        error(:missing_plugin, "Rekindle configuration requires :plugin")
     end
   end
 

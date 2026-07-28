@@ -22,11 +22,11 @@ There is no need to install or replace a global copy.
 ## Cargo reports a missing target
 
 Run `mix rekindle.setup` and follow any target-specific diagnostic. The selected
-integration may also require native system libraries that are outside
+plugin may also require native system libraries that are outside
 Rekindle's control.
 
 Desktop builds use the host target reported by `rustc -vV`. Confirm that the
-selected UI integration supports that platform and that its native libraries
+selected UI plugin supports that platform and that its native libraries
 are installed.
 
 ## Development builds do not start

@@ -20,7 +20,7 @@ defmodule Rekindle.DevelopmentTest do
     File.write!(Path.join(root, "client/src/bin/desktop.rs"), "fn main() {}\n")
 
     Application.put_env(:rekindle_development_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [web: [], desktop: []]
     )
 
@@ -266,7 +266,7 @@ defmodule Rekindle.DevelopmentTest do
     """)
 
     Application.put_env(:rekindle_request_driven_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [web: []]
     )
 
@@ -419,7 +419,7 @@ defmodule Rekindle.DevelopmentTest do
         target,
         "client",
         "desktop",
-        :gpui
+        "gpui"
       )
 
     manifest_path = Path.join(directory, "manifest.json")

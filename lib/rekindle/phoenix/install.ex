@@ -16,7 +16,7 @@ if Code.ensure_loaded?(Igniter) do
             {:ok, Igniter.t(), prepared() | nil} | {:error, String.t()}
     def prepare(igniter, _app, endpoint, selection) do
       if :web in selection.targets do
-        prepare_layout(igniter, endpoint, selection.integration)
+        prepare_layout(igniter, endpoint, selection.plugin)
       else
         {:ok, igniter, nil}
       end
@@ -29,10 +29,10 @@ if Code.ensure_loaded?(Igniter) do
       igniter
       |> install_endpoint(app, endpoint)
       |> install_layout(prepared)
-      |> install_generated_page_test(prepared.layout_path, selection.integration)
+      |> install_generated_page_test(prepared.layout_path, selection.plugin)
     end
 
-    defp prepare_layout(igniter, endpoint, integration) do
+    defp prepare_layout(igniter, endpoint, plugin) do
       layouts = Igniter.Libs.Phoenix.web_module_name(igniter, "Layouts")
 
       case ProjectModule.find_module(igniter, layouts) do
@@ -42,7 +42,7 @@ if Code.ensure_loaded?(Igniter) do
 
           case Rewrite.source(igniter.rewrite, path) do
             {:ok, layout_source} ->
-              {style, host, script} = layout_parts(endpoint, integration)
+              {style, host, script} = layout_parts(endpoint, plugin)
               content = Rewrite.Source.get(layout_source, :content)
 
               cond do
@@ -134,7 +134,7 @@ if Code.ensure_loaded?(Igniter) do
       end)
     end
 
-    defp install_generated_page_test(igniter, layout_path, integration) do
+    defp install_generated_page_test(igniter, layout_path, plugin) do
       web_root = layout_path |> Path.dirname() |> Path.dirname() |> Path.dirname()
 
       path =
@@ -148,12 +148,14 @@ if Code.ensure_loaded?(Igniter) do
       igniter = Igniter.include_existing_file(igniter, path)
 
       case Rewrite.source(igniter.rewrite, path) do
-        {:ok, _source} -> rewrite_generated_page_test(igniter, path, integration)
+        {:ok, _source} -> rewrite_generated_page_test(igniter, path, plugin)
         {:error, _error} -> igniter
       end
     end
 
-    defp rewrite_generated_page_test(igniter, path, integration) do
+    defp rewrite_generated_page_test(igniter, path, plugin) do
+      plugin_name = Rekindle.Plugin.name(plugin)
+
       Igniter.create_or_update_file(igniter, path, "", fn source ->
         content = Rewrite.Source.get(source, :content)
 
@@ -165,7 +167,7 @@ if Code.ensure_loaded?(Igniter) do
               """
               #{indentation}response = html_response(conn, 200)
 
-              #{indentation}assert response =~ ~s(data-rust-ui="#{integration}")
+              #{indentation}assert response =~ ~s(data-rust-ui="#{plugin_name}")
               """
               |> String.trim_trailing()
             end,
@@ -229,16 +231,13 @@ if Code.ensure_loaded?(Igniter) do
     defp development_plug_source(app),
       do: "plug Rekindle.DevServer, otp_app: #{inspect(app)}"
 
-    defp layout_parts(endpoint, integration) do
-      css =
-        integration
-        |> Rekindle.Integration.style()
-        |> String.trim()
-        |> indent_block("  ")
+    defp layout_parts(endpoint, plugin) do
+      spec = Rekindle.Plugin.spec(plugin)
+      css = spec.web.style |> String.trim() |> indent_block("  ")
 
-      host = Rekindle.Integration.host(integration)
+      host = spec.web.host
 
-      style = "<style data-rust-ui=\"#{integration}\">\n#{css}\n</style>"
+      style = "<style data-rust-ui=\"#{spec.name}\">\n#{css}\n</style>"
 
       script = """
       <script type="module" src={Rekindle.Phoenix.web_entry_path(#{inspect(endpoint)})}>

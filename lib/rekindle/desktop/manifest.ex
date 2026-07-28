@@ -4,8 +4,6 @@ defmodule Rekindle.Desktop.Manifest do
   alias Rekindle.Desktop.Error
 
   @version 1
-  @integrations ["gpui", "egui", "slint"]
-
   @doc false
   @spec read(Path.t()) :: {:ok, map()} | {:error, Error.t()}
   def read(root) do
@@ -23,15 +21,15 @@ defmodule Rekindle.Desktop.Manifest do
     end
   end
 
-  @spec create(Path.t(), String.t(), String.t(), String.t(), String.t(), atom() | String.t()) ::
+  @spec create(Path.t(), String.t(), String.t(), String.t(), String.t(), String.t()) ::
           {:ok, map()} | {:error, Error.t()}
-  def create(root, executable, target, package, binary, integration) do
+  def create(root, executable, target, package, binary, plugin) do
     manifest = %{
       "version" => @version,
       "target" => target,
       "package" => package,
       "binary" => binary,
-      "integration" => to_string(integration),
+      "plugin" => plugin,
       "executable" => executable
     }
 
@@ -49,13 +47,13 @@ defmodule Rekindle.Desktop.Manifest do
           "target" => target,
           "package" => package,
           "binary" => binary,
-          "integration" => integration,
+          "plugin" => plugin,
           "executable" => executable
         } = manifest
       )
       when map_size(manifest) == 6 and is_binary(target) and target != "" and
              is_binary(package) and package != "" and is_binary(binary) and binary != "" and
-             integration in @integrations do
+             is_binary(plugin) and plugin != "" do
     with :ok <- component(target, "target"),
          :ok <- component(executable, "executable"),
          {:ok, %{type: :regular, mode: mode}} <- File.stat(Path.join(root, executable)),

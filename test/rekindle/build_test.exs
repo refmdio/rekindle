@@ -33,7 +33,7 @@ defmodule Rekindle.BuildTest do
 
   test "rejects unknown and disabled targets before accessing an entry", %{root: root} do
     Application.put_env(:rekindle_build_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [desktop: [features: []]]
     )
 
@@ -46,7 +46,7 @@ defmodule Rekindle.BuildTest do
 
   test "rejects missing canonical entries before dispatch", %{root: root} do
     Application.put_env(:rekindle_build_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [desktop: [features: []]]
     )
 
@@ -64,7 +64,7 @@ defmodule Rekindle.BuildTest do
     File.cp_r!("test/fixtures/cargo_project", Path.join(root, "client"))
 
     Application.put_env(:rekindle_build_test, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [desktop: [features: [], profiles: [dev: "dev", release: "release"]]]
     )
 
@@ -106,7 +106,7 @@ defmodule Rekindle.BuildTest do
     end)
 
     Application.put_env(:rekindle, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [desktop: [features: []]]
     )
 
@@ -158,7 +158,7 @@ defmodule Rekindle.BuildTest do
     end)
 
     Application.put_env(:rekindle, Rekindle,
-      integration: :gpui,
+      plugin: Rekindle.Plugin.GPUI,
       targets: [desktop: [features: []]]
     )
 
