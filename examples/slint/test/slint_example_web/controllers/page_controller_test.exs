@@ -3,6 +3,9 @@ defmodule SlintExampleWeb.PageControllerTest do
 
   test "GET /", %{conn: conn} do
     conn = get(conn, ~p"/")
-    assert html_response(conn, 200) =~ "Peace of mind from prototype to production"
+    response = html_response(conn, 200)
+
+    assert response =~ ~s(src="/rekindle/entry.js")
+    assert response =~ ~s(<canvas id="canvas"></canvas>)
   end
 end

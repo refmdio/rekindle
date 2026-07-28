@@ -12,6 +12,7 @@ web = []
 slint = "=1.16.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+i-slint-backend-winit = "=1.16.1"
 slint = { version = "=1.16.1", default-features = false, features = ["compat-1-2", "renderer-femtovg", "backend-winit", "std"] }
 wasm-bindgen = "=<%= @wasm_bindgen_version %>"
 

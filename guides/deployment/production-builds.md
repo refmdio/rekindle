@@ -47,11 +47,15 @@ publication failures.
 
 ## Phoenix Web entry
 
-The installer adds the selected integration's host markup and logical Web entry
-module to the Phoenix root layout. An egui installation, for example, adds the
-equivalent of:
+The installer replaces the Phoenix root layout's rendered page content with the
+selected integration's Web host, adds its full-page CSS to the document head,
+and loads the logical Web entry module. A custom egui layout uses the equivalent
+of:
 
 ```heex
+<style>
+  <%= Phoenix.HTML.raw(Rekindle.Phoenix.web_style(:egui)) %>
+</style>
 <%= Phoenix.HTML.raw(Rekindle.Phoenix.web_host(:egui)) %>
 <script
   type="module"
@@ -59,11 +63,10 @@ equivalent of:
 ></script>
 ```
 
-`web_host/1` returns fixed trusted markup owned by the integration. GPUI returns
-an empty string, egui returns `<canvas id="the_canvas_id"></canvas>`, and Slint
-returns `<canvas id="canvas"></canvas>`. `web_entry_path/1` resolves through the
-endpoint's static manifest after `phx.digest`; loading that module starts the
-selected immutable Web generation.
+`web_style/1` and `web_host/1` return fixed trusted shell content owned by the
+integration. `web_entry_path/1` resolves through the endpoint's static manifest
+after `phx.digest`; loading that module starts the selected immutable Web
+generation.
 
 The helper functions remain public for applications that intentionally move
 the generated host or script to another layout.

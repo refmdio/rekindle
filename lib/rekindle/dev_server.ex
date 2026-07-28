@@ -93,7 +93,7 @@ defmodule Rekindle.DevServer do
          {:ok, contents} <- Manifest.read_member(root, manifest, requested) do
       conn
       |> put_resp_header("cache-control", "public, max-age=31536000, immutable")
-      |> put_resp_content_type(MIME.from_path(requested))
+      |> put_asset_content_type(requested)
       |> send_resp(200, contents)
       |> halt()
     else
@@ -167,6 +167,14 @@ defmodule Rekindle.DevServer do
   defp safe_member?(_member), do: false
 
   defp path(generation, entry), do: "/__rekindle/web/#{generation}/#{entry}"
+
+  defp put_asset_content_type(conn, path) do
+    if Path.extname(path) == ".wasm" do
+      put_resp_header(conn, "content-type", "application/wasm")
+    else
+      put_resp_content_type(conn, MIME.from_path(path))
+    end
+  end
 
   defp runtime(graphics) do
     """

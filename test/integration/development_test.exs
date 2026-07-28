@@ -220,6 +220,10 @@ defmodule Rekindle.DevelopmentTest do
     assert asset.status == 200
     assert asset.resp_body == "export default async function init() {}"
 
+    wasm = request("/__rekindle/web/#{generation}/app_bg.wasm", options)
+    assert wasm.status == 200
+    assert Plug.Conn.get_resp_header(wasm, "content-type") == ["application/wasm"]
+
     runtime = request("/__rekindle/runtime.js", options)
     assert runtime.status == 200
     assert runtime.resp_body =~ "navigator.gpu"
@@ -374,6 +378,7 @@ defmodule Rekindle.DevelopmentTest do
 
     File.mkdir_p!(temporary)
     File.write!(Path.join(temporary, "app.js"), source)
+    File.write!(Path.join(temporary, "app_bg.wasm"), <<0, 97, 115, 109>>)
     {:ok, manifest} = Rekindle.Web.Manifest.create(temporary, "app.js")
     File.write!(Path.join(temporary, "manifest.json"), Jason.encode!(manifest))
 

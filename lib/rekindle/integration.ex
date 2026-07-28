@@ -11,6 +11,30 @@ defmodule Rekindle.Integration do
       files: ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "src/lib.rs"],
       graphics: %{web: :webgpu, desktop: :native},
       host: "",
+      style: """
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+
+      body > canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+        outline: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      """,
       template: "gpui"
     },
     egui: %{
@@ -18,6 +42,38 @@ defmodule Rekindle.Integration do
       files: ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "src/lib.rs", "src/app.rs"],
       graphics: %{web: :webgl2, desktop: :native},
       host: ~s(<canvas id="the_canvas_id"></canvas>),
+      style: """
+      html {
+        touch-action: manipulation;
+      }
+
+      body {
+        background: #909090;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #404040;
+        }
+      }
+
+      html,
+      body {
+        overflow: hidden;
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 100%;
+        height: 100%;
+      }
+
+      #the_canvas_id {
+        display: block;
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      """,
       template: "egui"
     },
     slint: %{
@@ -32,6 +88,24 @@ defmodule Rekindle.Integration do
       ],
       graphics: %{web: :webgl2, desktop: :native},
       host: ~s(<canvas id="canvas"></canvas>),
+      style: """
+      html,
+      body {
+        overflow: hidden;
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      #canvas {
+        display: block;
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      """,
       template: "slint"
     }
   }
@@ -47,6 +121,9 @@ defmodule Rekindle.Integration do
 
   @spec host(name()) :: String.t()
   def host(name), do: @integrations |> Map.fetch!(name) |> Map.fetch!(:host)
+
+  @spec style(name()) :: String.t()
+  def style(name), do: @integrations |> Map.fetch!(name) |> Map.fetch!(:style)
 
   @spec render(name(), [target()], keyword()) :: %{String.t() => String.t()}
   def render(name, targets, options \\ []) do

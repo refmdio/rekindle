@@ -8,7 +8,8 @@ if Code.ensure_loaded?(Igniter) do
     @type prepared :: %{
             layout_path: String.t(),
             layout_host: String.t(),
-            layout_script: String.t()
+            layout_script: String.t(),
+            layout_style: String.t()
           }
 
     @spec prepare(Igniter.t(), atom(), module(), map()) ::
@@ -40,14 +41,26 @@ if Code.ensure_loaded?(Igniter) do
 
           case Rewrite.source(igniter.rewrite, path) do
             {:ok, layout_source} ->
-              {host, script} = layout_parts(endpoint, integration)
+              {style, host, script} = layout_parts(endpoint, integration)
               content = Rewrite.Source.get(layout_source, :content)
 
-              if missing_layout_parts(content, host, script) != [] and
-                   not Regex.match?(~r{</body\s*>}i, content) do
-                {:error, "#{path} must contain </body> so Rekindle can install its Web entry"}
-              else
-                {:ok, igniter, %{layout_path: path, layout_host: host, layout_script: script}}
+              cond do
+                not style_present?(content, style) and
+                    not Regex.match?(~r{</head\s*>}i, content) ->
+                  {:error, "#{path} must contain </head> so Rekindle can install its Web style"}
+
+                missing_body_parts(content, host, script) != [] and
+                    not Regex.match?(~r{</body\s*>}i, content) ->
+                  {:error, "#{path} must contain </body> so Rekindle can install its Web entry"}
+
+                true ->
+                  {:ok, igniter,
+                   %{
+                     layout_path: path,
+                     layout_host: host,
+                     layout_script: script,
+                     layout_style: style
+                   }}
               end
 
             {:error, %Rewrite.Error{} = error} ->
@@ -104,28 +117,17 @@ if Code.ensure_loaded?(Igniter) do
     defp install_layout(igniter, %{
            layout_path: path,
            layout_host: host,
-           layout_script: script
+           layout_script: script,
+           layout_style: style
          }) do
       Igniter.create_or_update_file(igniter, path, "", fn source ->
         content = Rewrite.Source.get(source, :content)
 
         updated =
-          case missing_layout_parts(content, host, script) do
-            [] ->
-              content
-
-            missing ->
-              block = Enum.join(missing, "\n")
-
-              Regex.replace(
-                ~r{([ \t]*)</body\s*>}i,
-                content,
-                fn closing, indentation ->
-                  indent_block(block, indentation <> "  ") <> "\n" <> closing
-                end,
-                global: false
-              )
-          end
+          content
+          |> install_style(style)
+          |> install_host(host)
+          |> install_script(script)
 
         Rewrite.Source.update(source, :content, updated)
       end)
@@ -185,23 +187,107 @@ if Code.ensure_loaded?(Igniter) do
       do: "plug Rekindle.DevServer, otp_app: #{inspect(app)}"
 
     defp layout_parts(endpoint, integration) do
+      css =
+        integration
+        |> Rekindle.Integration.style()
+        |> String.trim()
+        |> indent_block("  ")
+
       host = Rekindle.Integration.host(integration)
 
-      script =
-        ~s|<script type="module" src={Rekindle.Phoenix.web_entry_path(#{inspect(endpoint)})}></script>|
+      style = "<style data-rust-ui=\"#{integration}\">\n#{css}\n</style>"
 
-      {host, script}
+      script = """
+      <script type="module" src={Rekindle.Phoenix.web_entry_path(#{inspect(endpoint)})}>
+      </script>
+      """
+
+      {style, host, script}
     end
 
-    defp missing_layout_parts(content, host, script) do
-      [host, script]
-      |> Enum.reject(&(&1 == "" or String.contains?(content, &1)))
+    defp missing_body_parts(content, host, script) do
+      []
+      |> maybe_missing(host != "" and not String.contains?(content, host), host)
+      |> maybe_missing(not script_present?(content, script), script)
+    end
+
+    defp maybe_missing(missing, true, part), do: [part | missing]
+    defp maybe_missing(missing, false, _part), do: missing
+
+    defp install_style(content, style) do
+      if style_present?(content, style) do
+        content
+      else
+        insert_before_closing(content, ~r{([ \t]*)</head\s*>}i, style)
+      end
+    end
+
+    defp style_present?(content, style),
+      do: String.contains?(content, style |> String.split("\n", parts: 2) |> hd())
+
+    defp install_host(content, host) do
+      cond do
+        String.contains?(content, host) and host != "" ->
+          replace_inner_content(content, "")
+
+        String.contains?(content, "{@inner_content}") ->
+          replace_inner_content(content, host)
+
+        host == "" ->
+          content
+
+        true ->
+          insert_before_closing(content, ~r{([ \t]*)</body\s*>}i, host)
+      end
+    end
+
+    defp install_script(content, script) do
+      if script_present?(content, script) do
+        content
+      else
+        insert_before_closing(content, ~r{([ \t]*)</body\s*>}i, script)
+      end
+    end
+
+    defp script_present?(content, script),
+      do: String.contains?(content, script_marker(script))
+
+    defp script_marker(script) do
+      [marker] = Regex.run(~r{Rekindle\.Phoenix\.web_entry_path\([^)]+\)}, script)
+      marker
+    end
+
+    defp replace_inner_content(content, "") do
+      String.replace(content, ~r{[ \t]*\{@inner_content\}[ \t]*\n?}, "", global: false)
+    end
+
+    defp replace_inner_content(content, host) do
+      Regex.replace(
+        ~r{([ \t]*)\{@inner_content\}[ \t]*},
+        content,
+        fn _match, indentation -> indent_block(host, indentation) end,
+        global: false
+      )
+    end
+
+    defp insert_before_closing(content, pattern, block) do
+      Regex.replace(
+        pattern,
+        content,
+        fn closing, indentation ->
+          indent_block(String.trim_trailing(block), indentation <> "  ") <> "\n" <> closing
+        end,
+        global: false
+      )
     end
 
     defp indent_block(block, indentation) do
       block
       |> String.split("\n")
-      |> Enum.map_join("\n", &(indentation <> &1))
+      |> Enum.map_join("\n", fn
+        "" -> ""
+        line -> indentation <> line
+      end)
     end
   end
 end

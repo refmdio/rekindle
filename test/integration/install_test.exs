@@ -31,6 +31,10 @@ defmodule Rekindle.InstallTest do
 
     layout = content(installed, "lib/demo_web/components/layouts/root.html.heex")
     assert layout =~ "Rekindle.Phoenix.web_entry_path(DemoWeb.Endpoint)"
+    assert layout =~ "body > canvas"
+    assert layout =~ ~s|src={Rekindle.Phoenix.web_entry_path(DemoWeb.Endpoint)}>\n|
+    refute layout =~ ~r/^[ \t]+$/m
+    refute layout =~ "{@inner_content}"
 
     mix = content(installed, "mix.exs")
     assert mix =~ ~s(setup: ["deps.get", "assets.setup", "assets.build"])
@@ -73,12 +77,15 @@ defmodule Rekindle.InstallTest do
       if "web" in targets do
         assert endpoint =~ "Rekindle.DevServer"
         assert layout =~ "Rekindle.Phoenix.web_entry_path"
+        assert layout =~ ~s(<style data-rust-ui="#{integration}">)
+        refute layout =~ "{@inner_content}"
 
         host = Rekindle.Integration.host(String.to_existing_atom(integration))
         if host != "", do: assert(layout =~ host)
       else
         refute endpoint =~ "Rekindle.DevServer"
         refute layout =~ "Rekindle"
+        assert layout =~ "{@inner_content}"
       end
 
       refute Map.has_key?(installed.rewrite.sources, "config/dev.exs")
@@ -215,6 +222,7 @@ defmodule Rekindle.InstallTest do
         project(%{
           "lib/demo_web/components/layouts/root.html.heex" => """
           <html>
+            <head></head>
             <body>
               #{script}
             </body>
@@ -234,12 +242,24 @@ defmodule Rekindle.InstallTest do
   test "requires a body insertion point before changing the project" do
     original =
       project(%{
-        "lib/demo_web/components/layouts/root.html.heex" => "<html></html>\n"
+        "lib/demo_web/components/layouts/root.html.heex" => "<html><head></head></html>\n"
       })
 
     rejected = install(original, integration: "egui", targets: ["web"])
 
     assert Enum.any?(rejected.issues, &String.contains?(&1, "must contain </body>"))
+    assert changed_contents(rejected) == changed_contents(original)
+  end
+
+  test "requires a head insertion point before changing the project" do
+    original =
+      project(%{
+        "lib/demo_web/components/layouts/root.html.heex" => "<html><body></body></html>\n"
+      })
+
+    rejected = install(original, integration: "egui", targets: ["web"])
+
+    assert Enum.any?(rejected.issues, &String.contains?(&1, "must contain </head>"))
     assert changed_contents(rejected) == changed_contents(original)
   end
 
@@ -402,6 +422,7 @@ defmodule Rekindle.InstallTest do
             "lib/demo_web/components/layouts/root.html.heex" => """
             <!DOCTYPE html>
             <html lang="en">
+              <head></head>
               <body>
                 {@inner_content}
               </body>

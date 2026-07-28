@@ -773,6 +773,7 @@ dependencies = [
 name = "<%= @package_name %>"
 version = "0.1.0"
 dependencies = [
+ "i-slint-backend-winit",
  "slint",
  "slint-build",
  "wasm-bindgen",

@@ -62,22 +62,32 @@ defmodule Rekindle.IntegrationsTest do
   end
 
   test "keeps host and graphics requirements with each integration" do
-    assert {:ok, %{graphics: %{web: :webgpu}, host: ""}} = Integration.fetch(:gpui)
+    assert {:ok, %{graphics: %{web: :webgpu}, host: "", style: gpui_style}} =
+             Integration.fetch(:gpui)
 
-    assert {:ok, %{graphics: %{web: :webgl2}, host: egui_host}} =
+    assert gpui_style =~ "body > canvas"
+    assert gpui_style =~ "touch-action: none"
+
+    assert {:ok, %{graphics: %{web: :webgl2}, host: egui_host, style: egui_style}} =
              Integration.fetch(:egui)
 
     assert egui_host == ~s(<canvas id="the_canvas_id"></canvas>)
+    assert egui_style =~ "#the_canvas_id"
+    assert egui_style =~ "width: 100%"
 
-    assert {:ok, %{graphics: %{web: :webgl2}, host: slint_host}} =
+    assert {:ok, %{graphics: %{web: :webgl2}, host: slint_host, style: slint_style}} =
              Integration.fetch(:slint)
 
     assert slint_host =~ ~s(id="canvas")
+    assert slint_style =~ "#canvas"
+    assert slint_style =~ "height: 100%"
 
     for name <- Integration.names() do
-      assert {:ok, %{host: host}} = Integration.fetch(name)
+      assert {:ok, %{host: host, style: style}} = Integration.fetch(name)
       assert Rekindle.Phoenix.web_host(name) == host
+      assert Rekindle.Phoenix.web_style(name) == style
       refute host =~ ~r/rekindle/i
+      refute style =~ ~r/rekindle/i
     end
 
     assert Rekindle.Phoenix.web_host(:gpui) == ""
@@ -211,13 +221,19 @@ defmodule Rekindle.IntegrationsTest do
              ~s(features = ["compat-1-2", "renderer-femtovg", "backend-winit", "std"])
 
     assert files["Cargo.toml"] =~ ~s(slint = "=1.16.1")
+    assert files["Cargo.toml"] =~ ~s(i-slint-backend-winit = "=1.16.1")
     assert files["Cargo.toml"] =~ ~s(slint-build = "=1.16.1")
     assert files["Cargo.lock"] =~ ~r/name = "slint"\nversion = "1\.16\.1"/
     assert files["Cargo.lock"] =~ ~r/name = "slint-build"\nversion = "1\.16\.1"/
     assert files["build.rs"] =~ ~S|slint_build::compile("ui/app-window.slint")|
     assert files["src/lib.rs"] =~ "slint::include_modules!();"
     assert files["src/lib.rs"] =~ "AppWindow::new()"
-    assert files["src/bin/web.rs"] =~ "::run()"
+    assert files["src/bin/web.rs"] =~ "OnceCell"
+    assert files["src/bin/web.rs"] =~ "::create()"
+    assert files["src/bin/web.rs"] =~ ".show()"
+    assert files["src/bin/web.rs"] =~ ".with_spawn_event_loop(true)"
+    assert files["src/bin/web.rs"] =~ "slint::platform::set_platform"
+    assert files["src/bin/web.rs"] =~ "slint::run_event_loop()"
     assert files["src/bin/desktop.rs"] =~ "::run()"
     assert files["ui/app-window.slint"] =~ "Counter: \\{root.counter}"
     assert files["ui/app-window.slint"] =~ ~s(text: "Increase value";)

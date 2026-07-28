@@ -198,7 +198,7 @@ if Code.ensure_loaded?(Igniter) do
       |> PhoenixInstall.install(app, endpoint, selection, phoenix)
       |> update_setup_aliases()
       |> maybe_add_web_alias(selection.targets)
-      |> TaskAliases.add_alias(:precommit, "rekindle.check", if_exists: :append)
+      |> TaskAliases.add_alias(:precommit, ["rekindle.check"], if_exists: :append)
       |> update_ignores(selection)
     end
 
@@ -215,7 +215,7 @@ if Code.ensure_loaded?(Igniter) do
           {:ok, zipper}
         end
       end)
-      |> TaskAliases.add_alias(:"assets.setup", "rekindle.setup", if_exists: :append)
+      |> TaskAliases.add_alias(:"assets.setup", ["rekindle.setup"], if_exists: :append)
     end
 
     defp maybe_generate_client(igniter, _selection, :existing), do: igniter
@@ -376,10 +376,10 @@ if Code.ensure_loaded?(Igniter) do
     defp maybe_add_web_alias(igniter, targets) do
       if :web in targets do
         igniter
-        |> TaskAliases.add_alias(:"assets.build", "rekindle.build web", if_exists: :append)
+        |> TaskAliases.add_alias(:"assets.build", ["rekindle.build web"], if_exists: :append)
         |> TaskAliases.add_alias(
           :"assets.deploy",
-          "rekindle.build web --release",
+          ["rekindle.build web --release"],
           if_exists: :prepend
         )
       else
