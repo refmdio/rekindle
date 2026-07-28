@@ -8,7 +8,6 @@ defmodule EguiExample.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      {Rekindle, [otp_app: :egui_example, endpoint: EguiExampleWeb.Endpoint]},
       EguiExampleWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:egui_example, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: EguiExample.PubSub},

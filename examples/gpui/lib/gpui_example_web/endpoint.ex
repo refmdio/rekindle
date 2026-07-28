@@ -34,7 +34,7 @@ defmodule GpuiExampleWeb.Endpoint do
     socket "/phoenix/live_reload/socket", Phoenix.LiveReloader.Socket
     plug Phoenix.LiveReloader
     plug Phoenix.CodeReloader
-    plug Rekindle.Phoenix.Development, otp_app: :gpui_example
+    plug Rekindle.DevServer, otp_app: :gpui_example
   end
 
   plug Plug.RequestId

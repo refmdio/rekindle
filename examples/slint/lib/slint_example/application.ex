@@ -8,7 +8,6 @@ defmodule SlintExample.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      {Rekindle, [otp_app: :slint_example, endpoint: SlintExampleWeb.Endpoint]},
       SlintExampleWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:slint_example, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: SlintExample.PubSub},

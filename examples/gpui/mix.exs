@@ -40,7 +40,7 @@ defmodule GpuiExample.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
-      {:rekindle, "~> 0.1"},
+      {:rekindle, path: "../..", override: true},
       {:igniter, "~> 0.6", only: [:dev, :test]},
       {:phoenix, "~> 1.8.9"},
       {:phoenix_html, "~> 4.1"},
@@ -63,17 +63,17 @@ defmodule GpuiExample.MixProject do
   # See the documentation for `Mix` for more info on aliases.
   defp aliases do
     [
-      setup: ["deps.get", "assets.setup", "assets.build"],
-      "assets.setup": ["rekindle.setup"],
-      "assets.build": ["rekindle.build web"],
-      "assets.deploy": ["rekindle.build web --release"],
+      setup: ["deps.get", "assets.setup"],
       precommit: [
         "compile --warnings-as-errors",
         "deps.unlock --unused",
         "format",
         "test",
         "rekindle.check"
-      ]
+      ],
+      "assets.setup": "rekindle.setup",
+      "assets.build": "rekindle.build web",
+      "assets.deploy": "rekindle.build web --release"
     ]
   end
 end
