@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Start one supervised Web development runtime from the first
+  `Rekindle.DevServer` request, without a Phoenix endpoint watcher.
+- Run headless Web or native desktop development explicitly through
+  `mix rekindle.dev`.
+- Separate enabled build targets from the target selected for development and
+  default combined projects to Web.
+- Serve development Web generations through the host-independent
+  `Rekindle.DevServer` Plug.
+- Allow Web release publication below a configured `:public_dir`.
+- Route build notifications only to their target-specific development runtime.
+
 ## 0.1.3 - 2026-07-28
 
 - Use Phoenix's standard `mix phx.server` command for development and remove

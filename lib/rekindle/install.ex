@@ -195,11 +195,6 @@ if Code.ensure_loaded?(Igniter) do
       igniter
       |> maybe_generate_client(selection, mode)
       |> configure(app, selection)
-      |> Application.add_new_child(
-        {Rekindle,
-         {:code,
-          Sourceror.parse_string!("[otp_app: #{inspect(app)}, endpoint: #{inspect(endpoint)}]")}}
-      )
       |> PhoenixInstall.install(app, endpoint, selection, phoenix)
       |> update_setup_aliases()
       |> maybe_add_web_alias(selection.targets)

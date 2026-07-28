@@ -58,6 +58,19 @@ defmodule Rekindle.ConfigTest do
     assert project.targets.desktop.features == ["desktop"]
   end
 
+  test "resolves a configured public directory from the project root" do
+    root = tmp_dir()
+
+    Application.put_env(:rekindle_config_test, Rekindle,
+      integration: :gpui,
+      targets: [web: []],
+      public_dir: "public"
+    )
+
+    assert {:ok, project} = Config.load(:rekindle_config_test, project_root: root)
+    assert project.public_dir == Path.join(root, "public")
+  end
+
   test "preserves an explicitly empty Cargo feature list" do
     Application.put_env(:rekindle_config_test, Rekindle,
       integration: :gpui,
@@ -80,10 +93,19 @@ defmodule Rekindle.ConfigTest do
     Application.put_env(:rekindle_config_test, Rekindle,
       integration: :gpui,
       targets: [web: []],
-      public_dir: "web/static"
+      unknown: true
     )
 
     assert {:error, %Config.Error{kind: :unknown_key}} =
+             Config.load(:rekindle_config_test)
+
+    Application.put_env(:rekindle_config_test, Rekindle,
+      integration: :gpui,
+      targets: [web: []],
+      public_dir: ""
+    )
+
+    assert {:error, %Config.Error{kind: :invalid_public_dir}} =
              Config.load(:rekindle_config_test)
   end
 

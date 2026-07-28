@@ -6,9 +6,11 @@ generation.
 
 ## Development
 
-`mix phx.server` watches the client and publishes successful builds below
-`.rekindle/dev`. The browser runtime detects a new generation only after it is
-complete. A failed build leaves the previous generation active.
+The Phoenix installer adds `Rekindle.DevServer` to the development endpoint.
+The first request starts the Web builder and client watcher, and successful
+builds are published below `.rekindle/dev`. The browser runtime detects a new
+generation only after it is complete. A failed build leaves the previous
+generation active.
 
 Run one build without the development server:
 
@@ -28,6 +30,9 @@ By default, generations are published below:
 priv/static/rekindle/web/<generation>/
 priv/static/rekindle/entry.js
 ```
+
+Set the top-level `:public_dir` option to publish below another host-controlled
+static directory.
 
 The entry module imports and starts the selected complete generation. It is
 replaced only after that generation has been published. The installer adds a

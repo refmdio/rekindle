@@ -5,7 +5,7 @@ defmodule Rekindle.Config do
 
   @integrations Rekindle.Integration.names()
   @target_names [:web, :desktop]
-  @config_keys [:integration, :targets]
+  @config_keys [:integration, :targets, :public_dir]
   @target_keys [:package, :binary, :features, :profiles]
   @profile_names [:dev, :release]
   @application_config_key :"Elixir.Rekindle"
@@ -35,7 +35,7 @@ defmodule Rekindle.Config do
          client_root: Path.join(root, "client"),
          integration: parsed.integration,
          targets: parsed.targets,
-         public_dir: Path.join(root, "priv/static")
+         public_dir: Path.expand(parsed.public_dir, root)
        }}
     end
   end
@@ -54,8 +54,22 @@ defmodule Rekindle.Config do
          :ok <- unique_keys(config, "Rekindle configuration"),
          :ok <- known_keys(config, @config_keys, "Rekindle configuration"),
          {:ok, integration} <- integration(config),
-         {:ok, targets} <- targets(config) do
-      {:ok, %{integration: integration, targets: targets}}
+         {:ok, targets} <- targets(config),
+         {:ok, public_dir} <- public_dir(config) do
+      {:ok, %{integration: integration, targets: targets, public_dir: public_dir}}
+    end
+  end
+
+  defp public_dir(config) do
+    case Keyword.get(config, :public_dir, "priv/static") do
+      value when is_binary(value) and value != "" ->
+        {:ok, value}
+
+      value ->
+        error(
+          :invalid_public_dir,
+          "expected :public_dir to be a non-empty path, got: #{inspect(value)}"
+        )
     end
   end
 

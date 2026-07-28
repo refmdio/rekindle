@@ -4,14 +4,21 @@ defmodule Rekindle.Development.Cleanup do
   @retained_web_generations 2
   @generation ~r/\A[0-9a-f]{32}\z/
 
-  @spec startup(Rekindle.Config.t()) :: :ok
-  def startup(project) do
-    File.rm_rf(Path.join([project.root, ".rekindle", "tmp"]))
-    File.rm_rf(Path.join([project.root, ".rekindle", "dev", "desktop"]))
+  @spec startup(Rekindle.Config.t(), [:web | :desktop]) :: :ok
+  def startup(project, targets) do
+    if :web in targets do
+      File.rm_rf(Path.join([project.root, ".rekindle", "tmp", "web"]))
 
-    selected = selected_web(project.root)
-    remove_temporary_files(Path.join([project.root, ".rekindle", "dev"]))
-    prune_web(project.root, selected)
+      selected = selected_web(project.root)
+      remove_temporary_files(Path.join([project.root, ".rekindle", "dev"]))
+      prune_web(project.root, selected)
+    end
+
+    if :desktop in targets do
+      File.rm_rf(Path.join([project.root, ".rekindle", "tmp", "desktop"]))
+      File.rm_rf(Path.join([project.root, ".rekindle", "dev", "desktop"]))
+    end
+
     :ok
   end
 

@@ -20,6 +20,10 @@ mix rekindle.check
 
 ```console
 mix phx.server
+mix rekindle.dev
+mix rekindle.dev web
+mix rekindle.dev desktop
+mix rekindle.dev web,desktop
 mix assets.build
 mix rekindle.build web
 mix rekindle.build desktop

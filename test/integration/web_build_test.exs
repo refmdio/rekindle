@@ -98,6 +98,21 @@ defmodule Rekindle.WebBuildTest do
     assert File.regular?(third.artifact)
   end
 
+  test "publishes release output below a configured public directory", %{root: root} do
+    Application.put_env(:rekindle_web_build_test, Rekindle,
+      integration: :gpui,
+      targets: [web: [features: ["web"]]],
+      public_dir: "public"
+    )
+
+    tools = fake_tools(root, "custom-public-dir")
+
+    assert {:ok, result} = build(root, tools, profile: :release)
+    assert result.artifact =~ "/public/rekindle/web/"
+    assert File.regular?(Path.join(root, "public/rekindle/entry.js"))
+    refute File.exists?(Path.join(root, "priv/static/rekindle"))
+  end
+
   test "does not replace the current selector after an incomplete build", %{root: root} do
     tools = fake_tools(root, "first")
     assert {:ok, selected} = build(root, tools)

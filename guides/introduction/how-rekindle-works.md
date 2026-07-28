@@ -36,9 +36,12 @@ required for each target.
 
 ## Development and release
 
-In development, Rekindle watches `client/`, schedules Cargo builds, and replaces
-only successful Web generations or desktop processes. Phoenix and the Rust UI
-therefore share one supervised development command.
+In development, Rekindle owns the client watcher, Cargo builders, and selected
+target runtime. The `Rekindle.DevServer` Plug starts Web development on the
+first request and serves successful generations, so the normal Phoenix command
+remains `mix phx.server`. `mix rekindle.dev` provides the same runtime without
+an HTTP server and is the entry point for desktop development, which starts and
+replaces the selected native process.
 
 For production, Rekindle runs the configured Cargo release profile and
 publishes an immutable Web generation or a desktop executable and manifest.

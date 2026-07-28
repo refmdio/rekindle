@@ -22,7 +22,10 @@ defmodule Rekindle.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger]]
+    [
+      extra_applications: [:logger],
+      mod: {Rekindle.Application, []}
+    ]
   end
 
   defp deps do
@@ -63,7 +66,7 @@ defmodule Rekindle.MixProject do
         Reference: ~r"guides/reference/"
       ],
       groups_for_modules: [
-        Core: [Rekindle, Rekindle.Phoenix],
+        Core: [Rekindle, Rekindle.DevServer, Rekindle.Phoenix],
         "Build results": [Rekindle.Build.Result, Rekindle.Diagnostic],
         Errors: [
           Rekindle.Build.Error,
@@ -76,6 +79,7 @@ defmodule Rekindle.MixProject do
         "Mix Tasks": [
           Mix.Tasks.Rekindle.Build,
           Mix.Tasks.Rekindle.Check,
+          Mix.Tasks.Rekindle.Dev,
           Mix.Tasks.Rekindle.Doctor,
           Mix.Tasks.Rekindle.Install,
           Mix.Tasks.Rekindle.Setup

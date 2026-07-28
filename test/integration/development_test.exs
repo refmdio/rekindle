@@ -6,7 +6,7 @@ defmodule Rekindle.DevelopmentTest do
   alias Rekindle.Build.Result
   alias Rekindle.Development.Builder
   alias Rekindle.Desktop.Development, as: DesktopDevelopment
-  alias Rekindle.Phoenix.Development
+  alias Rekindle.DevServer
 
   setup do
     root =
@@ -203,7 +203,9 @@ defmodule Rekindle.DevelopmentTest do
 
   test "serves the selected Web generation and reports build errors", %{root: root} do
     generation = publish_web(root, "export default async function init() {}")
-    options = Development.init(otp_app: :rekindle_development_test, project_root: root)
+
+    options =
+      DevServer.init(otp_app: :rekindle_development_test, project_root: root, watch: false)
 
     current = request("/__rekindle/current", options)
 
@@ -234,35 +236,98 @@ defmodule Rekindle.DevelopmentTest do
     {:ok, project} =
       Rekindle.Config.load(:rekindle_development_test, project_root: root)
 
-    assert :ok = Development.put_error(project, "Rust compilation failed")
+    assert :ok = Rekindle.Development.State.put_error(project, "Rust compilation failed")
     failure = request("/__rekindle/current", options)
     assert failure.status == 409
     assert Jason.decode!(failure.resp_body) == %{"error" => "Rust compilation failed"}
 
-    assert :ok = Development.clear_error(project)
+    assert :ok = Rekindle.Development.State.clear_error(project)
     assert request("/__rekindle/current", options).status == 200
   end
 
-  test "startup cleanup removes disposable state and keeps the selected Web output", %{root: root} do
+  test "starts one supervised Web runtime from requests", %{root: root} do
+    File.write!(Path.join(root, "client/Cargo.toml"), """
+    [package]
+    name = "request-driven-client"
+    version = "0.1.0"
+    edition = "2024"
+
+    [features]
+    web = []
+
+    [[bin]]
+    name = "web"
+    path = "src/bin/web.rs"
+    required-features = ["web"]
+    """)
+
+    Application.put_env(:rekindle_request_driven_test, Rekindle,
+      integration: :gpui,
+      targets: [web: []]
+    )
+
+    on_exit(fn ->
+      Application.delete_env(:rekindle_request_driven_test, Rekindle)
+
+      case Registry.lookup(Rekindle.Development.Registry, :rekindle_request_driven_test) do
+        [{pid, _value}] ->
+          DynamicSupervisor.terminate_child(Rekindle.Development.DynamicSupervisor, pid)
+
+        [] ->
+          :ok
+      end
+    end)
+
+    options =
+      DevServer.init(otp_app: :rekindle_request_driven_test, project_root: root)
+
+    assert request("/", options).status == nil
+
+    assert [{runtime, _value}] =
+             Registry.lookup(
+               Rekindle.Development.Registry,
+               :rekindle_request_driven_test
+             )
+
+    assert request("/", options).status == nil
+
+    assert [{^runtime, _value}] =
+             Registry.lookup(
+               Rekindle.Development.Registry,
+               :rekindle_request_driven_test
+             )
+  end
+
+  test "startup cleanup is limited to the selected development targets", %{root: root} do
     first = publish_web(root, "export default 1")
     second = publish_web(root, "export default 2")
     selected = publish_web(root, "export default 3")
 
-    File.mkdir_p!(Path.join(root, ".rekindle/tmp/web/incomplete"))
-    File.mkdir_p!(Path.join(root, ".rekindle/dev/desktop/target/stale"))
+    web_temporary = Path.join(root, ".rekindle/tmp/web/incomplete")
+    desktop_temporary = Path.join(root, ".rekindle/tmp/desktop/incomplete")
+    desktop_output = Path.join(root, ".rekindle/dev/desktop/target/current")
+    File.mkdir_p!(web_temporary)
+    File.mkdir_p!(desktop_temporary)
+    File.mkdir_p!(desktop_output)
 
     {:ok, project} =
       Rekindle.Config.load(:rekindle_development_test, project_root: root)
 
-    assert :ok = Rekindle.Development.Cleanup.startup(project)
-    refute File.exists?(Path.join(root, ".rekindle/tmp"))
-    refute File.exists?(Path.join(root, ".rekindle/dev/desktop"))
+    assert :ok = Rekindle.Development.Cleanup.startup(project, [:web])
+    refute File.exists?(web_temporary)
+    assert File.dir?(desktop_temporary)
+    assert File.dir?(desktop_output)
     assert File.dir?(Path.join([root, ".rekindle/dev/web", selected]))
 
     retained = web_generations(root)
     assert MapSet.member?(retained, selected)
     assert MapSet.size(retained) == 2
     refute MapSet.member?(retained, first) and MapSet.member?(retained, second)
+
+    assert :ok = Rekindle.Development.Cleanup.startup(project, [:desktop])
+    refute File.exists?(desktop_temporary)
+    refute File.exists?(desktop_output)
+    assert File.dir?(Path.join([root, ".rekindle/dev/web", selected]))
   end
 
   test "stopping the builder also stops its active task", %{root: root} do
@@ -365,7 +430,7 @@ defmodule Rekindle.DevelopmentTest do
 
   defp request(path, options) do
     Plug.Test.conn("GET", path)
-    |> Development.call(options)
+    |> DevServer.call(options)
   end
 
   defp web_generations(root) do

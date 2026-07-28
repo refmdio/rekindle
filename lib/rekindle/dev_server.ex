@@ -1,12 +1,25 @@
-defmodule Rekindle.Phoenix.Development do
-  @moduledoc false
+defmodule Rekindle.DevServer do
+  @moduledoc """
+  Plug that serves Rekindle Web generations during development.
+
+  Add it to a Plug pipeline with the OTP application that owns the Rekindle
+  configuration:
+
+      plug Rekindle.DevServer, otp_app: :my_app
+
+  The first request starts the Web development runtime unless `watch: false` is
+  supplied. The Phoenix installer adds this Plug automatically.
+  """
 
   @behaviour Plug
 
   import Plug.Conn
 
+  require Logger
+
   alias Rekindle.Config
-  alias Rekindle.Publication
+  alias Rekindle.Development
+  alias Rekindle.Development.State
   alias Rekindle.Web.Manifest
 
   @prefix ["__rekindle"]
@@ -16,10 +29,15 @@ defmodule Rekindle.Phoenix.Development do
   def init(options), do: options
 
   @impl Plug
-  def call(
-        %Plug.Conn{method: "GET", path_info: @prefix ++ ["runtime.js"]} = conn,
-        options
-      ) do
+  def call(conn, options) do
+    ensure_development(options)
+    dispatch(conn, options)
+  end
+
+  defp dispatch(
+         %Plug.Conn{method: "GET", path_info: @prefix ++ ["runtime.js"]} = conn,
+         options
+       ) do
     with {:ok, project} <- project(options),
          {:ok, integration} <- Rekindle.Integration.fetch(project.integration) do
       conn
@@ -32,9 +50,12 @@ defmodule Rekindle.Phoenix.Development do
     end
   end
 
-  def call(%Plug.Conn{method: "GET", path_info: @prefix ++ ["current"]} = conn, options) do
+  defp dispatch(
+         %Plug.Conn{method: "GET", path_info: @prefix ++ ["current"]} = conn,
+         options
+       ) do
     with {:ok, project} <- project(options) do
-      case build_error(project) do
+      case State.build_error(project) do
         {:ok, message} ->
           json(conn, 409, %{"error" => message})
 
@@ -55,13 +76,13 @@ defmodule Rekindle.Phoenix.Development do
     end
   end
 
-  def call(
-        %Plug.Conn{
-          method: "GET",
-          path_info: @prefix ++ ["web", generation | member]
-        } = conn,
-        options
-      ) do
+  defp dispatch(
+         %Plug.Conn{
+           method: "GET",
+           path_info: @prefix ++ ["web", generation | member]
+         } = conn,
+         options
+       ) do
     requested = Enum.join(member, "/")
 
     with true <- Regex.match?(@generation, generation),
@@ -80,46 +101,36 @@ defmodule Rekindle.Phoenix.Development do
     end
   end
 
-  def call(conn, _options), do: conn
-
-  @doc false
-  @spec put_error(Config.t(), String.t()) :: :ok
-  def put_error(project, message) do
-    path = error_path(project)
-
-    with :ok <- File.mkdir_p(Path.dirname(path)),
-         {:ok, temporary} <-
-           Publication.temporary_file(Path.dirname(path), ".tmp-web-error-") do
-      try do
-        with :ok <- File.write(temporary, Jason.encode!(%{"error" => message})),
-             :ok <- File.rename(temporary, path) do
-          :ok
-        else
-          {:error, _reason} -> :ok
-        end
-      after
-        File.rm(temporary)
-      end
-    else
-      {:error, _reason} -> :ok
-    end
-  end
-
-  @doc false
-  @spec clear_error(Config.t()) :: :ok
-  def clear_error(project) do
-    case File.rm(error_path(project)) do
-      :ok -> :ok
-      {:error, :enoent} -> :ok
-      {:error, _reason} -> :ok
-    end
-  end
+  defp dispatch(conn, _options), do: conn
 
   defp project(options) do
     Config.load(
       Keyword.fetch!(options, :otp_app),
       project_root: Keyword.get(options, :project_root, File.cwd!())
     )
+  end
+
+  defp ensure_development(options) do
+    if Keyword.get(options, :watch, true) do
+      development_options =
+        options
+        |> Keyword.take([:otp_app, :project_root])
+        |> Keyword.put(:targets, [:web])
+
+      case Development.ensure_started(development_options) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "could not start Rekindle Web development runtime: #{error_message(reason)}"
+          )
+      end
+    end
+  end
+
+  defp error_message(reason) do
+    if is_exception(reason), do: Exception.message(reason), else: inspect(reason)
   end
 
   defp current(project) do
@@ -154,19 +165,6 @@ defmodule Rekindle.Phoenix.Development do
   end
 
   defp safe_member?(_member), do: false
-
-  defp build_error(project) do
-    path = error_path(project)
-
-    with {:ok, contents} <- File.read(path),
-         {:ok, %{"error" => message}} when is_binary(message) <- Jason.decode(contents) do
-      {:ok, message}
-    else
-      _error -> :none
-    end
-  end
-
-  defp error_path(project), do: Path.join([project.root, ".rekindle", "dev", "web-error.json"])
 
   defp path(generation, entry), do: "/__rekindle/web/#{generation}/#{entry}"
 

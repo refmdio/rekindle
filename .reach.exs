@@ -1,5 +1,6 @@
 adapter = [
   "Mix.Tasks.Rekindle.*",
+  "Rekindle.DevServer",
   "Rekindle.Install",
   "Rekindle.Phoenix",
   "Rekindle.Phoenix.Install"
@@ -7,13 +8,16 @@ adapter = [
 
 application = [
   "Rekindle",
+  "Rekindle.Application",
   "Rekindle.Build",
   "Rekindle.Cargo",
   "Rekindle.Check",
   "Rekindle.Desktop.Builder",
   "Rekindle.Desktop.Development",
   "Rekindle.Desktop.Release",
+  "Rekindle.Development",
   "Rekindle.Development.Builder",
+  "Rekindle.Development.Core",
   "Rekindle.Development.Watcher",
   "Rekindle.Doctor",
   "Rekindle.Setup",
@@ -27,8 +31,8 @@ service = [
   "Rekindle.Config",
   "Rekindle.Desktop.Manifest",
   "Rekindle.Development.Cleanup",
+  "Rekindle.Development.State",
   "Rekindle.Integration",
-  "Rekindle.Phoenix.Development",
   "Rekindle.Publication",
   "Rekindle.Toolchain",
   "Rekindle.Toolchain.Process",

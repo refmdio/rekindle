@@ -46,11 +46,32 @@ compiled but not executed because browser test runners are application-specific.
 
 ## Start development
 
-Start Phoenix and the Rekindle development services together:
+Start Phoenix and Rekindle Web development together:
 
 ```console
 mix phx.server
 ```
+
+The installer adds `Rekindle.DevServer` to the development endpoint. Its first
+request starts one supervised Web development runtime; repeated requests reuse
+that runtime. No Phoenix endpoint watcher entry or separate frontend command is
+required.
+
+```elixir
+plug Rekindle.DevServer, otp_app: :my_app
+```
+
+Desktop development is not started by an HTTP request. Run it explicitly:
+
+```console
+mix rekindle.dev desktop
+mix rekindle.dev web,desktop
+```
+
+Run `mix rekindle.dev` or `mix rekindle.dev web` when Web development is needed
+without an HTTP server. Enabled targets in the main Rekindle configuration
+remain available to explicit and release builds regardless of the active
+development selection.
 
 Files below `client/` are watched and rebuilt through Cargo. A successful Web
 build publishes an immutable development generation for the polling browser
@@ -69,8 +90,10 @@ serializable development state. It dispatches `rekindle:ready` after startup
 and `rekindle:error` when a build or startup fails. These hooks do not preserve
 state automatically.
 
-Rekindle's supervised development services run only when the Phoenix endpoint
-has code reloading enabled.
+`mix rekindle.dev` does not start Phoenix or another HTTP server. Web
+generations are exposed by the host-independent `Rekindle.DevServer` Plug,
+which can be mounted by any Plug-compatible host. Pass `watch: false` only when
+another process owns the development runtime.
 
 ## Build explicitly
 

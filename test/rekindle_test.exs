@@ -1,32 +1,42 @@
 defmodule RekindleTest do
   use ExUnit.Case, async: false
 
-  test "starts the development runtime as a supervision child" do
+  import ExUnit.CaptureLog
+
+  alias Rekindle.Development
+
+  test "starts the default Web development runtime" do
     root = temporary_client([:web])
-    options = [otp_app: :demo, endpoint: DemoWeb.Endpoint, project_root: root]
+    options = [otp_app: :demo, project_root: root]
 
-    assert %{start: {Rekindle, :start_link, [^options]}} =
-             Supervisor.child_spec({Rekindle, options}, [])
+    assert %{start: {Development, :start_link, [^options]}} =
+             Supervisor.child_spec({Development, options}, [])
 
-    Application.put_env(:demo, DemoWeb.Endpoint, code_reloader: true)
     Application.put_env(:demo, Rekindle, integration: :gpui, targets: [web: []])
 
     on_exit(fn ->
-      Application.delete_env(:demo, DemoWeb.Endpoint)
       Application.delete_env(:demo, Rekindle)
       File.rm_rf!(root)
     end)
 
-    assert {:ok, pid} = start_supervised({Rekindle, options})
+    assert {:ok, pid} = start_supervised({Development, options})
     assert Process.alive?(pid)
-    assert length(Supervisor.which_children(pid)) == 3
+
+    assert [{Rekindle.Development.Core, core, :supervisor, _modules}] =
+             Supervisor.which_children(pid)
+
+    assert length(Supervisor.which_children(core)) == 3
+
+    assert %{web: _status} =
+             status =
+             Rekindle.Development.Builder.status(Rekindle.Development.Demo.Builder)
+
+    assert Map.keys(status) == [:web]
   end
 
-  test "adds the desktop launcher when desktop is enabled" do
+  test "adds the desktop launcher when desktop development is selected" do
     root = temporary_client([:web, :desktop])
-    options = [otp_app: :combined_demo, endpoint: CombinedDemoWeb.Endpoint, project_root: root]
-
-    Application.put_env(:combined_demo, CombinedDemoWeb.Endpoint, code_reloader: true)
+    options = [otp_app: :combined_demo, project_root: root, targets: [:desktop]]
 
     Application.put_env(:combined_demo, Rekindle,
       integration: :gpui,
@@ -34,30 +44,72 @@ defmodule RekindleTest do
     )
 
     on_exit(fn ->
-      Application.delete_env(:combined_demo, CombinedDemoWeb.Endpoint)
       Application.delete_env(:combined_demo, Rekindle)
       File.rm_rf!(root)
     end)
 
-    supervisor = start_supervised!({Rekindle, options})
+    supervisor = start_supervised!({Development, options})
     children = Supervisor.which_children(supervisor)
 
     assert Enum.any?(children, &(elem(&1, 0) == Rekindle.Desktop.Processes))
     assert Enum.any?(children, &(elem(&1, 0) == Rekindle.Desktop.Development))
-    assert length(children) == 5
+    assert Enum.any?(children, &(elem(&1, 0) == Rekindle.Development.Core))
+    assert length(children) == 3
 
-    stop_supervised(Rekindle)
+    assert %{desktop: _status} =
+             status =
+             Rekindle.Development.Builder.status(Rekindle.Development.CombinedDemo.Builder)
+
+    assert Map.keys(status) == [:desktop]
+
+    stop_supervised(Development)
     refute Process.alive?(supervisor)
   end
 
-  test "does not start outside code-reloading environments" do
-    Application.put_env(:production_demo, Unrelated, code_reloader: true)
-    on_exit(fn -> Application.delete_env(:production_demo, Unrelated) end)
+  test "isolates a desktop launcher crash from the build core" do
+    root = temporary_client([:web, :desktop])
 
-    assert :ignore =
-             Rekindle.start_link(
-               otp_app: :production_demo,
-               endpoint: ProductionDemoWeb.Endpoint
+    Application.put_env(:isolated_demo, Rekindle,
+      integration: :gpui,
+      targets: [web: [], desktop: []]
+    )
+
+    on_exit(fn ->
+      Application.delete_env(:isolated_demo, Rekindle)
+      File.rm_rf!(root)
+    end)
+
+    start_supervised!(
+      {Development, otp_app: :isolated_demo, project_root: root, targets: [:desktop]}
+    )
+
+    builder = Process.whereis(Rekindle.Development.IsolatedDemo.Builder)
+    desktop = Process.whereis(Rekindle.Development.IsolatedDemo.Desktop)
+    builder_reference = Process.monitor(builder)
+    desktop_reference = Process.monitor(desktop)
+
+    capture_log(fn ->
+      send(desktop, :unexpected)
+      assert_receive {:DOWN, ^desktop_reference, :process, ^desktop, _reason}
+    end)
+
+    refute_receive {:DOWN, ^builder_reference, :process, ^builder, _reason}, 50
+    assert Process.alive?(builder)
+  end
+
+  test "rejects development targets that are not enabled" do
+    root = temporary_client([:web])
+    Application.put_env(:web_demo, Rekindle, integration: :gpui, targets: [web: []])
+
+    on_exit(fn ->
+      Application.delete_env(:web_demo, Rekindle)
+      File.rm_rf!(root)
+    end)
+
+    assert {:error,
+            {{%Rekindle.Config.Error{kind: :invalid_development_targets}, _stacktrace}, _child}} =
+             start_supervised(
+               {Development, otp_app: :web_demo, project_root: root, targets: [:desktop]}
              )
   end
 

@@ -31,13 +31,21 @@ are installed.
 
 ## Development builds do not start
 
-The Rekindle development supervisor starts only when the configured Phoenix
-endpoint has `code_reloader: true`. Use the development Mix environment and
-start the application with:
+Confirm that the Phoenix development endpoint includes:
+
+```elixir
+plug Rekindle.DevServer, otp_app: :my_app
+```
+
+Then start the application with:
 
 ```console
 mix phx.server
 ```
+
+Request the page once to start Web development. Run `mix rekindle.dev web`
+directly to isolate watcher or Cargo failures from
+the HTTP server.
 
 ## A remote browser cannot use WebGPU
 

@@ -17,16 +17,17 @@ defmodule Rekindle.InstallTest do
     assert "client/public" in installed.mkdirs
 
     application = content(installed, "lib/demo/application.ex")
-    assert application =~ "otp_app: :demo"
-    assert application =~ "endpoint: DemoWeb.Endpoint"
+    refute application =~ "Rekindle"
+
+    refute Map.has_key?(installed.rewrite.sources, "config/dev.exs")
 
     endpoint = content(installed, "lib/demo_web/endpoint.ex")
     assert endpoint =~ ~s(at: "/rekindle")
     assert endpoint =~ ~s(from: {:demo, "priv/static/rekindle"})
-    assert endpoint =~ "plug(Rekindle.Phoenix.Development, otp_app: :demo)"
+    assert endpoint =~ "plug(Rekindle.DevServer, otp_app: :demo)"
 
     assert index(endpoint, "Phoenix.CodeReloader") <
-             index(endpoint, "Rekindle.Phoenix.Development")
+             index(endpoint, "Rekindle.DevServer")
 
     layout = content(installed, "lib/demo_web/components/layouts/root.html.heex")
     assert layout =~ "Rekindle.Phoenix.web_entry_path(DemoWeb.Endpoint)"
@@ -70,15 +71,17 @@ defmodule Rekindle.InstallTest do
       layout = content(installed, "lib/demo_web/components/layouts/root.html.heex")
 
       if "web" in targets do
-        assert endpoint =~ "Rekindle.Phoenix.Development"
+        assert endpoint =~ "Rekindle.DevServer"
         assert layout =~ "Rekindle.Phoenix.web_entry_path"
 
         host = Rekindle.Integration.host(String.to_existing_atom(integration))
         if host != "", do: assert(layout =~ host)
       else
-        refute endpoint =~ "Rekindle.Phoenix.Development"
+        refute endpoint =~ "Rekindle.DevServer"
         refute layout =~ "Rekindle"
       end
+
+      refute Map.has_key?(installed.rewrite.sources, "config/dev.exs")
     end
   end
 
@@ -189,7 +192,7 @@ defmodule Rekindle.InstallTest do
 
             if code_reloading? do
               plug Phoenix.CodeReloader
-              plug Rekindle.Phoenix.Development, otp_app: :demo
+              plug Rekindle.DevServer, otp_app: :demo
             end
 
             plug DemoWeb.Router
@@ -200,7 +203,7 @@ defmodule Rekindle.InstallTest do
 
     endpoint = content(installed, "lib/demo_web/endpoint.ex")
     assert endpoint =~ "plug(Plug.Static"
-    assert length(Regex.scan(~r/Rekindle\.Phoenix\.Development/, endpoint)) == 1
+    assert length(Regex.scan(~r/Rekindle\.DevServer/, endpoint)) == 1
   end
 
   test "adds missing integration host markup independently from the script" do
@@ -357,7 +360,7 @@ defmodule Rekindle.InstallTest do
 
   test "desktop-only installation does not add browser hooks" do
     installed = install(project(), integration: "gpui", targets: ["desktop"])
-    refute content(installed, "lib/demo_web/endpoint.ex") =~ "Rekindle.Phoenix.Development"
+    refute content(installed, "lib/demo_web/endpoint.ex") =~ "Rekindle.DevServer"
     refute content(installed, "lib/demo_web/components/layouts/root.html.heex") =~ "Rekindle"
   end
 

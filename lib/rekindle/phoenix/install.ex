@@ -157,7 +157,7 @@ if Code.ensure_loaded?(Igniter) do
         {:ok, _zipper},
         Common.move_to(zipper, fn zipper ->
           Function.function_call?(zipper, :plug, 2) and
-            Function.argument_equals?(zipper, 0, Rekindle.Phoenix.Development) and
+            Function.argument_equals?(zipper, 0, Rekindle.DevServer) and
             development_plug_options?(zipper, app)
         end)
       )
@@ -182,7 +182,7 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp development_plug_source(app),
-      do: "plug Rekindle.Phoenix.Development, otp_app: #{inspect(app)}"
+      do: "plug Rekindle.DevServer, otp_app: #{inspect(app)}"
 
     defp layout_parts(endpoint, integration) do
       host = Rekindle.Integration.host(integration)

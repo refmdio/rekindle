@@ -33,7 +33,9 @@ defmodule Rekindle.Development.Builder do
     with {:ok, project} <-
            Config.load(otp_app, project_root: Keyword.get(options, :project_root, File.cwd!())) do
       targets =
-        Map.new(project.targets, fn {target, _config} ->
+        project.targets
+        |> Map.take(Keyword.get(options, :targets, Map.keys(project.targets)))
+        |> Map.new(fn {target, _config} ->
           {target, target_state()}
         end)
 
@@ -269,7 +271,7 @@ defmodule Rekindle.Development.Builder do
     do: send(destination, {__MODULE__, target, result})
 
   defp report(project, :web, {:ok, _result}, elapsed) do
-    Rekindle.Phoenix.Development.clear_error(project)
+    Rekindle.Development.State.clear_error(project)
     Logger.info("Built Rekindle Web in #{format_duration(elapsed)}")
   end
 
@@ -278,7 +280,7 @@ defmodule Rekindle.Development.Builder do
       "Rekindle Web build failed after #{format_duration(elapsed)}: #{error_message(error)}"
     )
 
-    Rekindle.Phoenix.Development.put_error(project, error_message(error))
+    Rekindle.Development.State.put_error(project, error_message(error))
   end
 
   defp report(_project, :desktop, {:error, error}, elapsed) do
