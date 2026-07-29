@@ -204,7 +204,7 @@ defmodule Rekindle.DevServer do
           "debug" -> :debug
         end
 
-      {:ok, level, "[browser #{source}] " <> Enum.join(args, " ")}
+      {:ok, level, ["[browser ", source, "] ", Enum.intersperse(args, " ")]}
     else
       :error
     end
