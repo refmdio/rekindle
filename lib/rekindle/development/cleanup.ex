@@ -1,7 +1,6 @@
 defmodule Rekindle.Development.Cleanup do
   @moduledoc false
 
-  @retained_web_generations 2
   @generation ~r/\A[0-9a-f]{32}\z/
 
   @spec startup(Rekindle.Config.t(), [:web | :desktop]) :: :ok
@@ -9,9 +8,7 @@ defmodule Rekindle.Development.Cleanup do
     if :web in targets do
       File.rm_rf(Path.join([project.root, ".rekindle", "tmp", "web"]))
 
-      selected = selected_web(project.root)
       remove_temporary_files(Path.join([project.root, ".rekindle", "dev"]))
-      prune_web(project.root, selected)
     end
 
     if :desktop in targets do
@@ -30,7 +27,6 @@ defmodule Rekindle.Development.Cleanup do
     if selected_web(project.root) != generation and inside?(directory, root),
       do: File.rm_rf(directory)
 
-    prune_web(project.root, selected_web(project.root))
     :ok
   end
 
@@ -44,60 +40,7 @@ defmodule Rekindle.Development.Cleanup do
   def discard(_project, _result), do: :ok
 
   @spec web(Rekindle.Config.t(), String.t(), String.t() | nil) :: :ok
-  def web(project, generation, previous \\ nil) do
-    prune_web(project.root, [generation, previous])
-    :ok
-  end
-
-  defp prune_web(root, selected) when not is_list(selected), do: prune_web(root, [selected])
-
-  defp prune_web(root, selected) do
-    directory = Path.join([root, ".rekindle", "dev", "web"])
-
-    case File.ls(directory) do
-      {:ok, names} ->
-        names
-        |> Enum.filter(&Regex.match?(@generation, &1))
-        |> Enum.map(fn name ->
-          path = Path.join(directory, name)
-
-          case File.stat(path, time: :posix) do
-            {:ok, %{type: :directory, mtime: modified}} -> {path, modified}
-            _other -> nil
-          end
-        end)
-        |> Enum.reject(&is_nil/1)
-        |> Enum.sort_by(&elem(&1, 1), :desc)
-        |> stale_generations(selected)
-        |> Enum.each(&File.rm_rf/1)
-
-      {:error, _reason} ->
-        :ok
-    end
-  end
-
-  defp stale_generations(generations, selected) do
-    selected = selected |> Enum.reject(&is_nil/1) |> Enum.uniq()
-
-    kept =
-      selected
-      |> Enum.flat_map(fn generation ->
-        Enum.filter(generations, &(Path.basename(elem(&1, 0)) == generation))
-      end)
-      |> then(fn preferred ->
-        recent =
-          generations
-          |> Enum.reject(&(&1 in preferred))
-          |> Enum.take(max(@retained_web_generations - length(preferred), 0))
-
-        preferred ++ recent
-      end)
-      |> MapSet.new(&elem(&1, 0))
-
-    generations
-    |> Enum.map(&elem(&1, 0))
-    |> Enum.reject(&MapSet.member?(kept, &1))
-  end
+  def web(_project, _generation, _previous \\ nil), do: :ok
 
   defp selected_web(root) do
     path = Path.join([root, ".rekindle", "dev", "web-current.json"])

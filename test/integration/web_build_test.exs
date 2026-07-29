@@ -53,7 +53,11 @@ defmodule Rekindle.WebBuildTest do
     assert {:ok, third} = build(root, tools)
 
     assert generation_directories(root) ==
-             MapSet.new([second.metadata.generation, third.metadata.generation])
+             MapSet.new([
+               generation,
+               second.metadata.generation,
+               third.metadata.generation
+             ])
   end
 
   test "publishes release output and updates the selector last", %{root: root} do
@@ -73,6 +77,8 @@ defmodule Rekindle.WebBuildTest do
     entry = File.read!(Path.join(namespace, "entry.js"))
     assert entry =~ "// Rekindle generation: #{first.metadata.generation}"
     assert entry =~ ~s(import init from "./web/#{first.metadata.generation}/app.js";)
+    refute entry =~ "/__rekindle"
+    refute entry =~ "installConsoleForwarding"
 
     File.write!(tools.mode, "second")
     assert {:ok, second} = build(root, tools, profile: :release)

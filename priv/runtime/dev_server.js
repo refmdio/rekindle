@@ -1,4 +1,6 @@
 const currentUrl = new URL("./current", import.meta.url);
+const consoleUrl = new URL("./console", import.meta.url);
+const originalConsole = installConsoleForwarding();
 const statusView = ensureStatusView();
 const errorView = ensureErrorView();
 let activeGeneration;
@@ -6,6 +8,83 @@ let attemptedGeneration;
 let reportedError;
 let loading = false;
 let reloading = false;
+
+function serializeConsoleValue(value) {
+  if (value instanceof Error) {
+    return value.stack || `${value.name}: ${value.message}`;
+  }
+  if (typeof value === "string") return value;
+
+  try {
+    const encoded = JSON.stringify(value);
+    if (encoded !== undefined) return encoded;
+  } catch (_error) {
+    // Fall through to String for circular and otherwise non-JSON values.
+  }
+
+  try {
+    return String(value);
+  } catch (_error) {
+    return "[unserializable]";
+  }
+}
+
+function forwardConsole(level, source, args) {
+  let body;
+  try {
+    body = JSON.stringify({
+      level,
+      source,
+      args: args.map(serializeConsoleValue)
+    });
+  } catch (_error) {
+    return;
+  }
+
+  if (typeof navigator.sendBeacon === "function") {
+    try {
+      if (navigator.sendBeacon(consoleUrl, body)) return;
+    } catch (_error) {
+      // Fall back to fetch.
+    }
+  }
+
+  try {
+    fetch(consoleUrl, {
+      method: "POST",
+      headers: {"content-type": "application/json"},
+      body,
+      keepalive: true
+    }).catch(() => {});
+  } catch (_error) {
+    // Browser logging must remain usable when transport setup fails.
+  }
+}
+
+function installConsoleForwarding() {
+  const originals = {};
+
+  for (const level of ["log", "info", "warn", "error", "debug"]) {
+    const method = console[level];
+    if (typeof method !== "function") continue;
+
+    originals[level] = method.bind(console);
+    console[level] = (...args) => {
+      const result = originals[level](...args);
+      forwardConsole(level, "console", args);
+      return result;
+    };
+  }
+
+  window.addEventListener("error", (event) => {
+    forwardConsole("error", "error", [event.error || event.message]);
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    forwardConsole("error", "unhandledrejection", [event.reason]);
+  });
+
+  return originals;
+}
 
 function ensureStatusView() {
   const existing = document.getElementById("rekindle-status");
@@ -43,12 +122,16 @@ function ensureErrorView() {
   return view;
 }
 
-function report(error, key) {
+function report(error, key, {forward = true} = {}) {
   const message = error instanceof Error ? error.message : String(error);
   const identity = key ?? message;
   if (reportedError === identity) return;
   reportedError = identity;
-  console.error("[rekindle]", error);
+  if (forward) {
+    console.error("[rekindle]", error);
+  } else if (originalConsole.error) {
+    originalConsole.error("[rekindle]", error);
+  }
   statusView.hidden = true;
   errorView.textContent = message;
   errorView.hidden = false;
@@ -73,7 +156,7 @@ async function update() {
     const response = await fetch(currentUrl, {cache: "no-store"});
     if (response.status === 409) {
       const failure = await response.json();
-      report(new Error(failure.error), `build:${failure.error}`);
+      report(new Error(failure.error), `build:${failure.error}`, {forward: false});
       return;
     }
     if (!response.ok) return;

@@ -237,6 +237,18 @@ defmodule Rekindle.DevelopmentTest do
     assert runtime.resp_body =~ "if (loading || reloading) return;"
     assert runtime.resp_body =~ "reloading = true;"
 
+    assert runtime.resp_body =~
+             ~S|for (const level of ["log", "info", "warn", "error", "debug"])|
+
+    assert runtime.resp_body =~ "const result = originals[level](...args);"
+    assert runtime.resp_body =~ "return result;"
+    assert runtime.resp_body =~ "navigator.sendBeacon(consoleUrl, body)"
+    assert runtime.resp_body =~ "}).catch(() => {});"
+    assert runtime.resp_body =~ ~S|window.addEventListener("error"|
+    assert runtime.resp_body =~ ~S|window.addEventListener("unhandledrejection"|
+    assert runtime.resp_body =~ "{forward: false}"
+    assert runtime.resp_body =~ "function report(error, key, {forward = true} = {})"
+
     {:ok, project} =
       Rekindle.Config.load(:rekindle_development_test, project_root: root)
 
@@ -247,6 +259,56 @@ defmodule Rekindle.DevelopmentTest do
 
     assert :ok = Rekindle.Development.State.clear_error(project)
     assert request("/__rekindle/current", options).status == 200
+  end
+
+  test "forwards browser console messages to Logger levels", %{root: root} do
+    options =
+      DevServer.init(otp_app: :rekindle_development_test, project_root: root, watch: false)
+
+    for {browser_level, logger_level} <- [
+          {"log", :info},
+          {"info", :info},
+          {"warn", :warning},
+          {"error", :error},
+          {"debug", :debug}
+        ] do
+      log =
+        capture_log([level: logger_level], fn ->
+          response =
+            post(
+              "/__rekindle/console",
+              %{
+                "level" => browser_level,
+                "source" => "console",
+                "args" => ["message", ~s({"answer":42})]
+              },
+              options
+            )
+
+          assert response.status == 204
+        end)
+
+      assert log =~ "[browser console] message {\"answer\":42}"
+    end
+
+    assert post("/__rekindle/console", %{"level" => "trace"}, options).status == 400
+  end
+
+  test "marks browser logs with their Logger domain", %{root: root} do
+    options =
+      DevServer.init(otp_app: :rekindle_development_test, project_root: root, watch: false)
+
+    log =
+      capture_log([metadata: [:domain]], fn ->
+        assert post(
+                 "/__rekindle/console",
+                 %{"level" => "info", "source" => "console", "args" => ["round trip"]},
+                 options
+               ).status == 204
+      end)
+
+    assert log =~ "domain=elixir.rekindle.browser"
+    assert log =~ "[browser console] round trip"
   end
 
   test "starts one supervised Web runtime from requests", %{root: root} do
@@ -323,10 +385,7 @@ defmodule Rekindle.DevelopmentTest do
     assert File.dir?(desktop_output)
     assert File.dir?(Path.join([root, ".rekindle/dev/web", selected]))
 
-    retained = web_generations(root)
-    assert MapSet.member?(retained, selected)
-    assert MapSet.size(retained) == 2
-    refute MapSet.member?(retained, first) and MapSet.member?(retained, second)
+    assert web_generations(root) == MapSet.new([first, second, selected])
 
     assert :ok = Rekindle.Development.Cleanup.startup(project, [:desktop])
     refute File.exists?(desktop_temporary)
@@ -437,6 +496,12 @@ defmodule Rekindle.DevelopmentTest do
 
   defp request(path, options) do
     Plug.Test.conn("GET", path)
+    |> DevServer.call(options)
+  end
+
+  defp post(path, body, options) do
+    Plug.Test.conn("POST", path, Jason.encode!(body))
+    |> Plug.Conn.put_req_header("content-type", "application/json")
     |> DevServer.call(options)
   end
 

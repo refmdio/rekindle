@@ -24,6 +24,10 @@ defmodule Rekindle.DevServer do
   @entry "app.js"
   @prefix ["__rekindle"]
   @generation ~r/\A[0-9a-f]{32}\z/
+  @browser_log_domain [:rekindle, :browser]
+  @browser_log_event_domain [:elixir | @browser_log_domain]
+  @live_reload_logger Phoenix.LiveReloader.WebConsoleLogger
+  @live_reload_filter :rekindle_browser_console
   @runtime_path Path.expand("../../priv/runtime/dev_server.js", __DIR__)
   @external_resource @runtime_path
   @runtime File.read!(@runtime_path)
@@ -77,6 +81,29 @@ defmodule Rekindle.DevServer do
       end
     else
       _error -> unavailable(conn)
+    end
+  end
+
+  defp dispatch(
+         %Plug.Conn{method: "POST", path_info: @prefix ++ ["console"]} = conn,
+         _options
+       ) do
+    with {:ok, body, conn} <- read_body(conn),
+         {:ok, payload} <- Jason.decode(body),
+         {:ok, level, message} <- browser_console_message(payload) do
+      suppress_live_reload_echo()
+      Logger.log(level, message, domain: @browser_log_domain)
+
+      conn
+      |> no_store()
+      |> send_resp(204, "")
+      |> halt()
+    else
+      _error ->
+        conn
+        |> no_store()
+        |> send_resp(400, "Invalid browser console message")
+        |> halt()
     end
   end
 
@@ -160,6 +187,44 @@ defmodule Rekindle.DevServer do
   defp safe_member?(_member), do: false
 
   defp path(generation, entry), do: "/__rekindle/web/#{generation}/#{entry}"
+
+  defp browser_console_message(%{
+         "level" => browser_level,
+         "source" => source,
+         "args" => args
+       })
+       when browser_level in ["log", "info", "warn", "error", "debug"] and
+              source in ["console", "error", "unhandledrejection"] and is_list(args) do
+    if Enum.all?(args, &is_binary/1) do
+      level =
+        case browser_level do
+          level when level in ["log", "info"] -> :info
+          "warn" -> :warning
+          "error" -> :error
+          "debug" -> :debug
+        end
+
+      {:ok, level, "[browser #{source}] " <> Enum.join(args, " ")}
+    else
+      :error
+    end
+  end
+
+  defp browser_console_message(_payload), do: :error
+
+  defp suppress_live_reload_echo do
+    for %{id: id, module: @live_reload_logger, filters: filters} <-
+          :logger.get_handler_config(),
+        not Keyword.has_key?(filters, @live_reload_filter) do
+      :logger.add_handler_filter(
+        id,
+        @live_reload_filter,
+        {&:logger_filters.domain/2, {:stop, :equal, @browser_log_event_domain}}
+      )
+    end
+
+    :ok
+  end
 
   defp put_asset_content_type(conn, path) do
     if Path.extname(path) == ".wasm" do
