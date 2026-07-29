@@ -1,15 +1,14 @@
 defmodule Mix.Tasks.Rekindle.Check do
   use Mix.Task
 
-  @shortdoc "Checks Rust formatting, lints, and tests"
+  @shortdoc "Checks Rust formatting and lints"
   @moduledoc """
   Checks the generated Rust UI project with its declared Cargo toolchain.
 
       mix rekindle.check
 
-  The task checks formatting, runs Clippy for every enabled target, and checks
-  library tests for those targets. Web tests are compiled without being run
-  because browser execution requires an application-specific test runner.
+  The task checks formatting and runs Clippy for every enabled target. Rust
+  tests run as part of the application's regular `mix test` suite.
   """
 
   @impl Mix.Task

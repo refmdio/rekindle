@@ -34,3 +34,23 @@ impl Counter {
 pub fn run() -> iced::Result {
     iced::run(Counter::update, Counter::view)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Counter;
+
+    #[test]
+    fn increments_the_counter() {
+        let mut counter = Counter::default();
+        let mut ui = iced_test::simulator(counter.view());
+
+        ui.click("Increment")
+            .expect("Increment button should exist");
+
+        for message in ui.into_messages() {
+            counter.update(message);
+        }
+
+        assert_eq!(counter.value, 1);
+    }
+}

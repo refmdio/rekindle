@@ -1,7 +1,7 @@
 defmodule Rekindle.MixProject do
   use Mix.Project
 
-  @version "0.1.8"
+  @version "0.1.9"
   @source_url "https://github.com/refmdio/rekindle"
   @docs_url "https://rekindle.hexdocs.pm"
 
@@ -67,7 +67,7 @@ defmodule Rekindle.MixProject do
         Reference: ~r"guides/reference/"
       ],
       groups_for_modules: [
-        Core: [Rekindle, Rekindle.DevServer, Rekindle.Phoenix],
+        Core: [Rekindle, Rekindle.DevServer, Rekindle.Phoenix, Rekindle.Test],
         Plugins: [
           Rekindle.Plugin,
           Rekindle.Plugin.Spec,

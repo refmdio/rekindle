@@ -27,6 +27,9 @@ defmodule Rekindle.Plugin.Slint do
       },
       cargo: %Cargo{
         dependencies: [],
+        dev_dependencies: [
+          %Dependency{name: "i-slint-backend-testing", version: "=1.16.1"}
+        ],
         target_dependencies: [
           {"cfg(not(target_arch = \"wasm32\"))",
            [

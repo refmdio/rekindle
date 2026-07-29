@@ -1,13 +1,13 @@
-defmodule Rekindle.CheckTest do
+defmodule Rekindle.TestTest do
   use ExUnit.Case, async: false
 
-  alias Rekindle.Check
+  alias Rekindle.Test, as: RustTest
 
   setup do
     root =
       Path.join(
         System.tmp_dir!(),
-        "rekindle-check-#{System.unique_integer([:positive, :monotonic])}"
+        "rekindle-test-#{System.unique_integer([:positive, :monotonic])}"
       )
 
     client = Path.join(root, "client")
@@ -28,18 +28,18 @@ defmodule Rekindle.CheckTest do
         """
     )
 
-    previous = Application.get_env(:rekindle_check_test, Rekindle)
+    previous = Application.get_env(:rekindle_test_test, Rekindle)
 
-    Application.put_env(:rekindle_check_test, Rekindle,
+    Application.put_env(:rekindle_test_test, Rekindle,
       plugin: Rekindle.Plugin.GPUI,
       targets: [web: [], desktop: []]
     )
 
     on_exit(fn ->
       if previous do
-        Application.put_env(:rekindle_check_test, Rekindle, previous)
+        Application.put_env(:rekindle_test_test, Rekindle, previous)
       else
-        Application.delete_env(:rekindle_check_test, Rekindle)
+        Application.delete_env(:rekindle_test_test, Rekindle)
       end
 
       File.rm_rf!(root)
@@ -48,66 +48,52 @@ defmodule Rekindle.CheckTest do
     %{root: root}
   end
 
-  test "checks formatting and Clippy for every enabled target", %{root: root} do
-    %{cargo: cargo, rustc: rustc, trace: trace} = fake_tools(root)
+  test "runs the configured Cargo package once with standard test selection", %{root: root} do
+    %{cargo: cargo, trace: trace} = fake_cargo(root)
     test = self()
 
     assert :ok =
-             Check.run(:rekindle_check_test,
+             RustTest.run(:rekindle_test_test,
                project_root: root,
                cargo: cargo,
-               rustc: rustc,
                notify: fn status, label -> send(test, {status, label}) end
              )
 
     assert notifications() == [
-             {:start, "Rust formatting"},
-             {:ok, "Rust formatting"},
-             {:start, "Web clippy"},
-             {:ok, "Web clippy"},
-             {:start, "Desktop clippy"},
-             {:ok, "Desktop clippy"}
+             {:start, "Rust tests for fixture_ui"},
+             {:ok, "Rust tests for fixture_ui"}
            ]
 
-    commands = trace |> File.read!() |> String.split("\n", trim: true)
-    assert [metadata, format, web_clippy, desktop_clippy] = commands
+    assert [metadata, cargo_test] =
+             trace |> File.read!() |> String.split("\n", trim: true)
+
     assert metadata =~ "metadata --format-version 1 --no-deps"
     assert metadata =~ "--locked"
-    assert format =~ "fmt --all"
-    assert format =~ "-- --check"
-    assert web_clippy =~ "clippy"
-    assert web_clippy =~ "--bin web"
-    assert web_clippy =~ "--target wasm32-unknown-unknown"
-    assert web_clippy =~ "--features web"
-    assert web_clippy =~ "-- -D warnings"
-    assert desktop_clippy =~ "--bin desktop"
-    assert desktop_clippy =~ "--target x86_64-unknown-linux-gnu"
-    assert desktop_clippy =~ "--features desktop"
-    refute Enum.any?(commands, &(&1 =~ "test"))
+    assert cargo_test =~ "test --manifest-path"
+    assert cargo_test =~ "--package fixture_ui"
+    assert cargo_test =~ "--locked"
+    refute cargo_test =~ "--lib"
+    refute cargo_test =~ "--target"
+    refute cargo_test =~ "--features"
   end
 
-  test "stops at the first failed check with bounded Cargo output", %{root: root} do
-    %{cargo: cargo, rustc: rustc, trace: trace} = fake_tools(root, fail: "clippy")
+  test "reports Cargo test output on failure", %{root: root} do
+    %{cargo: cargo} = fake_cargo(root, fail: true)
 
     assert {:error, %Rekindle.Cargo.Error{} = error} =
-             Check.run(:rekindle_check_test,
-               project_root: root,
-               cargo: cargo,
-               rustc: rustc
-             )
+             RustTest.run(:rekindle_test_test, project_root: root, cargo: cargo)
 
-    assert error.kind == :check_failed
-    assert error.message == "Web clippy failed with status 17"
-    assert error.output =~ "clippy failed"
+    assert error.kind == :test_failed
+    assert error.message == "Rust tests for fixture_ui failed with status 17"
+    assert error.output =~ "Rust test failed"
 
-    commands = trace |> File.read!() |> String.split("\n", trim: true)
-    assert length(commands) == 3
-    assert List.last(commands) =~ "clippy"
+    assert_raise Rekindle.Cargo.Error, ~r/Rust test failed/, fn ->
+      RustTest.run!(:rekindle_test_test, project_root: root, cargo: cargo)
+    end
   end
 
-  defp fake_tools(root, options \\ []) do
+  defp fake_cargo(root, options \\ []) do
     cargo = Path.join(root, "cargo")
-    rustc = Path.join(root, "rustc")
     trace = Path.join(root, "cargo-trace")
     manifest = Path.join(root, "client/Cargo.toml")
     package_id = "fixture_ui 0.1.0"
@@ -144,9 +130,10 @@ defmodule Rekindle.CheckTest do
       })
 
     failure =
-      case Keyword.get(options, :fail) do
-        nil -> ""
-        command -> ~s(if [ "$1" = "#{command}" ]; then echo "#{command} failed"; exit 17; fi)
+      if Keyword.get(options, :fail, false) do
+        ~s(if [ "$1" = "test" ]; then echo "Rust test failed"; exit 17; fi)
+      else
+        ""
       end
 
     write_executable(
@@ -163,16 +150,7 @@ defmodule Rekindle.CheckTest do
       """
     )
 
-    write_executable(
-      rustc,
-      """
-      #!/bin/sh
-      echo "rustc 1.88.0"
-      echo "host: x86_64-unknown-linux-gnu"
-      """
-    )
-
-    %{cargo: cargo, rustc: rustc, trace: trace}
+    %{cargo: cargo, trace: trace}
   end
 
   defp notifications(acc \\ []) do

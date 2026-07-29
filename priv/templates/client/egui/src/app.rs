@@ -88,3 +88,19 @@ fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
         ui.label(".");
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TemplateApp;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn increments_the_value() {
+        let mut harness = Harness::new_eframe(|context| TemplateApp::new(context));
+
+        harness.get_by_label("Increment").click();
+        harness.run();
+
+        assert!((harness.state().value - 3.7).abs() < 0.001);
+    }
+}

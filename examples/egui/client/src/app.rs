@@ -164,3 +164,19 @@ impl eframe::App for Example {
             });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Example;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn increments_the_counter() {
+        let mut harness = Harness::new_eframe(|context| Example::new(context));
+
+        harness.get_by_label("Increment").click();
+        harness.run();
+
+        assert_eq!(harness.state().count, 1);
+    }
+}

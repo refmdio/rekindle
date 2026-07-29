@@ -64,19 +64,7 @@ defmodule Rekindle.Check do
                 ])
             }
 
-            test = %{
-              label: "#{target_label(name)} tests",
-              arguments:
-                List.flatten([
-                  ["test"],
-                  common,
-                  ["--lib"],
-                  features,
-                  if(name == :web, do: ["--no-run"], else: [])
-                ])
-            }
-
-            {:cont, {:ok, [test, clippy | target_steps]}}
+            {:cont, {:ok, [clippy | target_steps]}}
           else
             {:error, %Error{} = error} -> {:halt, {:error, error}}
             {:error, error} -> {:halt, {:error, Error.new(:target, Exception.message(error))}}

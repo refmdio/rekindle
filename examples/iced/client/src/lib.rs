@@ -157,3 +157,23 @@ pub fn run() -> iced::Result {
         .window_size(Size::new(820.0, 600.0))
         .run()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Example;
+
+    #[test]
+    fn increments_the_counter() {
+        let mut example = Example::default();
+        let mut ui = iced_test::simulator(example.view());
+
+        ui.click("Increment")
+            .expect("Increment button should exist");
+
+        for message in ui.into_messages() {
+            example.update(message);
+        }
+
+        assert_eq!(example.count, 1);
+    }
+}

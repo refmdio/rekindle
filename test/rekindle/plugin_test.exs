@@ -58,10 +58,21 @@ defmodule Rekindle.PluginTest do
       expected_files =
         case name do
           :gpui ->
-            ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "src/lib.rs"]
+            [
+              "Cargo.lock",
+              "Cargo.toml",
+              "rust-toolchain.toml",
+              "src/lib.rs"
+            ]
 
           :egui ->
-            ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "src/app.rs", "src/lib.rs"]
+            [
+              "Cargo.lock",
+              "Cargo.toml",
+              "rust-toolchain.toml",
+              "src/app.rs",
+              "src/lib.rs"
+            ]
 
           :slint ->
             [
@@ -74,7 +85,12 @@ defmodule Rekindle.PluginTest do
             ]
 
           :iced ->
-            ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "src/lib.rs"]
+            [
+              "Cargo.lock",
+              "Cargo.toml",
+              "rust-toolchain.toml",
+              "src/lib.rs"
+            ]
         end
 
       assert Map.keys(both) |> Enum.sort() ==
@@ -159,6 +175,7 @@ defmodule Rekindle.PluginTest do
         end
 
         cargo_fmt!(root)
+        cargo_test!(root)
 
         if :web in targets,
           do: cargo_check!(root, "web", "wasm32-unknown-unknown")
@@ -249,6 +266,8 @@ defmodule Rekindle.PluginTest do
     assert files["src/bin/desktop.rs"] =~ "gpui_platform::application().run"
     assert files["src/lib.rs"] =~ ~S|format!("Hello, {}!", self.text)|
     assert files["src/lib.rs"] =~ "gpui::red()"
+    assert files["Cargo.toml"] =~ ~s(features = ["test-support"])
+    assert files["src/lib.rs"] =~ "#[gpui::test]"
   end
 
   defp assert_framework_entrypoints(:egui, files) do
@@ -262,6 +281,8 @@ defmodule Rekindle.PluginTest do
     assert files["src/app.rs"] =~ ~S|ui.heading("eframe template");|
     assert files["src/app.rs"] =~ ~S|ui.text_edit_singleline(&mut self.label);|
     assert files["src/app.rs"] =~ "egui::Slider::new"
+    assert files["Cargo.toml"] =~ ~s(egui_kittest = { version = "=0.35.0")
+    assert files["src/app.rs"] =~ "Harness::new_eframe"
   end
 
   defp assert_framework_entrypoints(:slint, files) do
@@ -285,6 +306,8 @@ defmodule Rekindle.PluginTest do
     assert files["src/bin/desktop.rs"] =~ "::run()"
     assert files["ui/app-window.slint"] =~ "Counter: \\{root.counter}"
     assert files["ui/app-window.slint"] =~ ~s(text: "Increase value";)
+    assert files["Cargo.toml"] =~ ~s(i-slint-backend-testing = "=1.16.1")
+    assert files["src/lib.rs"] =~ "i_slint_backend_testing::init_no_event_loop"
   end
 
   defp assert_framework_entrypoints(:iced, files) do
@@ -298,6 +321,8 @@ defmodule Rekindle.PluginTest do
     assert files["src/lib.rs"] =~ "iced::run(Counter::update, Counter::view)"
     assert files["src/lib.rs"] =~ ~S|button("Increment").on_press(Message::Increment)|
     assert files["src/lib.rs"] =~ ~S|button("Decrement").on_press(Message::Decrement)|
+    assert files["Cargo.toml"] =~ ~s(iced_test = "=0.14.0")
+    assert files["src/lib.rs"] =~ "iced_test::simulator"
   end
 
   defp cargo_check!(root, target, triple) do
@@ -319,6 +344,29 @@ defmodule Rekindle.PluginTest do
 
     assert status == 0,
            "cargo check failed for #{Path.basename(root)} #{target}:\n#{output}"
+  end
+
+  defp cargo_test!(root) do
+    cargo = rustup_tool!(root, "cargo")
+    {rustc, 0} = System.cmd("rustup", ["which", "rustc"], cd: root)
+    {rustdoc, 0} = System.cmd("rustup", ["which", "rustdoc"], cd: root)
+    toolchain = cargo |> Path.dirname() |> Path.dirname() |> Path.basename()
+
+    {output, status} =
+      System.cmd(cargo, ["test", "--locked"],
+        cd: root,
+        env: [
+          {"CARGO_TARGET_DIR",
+           Path.join(System.tmp_dir!(), "rekindle-plugin-test-target-#{toolchain}")},
+          {"CARGO_TERM_COLOR", "never"},
+          {"RUSTC", String.trim(rustc)},
+          {"RUSTDOC", String.trim(rustdoc)}
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert status == 0,
+           "cargo test failed for #{Path.basename(root)}:\n#{output}"
   end
 
   defp commit_generated_client!(root) do

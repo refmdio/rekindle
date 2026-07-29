@@ -25,6 +25,9 @@ defmodule Rekindle.Plugin.Iced do
       },
       cargo: %Cargo{
         dependencies: [],
+        dev_dependencies: [
+          %Dependency{name: "iced_test", version: "=0.14.0"}
+        ],
         target_dependencies: [
           {"cfg(not(target_arch = \"wasm32\"))",
            [

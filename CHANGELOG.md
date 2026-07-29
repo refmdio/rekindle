@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.9 - 2026-07-29
+
+- Run each configured Cargo package's unit, integration, documentation, and
+  framework headless UI tests through the application's regular `mix test`
+  suite.
+- Keep `mix rekindle.check` focused on Rust formatting and Clippy.
+
 ## 0.1.8 - 2026-07-29
 
 - Add built-in Iced support for Web and native desktop targets.

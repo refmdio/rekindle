@@ -20,6 +20,7 @@ application = [
   "Rekindle.Development.Watcher",
   "Rekindle.Doctor",
   "Rekindle.Setup",
+  "Rekindle.Test",
   "Rekindle.Web.Builder"
 ]
 

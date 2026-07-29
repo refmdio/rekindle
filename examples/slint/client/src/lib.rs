@@ -17,3 +17,17 @@ pub fn create() -> Result<AppWindow, slint::PlatformError> {
 pub fn run() -> Result<(), slint::PlatformError> {
     create()?.run()
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn increments_the_counter() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let app = super::create().expect("application should initialize");
+
+        assert_eq!(app.get_count(), 0);
+        app.invoke_increment();
+        assert_eq!(app.get_count(), 1);
+    }
+}

@@ -33,6 +33,7 @@ defmodule Rekindle.Plugin.Cargo do
 
   @enforce_keys [:dependencies]
   defstruct dependencies: [],
+            dev_dependencies: [],
             target_dependencies: [],
             build_dependencies: [],
             profiles: []
@@ -41,6 +42,7 @@ defmodule Rekindle.Plugin.Cargo do
   @type profile :: {String.t(), keyword()}
   @type t :: %__MODULE__{
           dependencies: [Dependency.t()],
+          dev_dependencies: [Dependency.t()],
           target_dependencies: [dependency_group()],
           build_dependencies: [Dependency.t()],
           profiles: [profile()]
@@ -50,6 +52,7 @@ defmodule Rekindle.Plugin.Cargo do
   @spec valid?(term()) :: boolean()
   def valid?(%__MODULE__{} = cargo) do
     dependencies?(cargo.dependencies) and
+      dependencies?(cargo.dev_dependencies) and
       dependency_groups?(cargo.target_dependencies) and
       dependencies?(cargo.build_dependencies) and
       profiles?(cargo.profiles)
@@ -63,6 +66,7 @@ defmodule Rekindle.Plugin.Cargo do
       package(),
       features(),
       dependency_section("dependencies", cargo.dependencies),
+      dependency_section("dev-dependencies", cargo.dev_dependencies),
       Enum.map(cargo.target_dependencies, fn {target, dependencies} ->
         dependency_section("target.'#{target}'.dependencies", dependencies)
       end),

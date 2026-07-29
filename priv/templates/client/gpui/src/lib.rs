@@ -103,3 +103,13 @@ pub fn open(cx: &mut App) {
 
     cx.activate(true);
 }
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn opens_the_application_window(cx: &mut TestAppContext) {
+        cx.update(super::open);
+    }
+}

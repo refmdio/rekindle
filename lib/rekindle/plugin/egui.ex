@@ -28,6 +28,9 @@ defmodule Rekindle.Plugin.Egui do
         dependencies: [
           %Dependency{name: "serde", version: "1", features: ["derive"]}
         ],
+        dev_dependencies: [
+          %Dependency{name: "egui_kittest", version: "=0.35.0", features: ["eframe"]}
+        ],
         target_dependencies: [
           {"cfg(not(target_arch = \"wasm32\"))",
            [

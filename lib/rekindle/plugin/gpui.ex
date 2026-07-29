@@ -39,6 +39,14 @@ defmodule Rekindle.Plugin.GPUI do
             features: ["wayland", "x11"]
           }
         ],
+        dev_dependencies: [
+          %Dependency{
+            name: "gpui",
+            git: "https://github.com/zed-industries/zed",
+            rev: @zed_revision,
+            features: ["test-support"]
+          }
+        ],
         target_dependencies: [
           {"cfg(target_arch = \"wasm32\")",
            [

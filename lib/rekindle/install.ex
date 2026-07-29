@@ -40,6 +40,7 @@ if Code.ensure_loaded?(Igniter) do
            {:ok, selection, mode} <-
              select(requested, existing, cargo_exists?),
            {:ok, mode} <- validate_generated_paths(igniter, selection, mode),
+           {:ok, igniter} <- validate_test_path(igniter, app),
            {igniter, endpoint} <- select_phoenix_endpoint(igniter, selection),
            {:ok, igniter, phoenix} <- prepare_phoenix(igniter, app, endpoint, selection) do
         install(igniter, app, endpoint, selection, mode, phoenix)
@@ -223,14 +224,105 @@ if Code.ensure_loaded?(Igniter) do
 
     defp validate_generated_paths(_igniter, _selection, :existing), do: {:ok, :existing}
 
+    defp validate_test_path(igniter, app) do
+      path = "test/rekindle_client_test.exs"
+
+      if Igniter.exists?(igniter, path) do
+        igniter = Igniter.include_existing_file(igniter, path)
+        source = Rewrite.source!(igniter.rewrite, path)
+
+        if test_invocation?(source, app) do
+          {:ok, igniter}
+        else
+          {:error,
+           "#{path} already exists; add Rekindle.Test.run!(#{inspect(app)}) to an ExUnit test"}
+        end
+      else
+        {:ok, igniter}
+      end
+    end
+
+    defp test_invocation?(source, app) do
+      with {:ok, quoted} <-
+             source |> Rewrite.Source.get(:content) |> Code.string_to_quoted() do
+        {_quoted, found?} =
+          Macro.prewalk(quoted, false, fn
+            {:test, _, arguments} = node, found? ->
+              {node, found? or test_body_invokes_rekindle?(arguments, app)}
+
+            node, found? ->
+              {node, found?}
+          end)
+
+        found?
+      else
+        {:error, _error} -> false
+      end
+    end
+
+    defp test_body_invokes_rekindle?(arguments, app) do
+      body =
+        case List.last(arguments) do
+          options when is_list(options) -> Keyword.get(options, :do)
+          _argument -> nil
+        end
+
+      {_body, found?} =
+        Macro.prewalk(body, false, fn
+          {{:., _, [{:__aliases__, _, [:Rekindle, :Test]}, :run!]}, _, call_arguments} = node,
+          found? ->
+            matches? =
+              case call_arguments do
+                [^app] -> true
+                [^app, _options] -> true
+                _arguments -> false
+              end
+
+            {node, found? or matches?}
+
+          node, found? ->
+            {node, found?}
+        end)
+
+      found?
+    end
+
     defp install(igniter, app, endpoint, selection, mode, phoenix) do
       igniter
       |> maybe_generate_client(selection, mode)
+      |> install_test(app)
       |> configure(app, selection)
       |> update_setup_aliases(phoenix)
-      |> TaskAliases.add_alias(:precommit, ["rekindle.check"], if_exists: :append)
+      |> update_precommit_alias()
       |> update_ignores(selection)
       |> PhoenixInstall.install(app, endpoint, selection, phoenix)
+    end
+
+    defp install_test(igniter, app) do
+      path = "test/rekindle_client_test.exs"
+      invocation = "Rekindle.Test.run!(#{inspect(app)})"
+
+      if Igniter.exists?(igniter, path) do
+        igniter
+      else
+        module = app |> Atom.to_string() |> Macro.camelize()
+
+        Igniter.create_new_file(
+          igniter,
+          path,
+          """
+          defmodule #{module}.RekindleClientTest do
+            use ExUnit.Case, async: false
+
+            @tag :rust
+            @tag timeout: :infinity
+            test "Rust client" do
+              #{invocation}
+            end
+          end
+          """
+        )
+      end
     end
 
     defp update_setup_aliases(igniter, nil) do
@@ -251,6 +343,27 @@ if Code.ensure_loaded?(Igniter) do
         end
       end)
       |> TaskAliases.add_alias(:"assets.setup", ["rekindle.setup"], if_exists: :append)
+    end
+
+    defp update_precommit_alias(igniter) do
+      igniter
+      |> TaskAliases.modify_existing_alias(:precommit, fn zipper ->
+        with {:ok, zipper} <-
+               Igniter.Code.List.remove_from_list(
+                 zipper,
+                 &Common.nodes_equal?(&1, "test")
+               ),
+             {:ok, zipper} <-
+               Igniter.Code.List.remove_from_list(
+                 zipper,
+                 &Common.nodes_equal?(&1, "rekindle.check")
+               ),
+             {:ok, zipper} <- Igniter.Code.List.append_new_to_list(zipper, "test"),
+             {:ok, zipper} <- Igniter.Code.List.append_new_to_list(zipper, "rekindle.check") do
+          {:ok, zipper}
+        end
+      end)
+      |> TaskAliases.add_alias(:precommit, ["test", "rekindle.check"], if_exists: :append)
     end
 
     defp maybe_generate_client(igniter, _selection, :existing), do: igniter

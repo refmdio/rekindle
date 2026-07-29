@@ -27,6 +27,13 @@ defmodule Rekindle.InstallTest do
     assert content(installed, "client/Cargo.toml") =~ "gpui"
     assert content(installed, "client/src/bin/web.rs") != ""
     assert content(installed, "client/src/bin/desktop.rs") != ""
+
+    assert content(installed, "test/rekindle_client_test.exs") =~
+             "Rekindle.Test.run!(:demo)"
+
+    assert content(installed, "test/rekindle_client_test.exs") =~
+             "@tag timeout: :infinity"
+
     assert "client/public" in installed.mkdirs
 
     application = content(installed, "lib/demo/application.ex")
@@ -57,7 +64,7 @@ defmodule Rekindle.InstallTest do
     assert mix =~ ~s(setup: ["deps.get", "assets.setup", "assets.build"])
     assert mix =~ ~s("assets.setup": ["existing.setup", "rekindle.setup"])
     assert mix =~ ~s("assets.build": ["existing.build", "rekindle.build web"])
-    assert mix =~ ~s(precommit: ["existing.check", "rekindle.check"])
+    assert mix =~ ~s(precommit: ["existing.check", "test", "rekindle.check"])
     assert index(mix, "rekindle.build web --release") < index(mix, "phx.digest")
 
     assert ignore_lines(installed) == [
@@ -78,6 +85,11 @@ defmodule Rekindle.InstallTest do
       spec = plugin |> plugin_module() |> Rekindle.Plugin.spec()
       assert manifest =~ spec.dependency
       assert content(installed, "client/Cargo.lock") =~ ~s(name = "client")
+
+      test_source =
+        if plugin == "egui", do: "client/src/app.rs", else: "client/src/lib.rs"
+
+      assert content(installed, test_source) =~ "#[cfg(test)]"
 
       for target <- ~w(web desktop) do
         path = "client/src/bin/#{target}.rs"
@@ -231,6 +243,105 @@ defmodule Rekindle.InstallTest do
 
     assert content(installed, "test/demo_web/controllers/page_controller_test.exs") ==
              content(original, "test/demo_web/controllers/page_controller_test.exs")
+  end
+
+  test "does not mistake a commented invocation for the Rust test bridge" do
+    original =
+      project(%{
+        "test/rekindle_client_test.exs" => """
+        defmodule Demo.ClientTest do
+          use ExUnit.Case
+
+          # Rekindle.Test.run!(:demo)
+        end
+        """
+      })
+
+    rejected = install(original, plugin: "egui", targets: ["desktop"])
+
+    assert Enum.any?(
+             rejected.issues,
+             &String.contains?(&1, "test/rekindle_client_test.exs already exists")
+           )
+
+    assert content(rejected, "test/rekindle_client_test.exs") ==
+             content(original, "test/rekindle_client_test.exs")
+
+    assert changed_contents(rejected) == changed_contents(original)
+  end
+
+  test "accepts an existing Rust test bridge with run options" do
+    original =
+      project(%{
+        "test/rekindle_client_test.exs" => """
+        defmodule Demo.ClientTest do
+          use ExUnit.Case
+
+          @tag timeout: :infinity
+          test "Rust client" do
+            Rekindle.Test.run!(:demo, timeout: 600_000)
+          end
+        end
+        """
+      })
+
+    installed = install(original, plugin: "egui", targets: ["desktop"])
+
+    assert installed.issues == []
+
+    assert content(installed, "test/rekindle_client_test.exs") ==
+             content(original, "test/rekindle_client_test.exs")
+  end
+
+  test "creates a precommit alias that runs tests before Rust checks" do
+    original =
+      project(%{
+        "mix.exs" => """
+        defmodule Demo.MixProject do
+          use Mix.Project
+
+          def project do
+            [app: :demo, version: "0.1.0", deps: [], aliases: aliases()]
+          end
+
+          def application, do: [mod: {Demo.Application, []}]
+          defp aliases, do: [setup: []]
+        end
+        """
+      })
+
+    installed = install(original, plugin: "iced", targets: ["desktop"])
+
+    assert installed.issues == []
+    assert content(installed, "mix.exs") =~ ~s(precommit: ["test", "rekindle.check"])
+  end
+
+  test "moves tests before an existing Rust check in precommit" do
+    original =
+      project(%{
+        "mix.exs" => """
+        defmodule Demo.MixProject do
+          use Mix.Project
+
+          def project do
+            [app: :demo, version: "0.1.0", deps: [], aliases: aliases()]
+          end
+
+          def application, do: [mod: {Demo.Application, []}]
+
+          defp aliases do
+            [precommit: ["existing.check", "rekindle.check"]]
+          end
+        end
+        """
+      })
+
+    installed = install(original, plugin: "iced", targets: ["desktop"])
+
+    assert installed.issues == []
+
+    assert content(installed, "mix.exs") =~
+             ~s(precommit: ["existing.check", "test", "rekindle.check"])
   end
 
   test "rejects an unmanaged Rust client without modifying it" do

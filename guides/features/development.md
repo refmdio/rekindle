@@ -34,15 +34,20 @@ mix rekindle.doctor
 It checks the Rekindle configuration, Cargo metadata, target support, selected
 plugin, and pinned Web tooling.
 
-Run the project's standard precommit checks, including Rust formatting, Clippy,
-and library tests:
+Run the project's standard precommit checks, including Elixir and Rust tests,
+Rust formatting, and Clippy:
 
 ```console
 mix precommit
 ```
 
-Run only the Rust checks with `mix rekindle.check`. Web library tests are
-compiled but not executed because browser test runners are application-specific.
+`mix test` runs ExUnit and each configured Cargo package's standard unit,
+integration, documentation, and framework headless UI tests. Run only Rust
+formatting and Clippy with:
+
+```console
+mix rekindle.check
+```
 
 ## Start development
 
