@@ -1,6 +1,7 @@
 adapter = [
   "Mix.Tasks.Rekindle.*",
   "Rekindle.DevServer",
+  "Rekindle.Development.Socket",
   "Rekindle.Install",
   "Rekindle.Phoenix",
   "Rekindle.Phoenix.Install"

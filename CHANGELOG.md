@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.10 - 2026-07-30
+
+- Push Web development build state over WebSocket and reload the page when a
+  new Rust generation is ready.
+- Forward browser console output to the host Logger and serve development
+  resources from the `/@rekindle` namespace.
+
 ## 0.1.9 - 2026-07-29
 
 - Run each configured Cargo package's unit, integration, documentation, and

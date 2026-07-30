@@ -79,10 +79,10 @@ remain available to explicit and release builds regardless of the active
 development selection.
 
 Files below `client/` are watched and rebuilt through Cargo. A successful Web
-build publishes an immutable development generation for the polling browser
-runtime. For a desktop replacement, Rekindle stops the current process before
-starting the replacement. If the replacement exits, Rekindle reports the exit
-and waits for the next successful build.
+build publishes an immutable development generation and notifies connected
+browser runtimes over WebSocket. For a desktop replacement, Rekindle stops the
+current process before starting the replacement. If the replacement exits,
+Rekindle reports the exit and waits for the next successful build.
 
 Phoenix logs the start and completion time of each Rust build. While the first
 Web build is running, the browser shows a loading status; build and graphics
