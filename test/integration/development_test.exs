@@ -1,6 +1,8 @@
 defmodule Rekindle.DevelopmentTest do
   use ExUnit.Case, async: false
 
+  @browser_start_timeout 30_000
+
   import ExUnit.CaptureLog
   alias Rekindle.Build.Result
   alias Rekindle.Development.Builder
@@ -388,7 +390,7 @@ defmodule Rekindle.DevelopmentTest do
 
     {browser_id, browser_process} = run_browser(browser, url, browser_directory)
 
-    assert_receive :browser_document_requested, 10_000
+    assert_receive :browser_document_requested, @browser_start_timeout
     assert_receive {:browser_loaded, "first"}, 10_000
 
     second =
@@ -425,8 +427,9 @@ defmodule Rekindle.DevelopmentTest do
     {browser_id, browser_process} = run_browser(browser, url, browser_directory)
 
     connection_times =
-      for _index <- 1..5 do
-        assert_receive {:browser_socket_connected, time}, 10_000
+      for index <- 1..5 do
+        timeout = if index == 1, do: @browser_start_timeout, else: 10_000
+        assert_receive {:browser_socket_connected, time}, timeout
         time
       end
 
