@@ -108,12 +108,17 @@ defmodule Rekindle.DevelopmentTest do
     @behaviour WebSock
 
     @impl WebSock
-    def init(state), do: {:stop, :normal, state}
+    def init(state) do
+      send(self(), :close)
+      {:ok, state}
+    end
 
     @impl WebSock
     def handle_in(_message, state), do: {:ok, state}
 
     @impl WebSock
+    def handle_info(:close, state), do: {:stop, :normal, state}
+
     def handle_info(_message, state), do: {:ok, state}
   end
 
