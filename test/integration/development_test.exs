@@ -13,7 +13,6 @@ defmodule Rekindle.DevelopmentTest do
 
     import Plug.Conn
 
-    alias Rekindle.DevelopmentTest.ClosingSocket
     alias Rekindle.DevServer
 
     @impl Plug
@@ -21,11 +20,13 @@ defmodule Rekindle.DevelopmentTest do
 
     @impl Plug
     def call(
-          %Plug.Conn{path_info: ["@rekindle", "socket"]} = conn,
+          %Plug.Conn{method: "GET", path_info: ["@rekindle", "socket"]} = conn,
           %{socket: :close} = options
         ) do
+      send(options.test, {:browser_socket_connected, System.monotonic_time(:millisecond)})
+
       conn
-      |> WebSockAdapter.upgrade(ClosingSocket, options.test, timeout: :infinity)
+      |> send_resp(503, "Unavailable")
       |> halt()
     end
 
@@ -79,25 +80,6 @@ defmodule Rekindle.DevelopmentTest do
       </html>
       """
     end
-  end
-
-  defmodule ClosingSocket do
-    @behaviour WebSock
-
-    @impl WebSock
-    def init(test) do
-      send(test, {:browser_socket_connected, System.monotonic_time(:millisecond)})
-      send(self(), :close)
-      {:ok, test}
-    end
-
-    @impl WebSock
-    def handle_in(_message, state), do: {:ok, state}
-
-    @impl WebSock
-    def handle_info(:close, state), do: {:stop, :normal, state}
-
-    def handle_info(_message, state), do: {:ok, state}
   end
 
   setup do
