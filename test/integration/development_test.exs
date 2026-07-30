@@ -2,12 +2,120 @@ defmodule Rekindle.DevelopmentTest do
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
-
   alias Rekindle.Build.Result
   alias Rekindle.Development.Builder
   alias Rekindle.Development.Socket
   alias Rekindle.Desktop.Development, as: DesktopDevelopment
   alias Rekindle.DevServer
+
+  defmodule BrowserPlug do
+    @behaviour Plug
+
+    import Plug.Conn
+
+    alias Rekindle.DevelopmentTest.ClosingSocket
+    alias Rekindle.DevServer
+
+    @impl Plug
+    def init(options), do: options
+
+    @impl Plug
+    def call(%Plug.Conn{path_info: ["__rekindle", "socket"]} = conn, %{socket: :close}) do
+      conn
+      |> WebSockAdapter.upgrade(ClosingSocket, nil, timeout: :infinity)
+      |> halt()
+    end
+
+    def call(conn, options) do
+      conn = DevServer.call(conn, options.dev_server)
+
+      if conn.halted do
+        conn
+      else
+        dispatch(conn, options)
+      end
+    end
+
+    defp dispatch(%Plug.Conn{method: "GET", path_info: []} = conn, options) do
+      send(options.test, :browser_document_requested)
+
+      conn
+      |> put_resp_content_type("text/html")
+      |> put_resp_header("cache-control", "no-store")
+      |> send_resp(200, page(options.socket))
+    end
+
+    defp dispatch(
+           %Plug.Conn{method: "POST", path_info: ["__test", "loaded", label]} = conn,
+           options
+         ) do
+      send(options.test, {:browser_loaded, label})
+      send_resp(conn, 204, "")
+    end
+
+    defp dispatch(
+           %Plug.Conn{method: "POST", path_info: ["__test", "delays"]} = conn,
+           options
+         ) do
+      {:ok, body, conn} = read_body(conn)
+      send(options.test, {:browser_reconnect_delays, Jason.decode!(body)})
+      send_resp(conn, 204, "")
+    end
+
+    defp dispatch(conn, _options), do: send_resp(conn, 404, "Not found")
+
+    defp page(:reload) do
+      """
+      <!doctype html>
+      <html>
+        <body>
+          <script type="module" src="/__rekindle/runtime.js"></script>
+        </body>
+      </html>
+      """
+    end
+
+    defp page(:close) do
+      """
+      <!doctype html>
+      <html>
+        <body>
+          <script>
+            const nativeSetTimeout = window.setTimeout.bind(window);
+            const reconnectDelays = [];
+            window.setTimeout = (callback, delay, ...args) => {
+              if (callback.name === "connect") {
+                reconnectDelays.push(delay);
+                if (reconnectDelays.length === 4) {
+                  fetch("/__test/delays", {
+                    method: "POST",
+                    body: JSON.stringify(reconnectDelays)
+                  });
+                }
+                return nativeSetTimeout(callback, 0, ...args);
+              }
+              return nativeSetTimeout(callback, delay, ...args);
+            };
+          </script>
+          <script type="module" src="/__rekindle/runtime.js"></script>
+        </body>
+      </html>
+      """
+    end
+  end
+
+  defmodule ClosingSocket do
+    @behaviour WebSock
+
+    @impl WebSock
+    def init(state), do: {:stop, :normal, state}
+
+    @impl WebSock
+    def handle_in(_message, state), do: {:ok, state}
+
+    @impl WebSock
+    def handle_info(_message, state), do: {:ok, state}
+  end
 
   setup do
     root =
@@ -295,6 +403,64 @@ defmodule Rekindle.DevelopmentTest do
     assert {:ok, ^project} = Socket.handle_in({"ignored", opcode: :text}, project)
   end
 
+  test "reloads a live browser when the WebSocket pushes a new generation", %{root: root} do
+    Application.put_env(:rekindle_development_test, Rekindle,
+      plugin: Rekindle.Plugin.Egui,
+      targets: [web: [], desktop: []]
+    )
+
+    first =
+      publish_web(root, """
+      export default async function init() {
+        document.documentElement.dataset.generation = "first";
+        await fetch("/__test/loaded/first", {method: "POST"});
+      }
+      """)
+
+    {browser, url, browser_directory} = start_browser_server(root, :reload)
+
+    on_exit(fn -> File.rm_rf(browser_directory) end)
+
+    browser_process = run_browser(browser, url, browser_directory)
+
+    assert_receive :browser_document_requested, 10_000
+    assert_receive {:browser_loaded, "first"}, 10_000
+
+    second =
+      publish_web(root, """
+      export default async function init() {
+        document.documentElement.dataset.generation = "second";
+        await fetch("/__test/loaded/second", {method: "POST"});
+      }
+      """)
+
+    refute first == second
+
+    {:ok, project} =
+      Rekindle.Config.load(:rekindle_development_test, project_root: root)
+
+    assert :ok = Rekindle.Development.State.clear_error(project)
+    assert_receive :browser_document_requested, 10_000
+    assert_receive {:browser_loaded, "second"}, 10_000
+    assert Process.alive?(browser_process)
+  end
+
+  test "backs off repeated WebSocket connections that close before state arrives", %{root: root} do
+    Application.put_env(:rekindle_development_test, Rekindle,
+      plugin: Rekindle.Plugin.Egui,
+      targets: [web: [], desktop: []]
+    )
+
+    {browser, url, browser_directory} = start_browser_server(root, :close)
+
+    on_exit(fn -> File.rm_rf(browser_directory) end)
+
+    browser_process = run_browser(browser, url, browser_directory)
+
+    assert_receive {:browser_reconnect_delays, [250, 500, 1000, 2000]}, 10_000
+    assert Process.alive?(browser_process)
+  end
+
   test "forwards browser console messages to Logger levels", %{root: root} do
     options =
       DevServer.init(otp_app: :rekindle_development_test, project_root: root, watch: false)
@@ -537,6 +703,65 @@ defmodule Rekindle.DevelopmentTest do
     Plug.Test.conn("POST", path, Jason.encode!(body))
     |> Plug.Conn.put_req_header("content-type", "application/json")
     |> DevServer.call(options)
+  end
+
+  defp start_browser_server(root, socket) do
+    browser =
+      Enum.find_value(
+        ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"],
+        fn
+          executable -> System.find_executable(executable)
+        end
+      ) || flunk("a Chromium executable is required for development browser integration tests")
+
+    dev_server =
+      DevServer.init(otp_app: :rekindle_development_test, project_root: root, watch: false)
+
+    server =
+      start_supervised!(
+        {Bandit,
+         plug: {BrowserPlug, %{dev_server: dev_server, socket: socket, test: self()}},
+         ip: {127, 0, 0, 1},
+         port: 0,
+         startup_log: false}
+      )
+
+    {:ok, {{127, 0, 0, 1}, port}} = ThousandIsland.listener_info(server)
+
+    browser_directory =
+      Path.join(
+        System.tmp_dir!(),
+        "rekindle-chromium-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(browser_directory)
+    {browser, "http://127.0.0.1:#{port}/", browser_directory}
+  end
+
+  defp run_browser(browser, url, browser_directory) do
+    child =
+      Supervisor.child_spec(
+        {MuonTrap.Daemon,
+         [
+           browser,
+           [
+             "--headless=new",
+             "--no-sandbox",
+             "--disable-dev-shm-usage",
+             "--enable-webgl",
+             "--enable-unsafe-swiftshader",
+             "--ignore-gpu-blocklist",
+             "--use-angle=swiftshader",
+             "--user-data-dir=#{browser_directory}",
+             "--remote-debugging-port=0",
+             url
+           ],
+           [stderr_to_stdout: true]
+         ]},
+        id: {:chromium, System.unique_integer([:positive, :monotonic])}
+      )
+
+    start_supervised!(child)
   end
 
   defp web_generations(root) do

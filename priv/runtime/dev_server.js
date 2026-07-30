@@ -166,6 +166,7 @@ function receiveState(data) {
     return;
   }
 
+  reconnectDelay = 250;
   pendingState = state;
   void applyPendingState();
 }
@@ -251,10 +252,6 @@ async function applyState(state) {
 
 function connect() {
   const socket = new WebSocket(socketUrl);
-
-  socket.addEventListener("open", () => {
-    reconnectDelay = 250;
-  });
 
   socket.addEventListener("message", (event) => {
     if (typeof event.data === "string") receiveState(event.data);
