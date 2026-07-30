@@ -20,9 +20,12 @@ defmodule Rekindle.DevelopmentTest do
     def init(options), do: options
 
     @impl Plug
-    def call(%Plug.Conn{path_info: ["@rekindle", "socket"]} = conn, %{socket: :close}) do
+    def call(
+          %Plug.Conn{path_info: ["@rekindle", "socket"]} = conn,
+          %{socket: :close} = options
+        ) do
       conn
-      |> WebSockAdapter.upgrade(ClosingSocket, nil, timeout: :infinity)
+      |> WebSockAdapter.upgrade(ClosingSocket, options.test, timeout: :infinity)
       |> halt()
     end
 
@@ -53,15 +56,6 @@ defmodule Rekindle.DevelopmentTest do
       send_resp(conn, 204, "")
     end
 
-    defp dispatch(
-           %Plug.Conn{method: "POST", path_info: ["__test", "delays"]} = conn,
-           options
-         ) do
-      {:ok, body, conn} = read_body(conn)
-      send(options.test, {:browser_reconnect_delays, Jason.decode!(body)})
-      send_resp(conn, 204, "")
-    end
-
     defp dispatch(conn, _options), do: send_resp(conn, 404, "Not found")
 
     defp page(:reload) do
@@ -80,23 +74,6 @@ defmodule Rekindle.DevelopmentTest do
       <!doctype html>
       <html>
         <body>
-          <script>
-            const nativeSetTimeout = window.setTimeout.bind(window);
-            const reconnectDelays = [];
-            window.setTimeout = (callback, delay, ...args) => {
-              if (callback.name === "connect") {
-                reconnectDelays.push(delay);
-                if (reconnectDelays.length === 4) {
-                  fetch("/__test/delays", {
-                    method: "POST",
-                    body: JSON.stringify(reconnectDelays)
-                  });
-                }
-                return nativeSetTimeout(callback, 0, ...args);
-              }
-              return nativeSetTimeout(callback, delay, ...args);
-            };
-          </script>
           <script type="module" src="/@rekindle/runtime.js"></script>
         </body>
       </html>
@@ -108,9 +85,10 @@ defmodule Rekindle.DevelopmentTest do
     @behaviour WebSock
 
     @impl WebSock
-    def init(state) do
+    def init(test) do
+      send(test, {:browser_socket_connected, System.monotonic_time(:millisecond)})
       send(self(), :close)
-      {:ok, state}
+      {:ok, test}
     end
 
     @impl WebSock
@@ -462,7 +440,22 @@ defmodule Rekindle.DevelopmentTest do
 
     browser_process = run_browser(browser, url, browser_directory)
 
-    assert_receive {:browser_reconnect_delays, [250, 500, 1000, 2000]}, 10_000
+    connection_times =
+      for _index <- 1..5 do
+        assert_receive {:browser_socket_connected, time}, 10_000
+        time
+      end
+
+    observed_delays =
+      connection_times
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.map(fn [previous, current] -> current - previous end)
+
+    for {observed, expected} <- Enum.zip(observed_delays, [250, 500, 1000, 2000]) do
+      assert observed >= expected - 25
+      assert observed < expected + 2_000
+    end
+
     assert Process.alive?(browser_process)
   end
 
