@@ -19,9 +19,8 @@ defmodule Rekindle.DevServer do
 
   alias Rekindle.Config
   alias Rekindle.Development
-  alias Rekindle.Development.State
+  alias Rekindle.Development.Socket
 
-  @entry "app.js"
   @prefix ["__rekindle"]
   @generation ~r/\A[0-9a-f]{32}\z/
   @browser_log_domain [:rekindle, :browser]
@@ -59,29 +58,23 @@ defmodule Rekindle.DevServer do
   end
 
   defp dispatch(
-         %Plug.Conn{method: "GET", path_info: @prefix ++ ["current"]} = conn,
+         %Plug.Conn{method: "GET", path_info: @prefix ++ ["socket"]} = conn,
          options
        ) do
     with {:ok, project} <- project(options) do
-      case State.build_error(project) do
-        {:ok, message} ->
-          json(conn, 409, %{"error" => message})
-
-        :none ->
-          case current(project) do
-            {:ok, selection} ->
-              json(conn, 200, %{
-                "generation" => selection.generation,
-                "entry" => path(selection.generation, selection.entry)
-              })
-
-            _error ->
-              unavailable(conn)
-          end
-      end
+      conn
+      |> WebSockAdapter.upgrade(Socket, project, timeout: :infinity)
+      |> halt()
     else
       _error -> unavailable(conn)
     end
+  rescue
+    WebSockAdapter.UpgradeError ->
+      conn
+      |> no_store()
+      |> put_resp_header("upgrade", "websocket")
+      |> send_resp(426, "WebSocket upgrade required")
+      |> halt()
   end
 
   defp dispatch(
@@ -163,18 +156,6 @@ defmodule Rekindle.DevServer do
     if is_exception(reason), do: Exception.message(reason), else: inspect(reason)
   end
 
-  defp current(project) do
-    selector_path = Path.join([project.root, ".rekindle", "dev", "web-current.json"])
-
-    with {:ok, contents} <- File.read(selector_path),
-         {:ok, %{"generation" => generation}} <- Jason.decode(contents),
-         true <- Regex.match?(@generation, generation),
-         true <-
-           File.regular?(Path.join([project.root, ".rekindle", "dev", "web", generation, @entry])) do
-      {:ok, %{generation: generation, entry: @entry}}
-    end
-  end
-
   defp safe_member?(member) when is_binary(member) and member != "" do
     root = "/generation"
     expanded = Path.expand(member, root)
@@ -185,8 +166,6 @@ defmodule Rekindle.DevServer do
   end
 
   defp safe_member?(_member), do: false
-
-  defp path(generation, entry), do: "/__rekindle/web/#{generation}/#{entry}"
 
   defp browser_console_message(%{
          "level" => browser_level,
@@ -263,14 +242,6 @@ defmodule Rekindle.DevServer do
   end
 
   defp no_store(conn), do: put_resp_header(conn, "cache-control", "no-store")
-
-  defp json(conn, status, body) do
-    conn
-    |> no_store()
-    |> put_resp_content_type("application/json")
-    |> send_resp(status, Jason.encode!(body))
-    |> halt()
-  end
 
   defp unavailable(conn) do
     conn

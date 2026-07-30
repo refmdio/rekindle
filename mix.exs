@@ -35,6 +35,7 @@ defmodule Rekindle.MixProject do
       {:mime, "~> 2.0"},
       {:muontrap, "~> 1.8"},
       {:plug, "~> 1.16"},
+      {:websock_adapter, "~> 0.6"},
       {:igniter, "~> 0.8", optional: true},
       {:phoenix, "~> 1.7", only: :test},
       {:reach, "~> 2.8", only: [:dev, :test], runtime: false},

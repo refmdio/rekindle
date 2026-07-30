@@ -1,4 +1,5 @@
-const currentUrl = new URL("./current", import.meta.url);
+const socketUrl = new URL("./socket", import.meta.url);
+socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
 const consoleUrl = new URL("./console", import.meta.url);
 const originalConsole = installConsoleForwarding();
 const statusView = ensureStatusView();
@@ -6,8 +7,11 @@ const errorView = ensureErrorView();
 let activeGeneration;
 let attemptedGeneration;
 let reportedError;
-let loading = false;
+let pendingState;
+let applying = false;
 let reloading = false;
+let reconnectDelay = 250;
+let reconnectTimer;
 
 function serializeConsoleValue(value) {
   if (value instanceof Error) {
@@ -147,43 +151,90 @@ async function graphicsReady() {
   /* __REKINDLE_GRAPHICS_CHECK__ */
 }
 
-async function update() {
-  if (loading || reloading) return;
-  loading = true;
+function receiveState(data) {
+  let state;
+
+  try {
+    state = JSON.parse(data);
+  } catch (_error) {
+    report(new Error("Rekindle received an invalid development message."), "protocol:json");
+    return;
+  }
+
+  if (!state || !["pending", "build_failed", "current_generation"].includes(state.type)) {
+    report(new Error("Rekindle received an unknown development message."), "protocol:type");
+    return;
+  }
+
+  pendingState = state;
+  void applyPendingState();
+}
+
+async function applyPendingState() {
+  if (applying || reloading) return;
+  applying = true;
+
+  try {
+    while (pendingState && !reloading) {
+      const state = pendingState;
+      pendingState = undefined;
+      await applyState(state);
+    }
+  } finally {
+    applying = false;
+  }
+}
+
+async function applyState(state) {
+  if (state.type === "pending") {
+    if (!activeGeneration) {
+      statusView.textContent = "Building Rust UI\u2026";
+      statusView.hidden = false;
+      clearError();
+    }
+    return;
+  }
+
+  if (state.type === "build_failed") {
+    if (typeof state.error !== "string") {
+      report(new Error("Rekindle received an invalid build failure."), "protocol:build");
+      return;
+    }
+    report(new Error(state.error), `build:${state.error}`, {forward: false});
+    return;
+  }
+
+  if (typeof state.generation !== "string" || typeof state.entry !== "string") {
+    report(new Error("Rekindle received an invalid generation."), "protocol:generation");
+    return;
+  }
+
   let candidateGeneration;
 
   try {
-    const response = await fetch(currentUrl, {cache: "no-store"});
-    if (response.status === 409) {
-      const failure = await response.json();
-      report(new Error(failure.error), `build:${failure.error}`, {forward: false});
-      return;
-    }
-    if (!response.ok) return;
-    const current = await response.json();
-    candidateGeneration = current.generation;
+    candidateGeneration = state.generation;
 
-    if (activeGeneration && activeGeneration !== current.generation) {
+    if (activeGeneration && activeGeneration !== state.generation) {
       reloading = true;
       window.dispatchEvent(new CustomEvent("rekindle:before-reload", {
-        detail: {from: activeGeneration, to: current.generation}
+        detail: {from: activeGeneration, to: state.generation}
       }));
       window.location.reload();
       return;
     }
 
     if (!activeGeneration) {
-      if (attemptedGeneration === current.generation) return;
-      attemptedGeneration = current.generation;
+      if (attemptedGeneration === state.generation) return;
+      attemptedGeneration = state.generation;
       statusView.textContent = "Starting Rust UI\u2026";
       statusView.hidden = false;
       await graphicsReady();
-      const module = await import(current.entry);
+      const module = await import(state.entry);
       if (typeof module.default !== "function") {
         throw new Error("The Web entry does not export a wasm-bindgen initializer.");
       }
       await module.default();
-      activeGeneration = current.generation;
+      activeGeneration = state.generation;
       window.dispatchEvent(new CustomEvent("rekindle:ready", {
         detail: {generation: activeGeneration}
       }));
@@ -195,10 +246,30 @@ async function update() {
       ? `startup:${candidateGeneration}:${String(error)}`
       : `runtime:${String(error)}`;
     report(error, key);
-  } finally {
-    loading = false;
   }
 }
 
-update();
-window.setInterval(update, 250);
+function connect() {
+  const socket = new WebSocket(socketUrl);
+
+  socket.addEventListener("open", () => {
+    reconnectDelay = 250;
+  });
+
+  socket.addEventListener("message", (event) => {
+    if (typeof event.data === "string") receiveState(event.data);
+  });
+
+  socket.addEventListener("close", () => {
+    if (!activeGeneration && !reloading) {
+      statusView.textContent = "Reconnecting to Rekindle\u2026";
+      statusView.hidden = false;
+    }
+
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+  });
+}
+
+connect();

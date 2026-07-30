@@ -5,6 +5,7 @@ defmodule Rekindle.DevelopmentTest do
 
   alias Rekindle.Build.Result
   alias Rekindle.Development.Builder
+  alias Rekindle.Development.Socket
   alias Rekindle.Desktop.Development, as: DesktopDevelopment
   alias Rekindle.DevServer
 
@@ -201,17 +202,36 @@ defmodule Rekindle.DevelopmentTest do
     refute_receive {Builder, :web, _result}, 50
   end
 
-  test "serves the selected Web generation and reports build errors", %{root: root} do
+  test "pushes Web development state and serves generation assets", %{root: root} do
+    {:ok, project} =
+      Rekindle.Config.load(:rekindle_development_test, project_root: root)
+
+    assert Rekindle.Development.State.web_status(project) == %{"type" => "pending"}
+
     generation = publish_web(root, "export default async function init() {}")
 
     options =
       DevServer.init(otp_app: :rekindle_development_test, project_root: root, watch: false)
 
-    current = request("/__rekindle/current", options)
+    upgrade =
+      Plug.Test.conn("GET", "http://example.test/__rekindle/socket")
+      |> Map.update!(:req_headers, &[{"host", "example.test"} | &1])
+      |> Plug.Conn.put_req_header("connection", "upgrade")
+      |> Plug.Conn.put_req_header("upgrade", "websocket")
+      |> Plug.Conn.put_req_header(
+        "sec-websocket-key",
+        Base.encode64(:crypto.strong_rand_bytes(16))
+      )
+      |> Plug.Conn.put_req_header("sec-websocket-version", "13")
+      |> DevServer.call(options)
 
-    assert current.status == 200
+    assert upgrade.state == :upgraded
+    assert upgrade.halted
 
-    assert Jason.decode!(current.resp_body) == %{
+    assert {:push, {:text, initial}, ^project} = Socket.init(project)
+
+    assert Jason.decode!(initial) == %{
+             "type" => "current_generation",
              "generation" => generation,
              "entry" => "/__rekindle/web/#{generation}/app.js"
            }
@@ -233,9 +253,14 @@ defmodule Rekindle.DevelopmentTest do
     assert runtime.resp_body =~ ~s(new CustomEvent("rekindle:before-reload")
     assert runtime.resp_body =~ ~s(new CustomEvent("rekindle:error")
     assert runtime.resp_body =~ "if (reportedError === identity) return;"
-    assert runtime.resp_body =~ "if (attemptedGeneration === current.generation) return;"
-    assert runtime.resp_body =~ "if (loading || reloading) return;"
+    assert runtime.resp_body =~ "if (attemptedGeneration === state.generation) return;"
+    assert runtime.resp_body =~ "const socket = new WebSocket(socketUrl);"
+    assert runtime.resp_body =~ ~s(socket.addEventListener("message")
+    assert runtime.resp_body =~ "reconnectDelay = Math.min(reconnectDelay * 2, 5000);"
+    assert runtime.resp_body =~ ~s(["pending", "build_failed", "current_generation"])
     assert runtime.resp_body =~ "reloading = true;"
+    refute runtime.resp_body =~ "setInterval"
+    refute runtime.resp_body =~ "./current"
 
     assert runtime.resp_body =~
              ~S|for (const level of ["log", "info", "warn", "error", "debug"])|
@@ -249,16 +274,25 @@ defmodule Rekindle.DevelopmentTest do
     assert runtime.resp_body =~ "{forward: false}"
     assert runtime.resp_body =~ "function report(error, key, {forward = true} = {})"
 
-    {:ok, project} =
-      Rekindle.Config.load(:rekindle_development_test, project_root: root)
-
     assert :ok = Rekindle.Development.State.put_error(project, "Rust compilation failed")
-    failure = request("/__rekindle/current", options)
-    assert failure.status == 409
-    assert Jason.decode!(failure.resp_body) == %{"error" => "Rust compilation failed"}
+    assert_receive {Rekindle.Development.State, :changed}
+
+    assert {:push, {:text, failure}, ^project} =
+             Socket.handle_info({Rekindle.Development.State, :changed}, project)
+
+    assert Jason.decode!(failure) == %{
+             "type" => "build_failed",
+             "error" => "Rust compilation failed"
+           }
 
     assert :ok = Rekindle.Development.State.clear_error(project)
-    assert request("/__rekindle/current", options).status == 200
+    assert_receive {Rekindle.Development.State, :changed}
+
+    assert {:push, {:text, recovered}, ^project} =
+             Socket.handle_info({Rekindle.Development.State, :changed}, project)
+
+    assert Jason.decode!(recovered)["type"] == "current_generation"
+    assert {:ok, ^project} = Socket.handle_in({"ignored", opcode: :text}, project)
   end
 
   test "forwards browser console messages to Logger levels", %{root: root} do
