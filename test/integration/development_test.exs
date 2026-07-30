@@ -752,7 +752,10 @@ defmodule Rekindle.DevelopmentTest do
            [
              "--headless=new",
              "--no-sandbox",
+             "--no-first-run",
+             "--no-default-browser-check",
              "--disable-dev-shm-usage",
+             "--disable-gpu",
              "--enable-webgl",
              "--enable-unsafe-swiftshader",
              "--ignore-gpu-blocklist",
