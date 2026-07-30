@@ -77,7 +77,7 @@ defmodule Rekindle.WebBuildTest do
     entry = File.read!(Path.join(namespace, "entry.js"))
     assert entry =~ "// Rekindle generation: #{first.metadata.generation}"
     assert entry =~ ~s(import init from "./web/#{first.metadata.generation}/app.js";)
-    refute entry =~ "/__rekindle"
+    refute entry =~ "/@rekindle"
     refute entry =~ "installConsoleForwarding"
 
     File.write!(tools.mode, "second")

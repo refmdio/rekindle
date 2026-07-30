@@ -57,7 +57,7 @@ defmodule Rekindle.Phoenix do
   @spec web_entry_path(module()) :: String.t()
   def web_entry_path(endpoint) when is_atom(endpoint) do
     if function_exported?(endpoint, :config, 1) and endpoint.config(:code_reloader) do
-      "/__rekindle/runtime.js"
+      "/@rekindle/runtime.js"
     else
       endpoint.static_path("/rekindle/entry.js")
     end

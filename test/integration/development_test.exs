@@ -20,7 +20,7 @@ defmodule Rekindle.DevelopmentTest do
     def init(options), do: options
 
     @impl Plug
-    def call(%Plug.Conn{path_info: ["__rekindle", "socket"]} = conn, %{socket: :close}) do
+    def call(%Plug.Conn{path_info: ["@rekindle", "socket"]} = conn, %{socket: :close}) do
       conn
       |> WebSockAdapter.upgrade(ClosingSocket, nil, timeout: :infinity)
       |> halt()
@@ -69,7 +69,7 @@ defmodule Rekindle.DevelopmentTest do
       <!doctype html>
       <html>
         <body>
-          <script type="module" src="/__rekindle/runtime.js"></script>
+          <script type="module" src="/@rekindle/runtime.js"></script>
         </body>
       </html>
       """
@@ -97,7 +97,7 @@ defmodule Rekindle.DevelopmentTest do
               return nativeSetTimeout(callback, delay, ...args);
             };
           </script>
-          <script type="module" src="/__rekindle/runtime.js"></script>
+          <script type="module" src="/@rekindle/runtime.js"></script>
         </body>
       </html>
       """
@@ -322,7 +322,7 @@ defmodule Rekindle.DevelopmentTest do
       DevServer.init(otp_app: :rekindle_development_test, project_root: root, watch: false)
 
     upgrade =
-      Plug.Test.conn("GET", "http://example.test/__rekindle/socket")
+      Plug.Test.conn("GET", "http://example.test/@rekindle/socket")
       |> Map.update!(:req_headers, &[{"host", "example.test"} | &1])
       |> Plug.Conn.put_req_header("connection", "upgrade")
       |> Plug.Conn.put_req_header("upgrade", "websocket")
@@ -341,18 +341,18 @@ defmodule Rekindle.DevelopmentTest do
     assert Jason.decode!(initial) == %{
              "type" => "current_generation",
              "generation" => generation,
-             "entry" => "/__rekindle/web/#{generation}/app.js"
+             "entry" => "/@rekindle/web/#{generation}/app.js"
            }
 
-    asset = request("/__rekindle/web/#{generation}/app.js", options)
+    asset = request("/@rekindle/web/#{generation}/app.js", options)
     assert asset.status == 200
     assert asset.resp_body == "export default async function init() {}"
 
-    wasm = request("/__rekindle/web/#{generation}/app_bg.wasm", options)
+    wasm = request("/@rekindle/web/#{generation}/app_bg.wasm", options)
     assert wasm.status == 200
     assert Plug.Conn.get_resp_header(wasm, "content-type") == ["application/wasm"]
 
-    runtime = request("/__rekindle/runtime.js", options)
+    runtime = request("/@rekindle/runtime.js", options)
     assert runtime.status == 200
     assert runtime.resp_body =~ "navigator.gpu"
     assert runtime.resp_body =~ "await module.default();"
@@ -476,7 +476,7 @@ defmodule Rekindle.DevelopmentTest do
         capture_log([level: logger_level], fn ->
           response =
             post(
-              "/__rekindle/console",
+              "/@rekindle/console",
               %{
                 "level" => browser_level,
                 "source" => "console",
@@ -491,7 +491,7 @@ defmodule Rekindle.DevelopmentTest do
       assert log =~ "[browser console] message {\"answer\":42}"
     end
 
-    assert post("/__rekindle/console", %{"level" => "trace"}, options).status == 400
+    assert post("/@rekindle/console", %{"level" => "trace"}, options).status == 400
   end
 
   test "marks browser logs with their Logger domain", %{root: root} do
@@ -501,7 +501,7 @@ defmodule Rekindle.DevelopmentTest do
     log =
       capture_log([metadata: [:domain]], fn ->
         assert post(
-                 "/__rekindle/console",
+                 "/@rekindle/console",
                  %{"level" => "info", "source" => "console", "args" => ["round trip"]},
                  options
                ).status == 204

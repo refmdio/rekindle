@@ -17,6 +17,6 @@ defmodule Rekindle.PhoenixTest do
 
   test "selects the development runtime when code reloading is enabled" do
     assert Rekindle.Phoenix.web_entry_path(DevelopmentEndpoint) ==
-             "/__rekindle/runtime.js"
+             "/@rekindle/runtime.js"
   end
 end

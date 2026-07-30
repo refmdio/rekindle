@@ -21,7 +21,7 @@ defmodule Rekindle.DevServer do
   alias Rekindle.Development
   alias Rekindle.Development.Socket
 
-  @prefix ["__rekindle"]
+  @prefix ["@rekindle"]
   @generation ~r/\A[0-9a-f]{32}\z/
   @browser_log_domain [:rekindle, :browser]
   @browser_log_event_domain [:elixir | @browser_log_domain]

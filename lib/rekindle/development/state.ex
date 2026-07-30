@@ -69,7 +69,7 @@ defmodule Rekindle.Development.State do
             %{
               "type" => "current_generation",
               "generation" => generation,
-              "entry" => "/__rekindle/web/#{generation}/#{@entry}"
+              "entry" => "/@rekindle/web/#{generation}/#{@entry}"
             }
 
           :none ->
