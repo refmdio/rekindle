@@ -404,7 +404,7 @@ defmodule Rekindle.DevelopmentTest do
 
     on_exit(fn -> File.rm_rf(browser_directory) end)
 
-    browser_process = run_browser(browser, url, browser_directory)
+    {browser_id, browser_process} = run_browser(browser, url, browser_directory)
 
     assert_receive :browser_document_requested, 10_000
     assert_receive {:browser_loaded, "first"}, 10_000
@@ -426,6 +426,8 @@ defmodule Rekindle.DevelopmentTest do
     assert_receive :browser_document_requested, 10_000
     assert_receive {:browser_loaded, "second"}, 10_000
     assert Process.alive?(browser_process)
+    assert :ok = stop_supervised(browser_id)
+    refute Process.alive?(browser_process)
   end
 
   test "backs off repeated WebSocket connections that close before state arrives", %{root: root} do
@@ -438,7 +440,7 @@ defmodule Rekindle.DevelopmentTest do
 
     on_exit(fn -> File.rm_rf(browser_directory) end)
 
-    browser_process = run_browser(browser, url, browser_directory)
+    {browser_id, browser_process} = run_browser(browser, url, browser_directory)
 
     connection_times =
       for _index <- 1..5 do
@@ -457,6 +459,8 @@ defmodule Rekindle.DevelopmentTest do
     end
 
     assert Process.alive?(browser_process)
+    assert :ok = stop_supervised(browser_id)
+    refute Process.alive?(browser_process)
   end
 
   test "forwards browser console messages to Logger levels", %{root: root} do
@@ -737,6 +741,8 @@ defmodule Rekindle.DevelopmentTest do
   end
 
   defp run_browser(browser, url, browser_directory) do
+    id = {:chromium, System.unique_integer([:positive, :monotonic])}
+
     child =
       Supervisor.child_spec(
         {MuonTrap.Daemon,
@@ -759,10 +765,11 @@ defmodule Rekindle.DevelopmentTest do
            ],
            [stderr_to_stdout: true]
          ]},
-        id: {:chromium, System.unique_integer([:positive, :monotonic])}
+        id: id,
+        restart: :temporary
       )
 
-    start_supervised!(child)
+    {id, start_supervised!(child)}
   end
 
   defp web_generations(root) do
